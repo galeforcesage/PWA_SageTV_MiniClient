@@ -1,0 +1,27 @@
+{
+  "name": "SageTV MiniClient",
+  "short_name": "SageTV",
+  "description": "SageTV MiniClient for the web - control your SageTV server from any browser",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "icons": [
+    {
+      "src": "icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["entertainment", "utilities"],
+  "lang": "en",
+  "dir": "ltr"
+}

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#111111">
+  <meta name="description" content="SageTV MiniClient for the web">
+  <title>SageTV MiniClient</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.svg">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <!-- Connection Screen (Server Selection) -->
+  <div id="connect-screen" class="screen active">
+    <!-- Left sidebar -->
+    <div class="server-sidebar">
+      <h2 class="sidebar-heading">Servers</h2>
+      <a href="#" id="btn-configure" class="sidebar-link">Configure</a>
+    </div>
+
+    <!-- Main area with server grid -->
+    <div class="server-main">
+      <!-- SageTV logo top-right -->
+      <div class="server-logo">
+        <span class="logo-sage">Sage</span><span class="logo-tv">TV</span>
+      </div>
+
+      <!-- Server cards grid (populated by JS from cookies) -->
+      <div id="server-grid" class="server-grid"></div>
+
+      <!-- Action buttons row -->
+      <div class="server-actions">
+        <button id="btn-settings" class="action-btn">Settings</button>
+        <button id="btn-add-server" class="action-btn">Add Server</button>
+      </div>
+
+      <!-- Status / error messages -->
+      <div id="connect-error" class="error-msg" hidden></div>
+      <div id="connect-status" class="status-msg" hidden></div>
+    </div>
+
+    <!-- Add Server Dialog -->
+    <div id="add-server-dialog" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <div class="form-group">
+          <label for="dlg-server-name">Server Name</label>
+          <input type="text" id="dlg-server-name" value="My Server" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="dlg-server-host">Server Address or Locator ID</label>
+          <input type="text" id="dlg-server-host" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="modal-buttons modal-buttons-center">
+          <button id="dlg-save" class="action-btn">ADD</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Dialog -->
+    <div id="settings-dialog" class="modal-overlay" hidden>
+      <div class="modal-card modal-card-wide">
+        <h2>Settings</h2>
+        <div class="settings-scroll">
+
+          <!-- Connection -->
+          <div class="settings-section">
+            <div class="form-group">
+              <label for="set-bridge-url">Bridge Server URL</label>
+              <input type="text" id="set-bridge-url" placeholder="ws://192.168.1.100:8099" autocomplete="off" spellcheck="false">
+              <small>WebSocket bridge (leave blank for same host:8099)</small>
+            </div>
+            <div class="form-group">
+              <label for="set-resolution">Resolution</label>
+              <select id="set-resolution">
+                <option value="1280x720">1280×720</option>
+                <option value="1920x1080">1920×1080</option>
+                <option value="960x540">960×540</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Streaming Mode -->
+          <div class="settings-item" data-key="streaming_mode">
+            <div class="settings-item-text">
+              <strong>Streaming Mode</strong>
+              <span class="settings-desc">Fixed is preferred and offers HD transcoding and remuxing. Dynamic adapts to bandwidth but only in SD</span>
+            </div>
+            <select id="set-streaming-mode" class="settings-select">
+              <option value="fixed">Fixed</option>
+              <option value="dynamic">Dynamic</option>
+              <option value="pull">Pull</option>
+            </select>
+          </div>
+
+          <!-- Fixed Transcoding Settings -->
+          <details class="settings-group">
+            <summary>Fixed Transcoding Settings<br><small>Change the setting SageTV server will use to transcode content when using fixed streaming</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Transcoding Preference</strong></div>
+              <select id="set-transcode-pref" class="settings-select">
+                <option value="needed">When Needed</option>
+                <option value="always">Always</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Container Format</strong></div>
+              <select id="set-transcode-format" class="settings-select">
+                <option value="matroska">Matroska (MKV)</option>
+                <option value="dvd">DVD (MPEG-PS)</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Video Bitrate (kbps)</strong></div>
+              <select id="set-transcode-vbitrate" class="settings-select">
+                <option value="1000">1000</option>
+                <option value="2000">2000</option>
+                <option value="3000">3000</option>
+                <option value="4000">4000</option>
+                <option value="5000">5000</option>
+                <option value="6000">6000</option>
+                <option value="8000">8000</option>
+                <option value="10000">10000</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Video Resolution</strong></div>
+              <select id="set-transcode-vres" class="settings-select">
+                <option value="SOURCE">Use Source</option>
+                <option value="CIF">CIF (352×240)</option>
+                <option value="D1">D1 (720×480)</option>
+                <option value="720">720p (1280×720)</option>
+                <option value="1080">1080p (1920×1080)</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Framerate</strong></div>
+              <select id="set-transcode-fps" class="settings-select">
+                <option value="SOURCE">Use Source</option>
+                <option value="24">24 fps</option>
+                <option value="29.97">29.97 fps</option>
+                <option value="59.94">59.94 fps</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Audio Codec</strong></div>
+              <select id="set-transcode-acodec" class="settings-select">
+                <option value="ac3">AC3</option>
+                <option value="mp2">MP2</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Audio Bitrate (kbps)</strong></div>
+              <select id="set-transcode-abitrate" class="settings-select">
+                <option value="96">96</option>
+                <option value="112">112</option>
+                <option value="128">128</option>
+                <option value="160">160</option>
+                <option value="192">192</option>
+              </select>
+            </div>
+          </details>
+
+          <!-- Fixed Remuxing Settings -->
+          <details class="settings-group">
+            <summary>Fixed Remuxing Settings<br><small>Change the setting SageTV server will use to remux content when using fixed streaming</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Remuxing Preference</strong></div>
+              <select id="set-remux-pref" class="settings-select">
+                <option value="needed">When Needed</option>
+                <option value="always">Always</option>
+                <option value="off">Off</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Container Format</strong></div>
+              <select id="set-remux-format" class="settings-select">
+                <option value="matroska">Matroska (MKV)</option>
+                <option value="dvd">DVD (MPEG-PS)</option>
+                <option value="mpegts">MPEG-TS</option>
+              </select>
+            </div>
+          </details>
+
+          <!-- Codec and Container Settings -->
+          <details class="settings-group">
+            <summary>Codec and Container Settings<br><small>Change how the application reports to SageTV which containers and codecs it supports</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Extra Video Codecs</strong><br><small>Comma-separated list of extra video codecs to report</small></div>
+              <input type="text" id="set-extra-vcodecs" class="settings-input" placeholder="e.g. HEVC,VP9">
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Extra Audio Codecs</strong><br><small>Comma-separated list of extra audio codecs to report</small></div>
+              <input type="text" id="set-extra-acodecs" class="settings-input" placeholder="e.g. OPUS,FLAC">
+            </div>
+          </details>
+
+          <!-- About -->
+          <details class="settings-group">
+            <summary>About</summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Version</strong></div>
+              <span class="settings-value">PWA 1.0</span>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Client ID</strong></div>
+              <span id="set-client-id" class="settings-value"></span>
+            </div>
+          </details>
+
+        </div>
+        <div class="modal-buttons">
+          <button id="set-cancel" class="action-btn">Cancel</button>
+          <button id="set-save" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Install Banner (iPad Safari) -->
+    <div id="install-banner" class="install-banner" hidden>
+      <span>Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong></span>
+      <button id="btn-dismiss-install" class="btn-icon" aria-label="Dismiss">✕</button>
+    </div>
+  </div>
+
+  <!-- Client Screen -->
+  <div id="client-screen" class="screen">
+    <div id="client-container" class="client-container">
+      <canvas id="sage-canvas" tabindex="0"></canvas>
+      <input id="sage-text-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             aria-label="Text input" enterkeyhint="done"
+             style="position:absolute;left:-9999px;top:50%;width:1px;height:1px;opacity:0;pointer-events:none;">
+      <video id="sage-video" playsinline webkit-playsinline muted></video>
+    </div>
+
+    <!-- On-screen navigation overlay (for touch devices) -->
+    <div id="touch-nav" class="touch-nav" hidden>
+      <button data-cmd="4" class="nav-btn nav-up" aria-label="Up">▲</button>
+      <button data-cmd="2" class="nav-btn nav-left" aria-label="Left">◄</button>
+      <button data-cmd="20" class="nav-btn nav-select" aria-label="Select">●</button>
+      <button data-cmd="3" class="nav-btn nav-right" aria-label="Right">►</button>
+      <button data-cmd="5" class="nav-btn nav-down" aria-label="Down">▼</button>
+      <button data-cmd="75" class="nav-btn nav-back" aria-label="Back">⮌</button>
+      <button data-cmd="28" class="nav-btn nav-home" aria-label="Home">⌂</button>
+    </div>
+
+    <!-- Toolbar overlay (shows on hover/tap at top) -->
+    <div id="toolbar" class="toolbar">
+      <button id="btn-disconnect" class="btn-icon" title="Disconnect">✕</button>
+      <span id="toolbar-title" class="toolbar-title">SageTV</span>
+      <button id="btn-fullscreen" class="btn-icon" title="Full Screen">⛶</button>
+      <button id="btn-touch-nav" class="btn-icon" title="Toggle Touch Nav">☰</button>
+    </div>
+
+    <!-- Play button overlay (for autoplay-blocked media) -->
+    <div id="play-overlay" class="play-overlay" hidden>
+      <button id="btn-play" class="btn-play" aria-label="Play">▶</button>
+    </div>
+
+    <!-- Reconnecting banner -->
+    <div id="reconnect-banner" class="reconnect-banner" hidden>
+      <span class="spinner"></span> <span id="reconnect-text">Reconnecting...</span>
+    </div>
+  </div>
+
+  <!-- Debug overlay -->
+  <div id="debug-overlay" class="debug-overlay" hidden>
+    <pre id="debug-log"></pre>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

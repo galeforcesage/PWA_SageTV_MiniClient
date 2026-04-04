@@ -1,0 +1,18 @@
+{
+  "name": "sagetv-miniclient-pwa",
+  "version": "1.0.0",
+  "description": "SageTV MiniClient PWA - HTML5/WebSocket client for SageTV",
+  "type": "module",
+  "scripts": {
+    "bridge": "node bridge/ws-bridge.js",
+    "dev": "node bridge/ws-bridge.js --serve-static",
+    "start": "node bridge/ws-bridge.js --serve-static"
+  },
+  "dependencies": {
+    "node-forge": "^1.3.1",
+    "pako": "^2.1.0",
+    "ws": "^8.16.0"
+  },
+  "license": "Apache-2.0",
+  "private": true
+}
