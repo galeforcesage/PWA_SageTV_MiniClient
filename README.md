@@ -31,7 +31,8 @@ Browser (PWA)          WebSocket Bridge (Node.js)         SageTV Server
 ### Install & Run
 
 ```bash
-cd pwa
+git clone https://github.com/galeforcesage/PWA_SageTV_Miniclient.git
+cd PWA_SageTV_Miniclient
 npm install
 npm run dev -- --sage-host YOUR_SAGETV_IP
 ```
@@ -50,7 +51,6 @@ Open `http://localhost:8099/` in your browser.
 ## Project Structure
 
 ```
-pwa/
 ├── bridge/
 │   └── ws-bridge.js          # WebSocket-to-TCP bridge
 ├── public/
