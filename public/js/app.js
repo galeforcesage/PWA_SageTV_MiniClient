@@ -213,13 +213,26 @@ function setupEventHandlers() {
     if (session.connected) session.disconnect();
   });
 
-  // Keyboard shortcut: Shift+F12 = debug overlay
+  // Keyboard shortcut: Escape = disconnect, Shift+F12 = debug overlay
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      handleDisconnect();
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'F12' && e.shiftKey) {
       debugOverlay.hidden = !debugOverlay.hidden;
       e.preventDefault();
     }
   });
+
+  // Triple-tap on canvas to show toolbar (touch devices like iPad)
+  let tapCount = 0, tapTimer = null;
+  clientScreen.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 3) {
+      handleDisconnect();
+    }
+  }, { passive: true });
 
   // Close modals on overlay click
   for (const overlay of [addServerDialog, settingsDialog]) {

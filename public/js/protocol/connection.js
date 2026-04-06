@@ -116,7 +116,17 @@ export class MiniClientConnection extends EventTarget {
     this.mediaPlayer = options.mediaPlayer;
     this.width = options.width || 1280;
     this.height = options.height || 720;
+    this._originalWidth = this.width;
+    this._originalHeight = this.height;
     this.settings = options.settings || null;
+
+    // Load cached auth from settings if available (survives fresh connections)
+    this._cachedAuthBlock = (this.settings
+      ? this.settings.get(`auth_block_${this.serverHost}`, '') || null
+      : null);
+    if (this._cachedAuthBlock) {
+      console.log(`[Connection] Loaded cached auth from settings (${this._cachedAuthBlock.length} chars)`);
+    }
 
     // Connection state
     this.gfxSocket = null;
@@ -163,6 +173,8 @@ export class MiniClientConnection extends EventTarget {
     this._reconnectAttempts = 0;
     this._maxReconnectAttempts = 5;
     this._reconnectTimer = null;
+    this._shortSessionCount = 0; // consecutive sessions < 30s
+    this._verboseGfxLog = false; // log every GFX cmd for diagnostics
 
     // Keepalive (ping the WebSocket bridge)
     this._keepaliveInterval = null;
@@ -197,6 +209,7 @@ export class MiniClientConnection extends EventTarget {
     this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
     this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
     this.gfxSocket.onerror = (e) => this._onDisconnect('GFX socket error');
+    this._socketClosedWarned = false;
 
     // Process any leftover bytes that arrived with the handshake response
     if (this.gfxBuffer.length > 0) {
@@ -328,6 +341,10 @@ export class MiniClientConnection extends EventTarget {
         console.warn(`[GFX] inflate returned 0 from ${compressed.length} bytes`);
         return;
       }
+      // Verbose: log data flow after first frame for debugging
+      if (this._verboseGfxLog && this.firstFrameStarted) {
+        console.log(`[GFX] Data: ${compressed.length}B compressed → ${bytes.length}B (buf=${this.gfxBuffer.length}B)`);
+      }
     }
 
     this.gfxBuffer.append(bytes);
@@ -420,6 +437,12 @@ export class MiniClientConnection extends EventTarget {
    * Dispatch a server message to the appropriate handler.
    */
   _handleServerMessage(msgType, data) {
+    // Verbose: log every server message for debugging
+    if (this._verboseGfxLog) {
+      const typeName = {0:'GET_PROPERTY',1:'SET_PROPERTY',2:'FS_CMD',16:'DRAWING_CMD'}[msgType]||`TYPE${msgType}`;
+      const cmdByte = (msgType === ServerMsgType.DRAWING_CMD && data.length > 0) ? (GFXCMD_NAMES[data[0]&0xFF]||`CMD${data[0]&0xFF}`) : '';
+      console.log(`[Msg] ${typeName}${cmdByte?' '+cmdByte:''} (${data.length}B)`);
+    }
     switch (msgType) {
       case ServerMsgType.GET_PROPERTY:
         this._handleGetProperty(data);
@@ -483,6 +506,28 @@ export class MiniClientConnection extends EventTarget {
       return;
     }
 
+    // SET_CACHED_AUTH: encrypted auth block that needs to be decrypted and stored
+    if (name === 'SET_CACHED_AUTH') {
+      const encryptedBytes = reader.readBytes(valueLen);
+      console.log(`[Connection] SET_PROPERTY: ${name} = [${valueLen} encrypted bytes]`);
+      try {
+        const decrypted = this.crypto.decryptBlock(new Uint8Array(encryptedBytes));
+        const authBlock = new TextDecoder('iso-8859-1').decode(decrypted);
+        console.log(`[Connection] Cached auth block stored (${authBlock.length} chars)`);
+        // Store in settings keyed by server host
+        if (this.settings) {
+          this.settings.set(`auth_block_${this.serverHost}`, authBlock);
+        }
+        // Also keep in memory for this session
+        this._cachedAuthBlock = authBlock;
+      } catch (err) {
+        console.warn('[Connection] Failed to decrypt SET_CACHED_AUTH:', err.message);
+      }
+      const encryptThisReply = this.crypto.isEnabled();
+      this._sendSetPropertyReply(0, encryptThisReply);
+      return;
+    }
+
     const value = reader.readLatin1String(valueLen);
     console.log(`[Connection] SET_PROPERTY: ${name} = ${value}`);
     this.serverProperties[name] = value;
@@ -515,8 +560,11 @@ export class MiniClientConnection extends EventTarget {
         return ClientProperty.GFX_COLORKEY;
       case 'GFX_SCALING':
         return ClientProperty.GFX_SCALING;
-      case 'GFX_RESOLUTION':
-        return `${this.width}x${this.height}`;
+      case 'GFX_RESOLUTION': {
+        const res = `${this.width}x${this.height}`;
+        console.log(`[Connection] Reporting GFX_RESOLUTION = ${res}`);
+        return res;
+      }
       case 'GFX_SUPPORTED_RESOLUTIONS':
         return `${this.width}x${this.height}`;
       case 'GFX_OFFLINE_IMAGE_CACHE':
@@ -569,6 +617,20 @@ export class MiniClientConnection extends EventTarget {
         return 'TRUE';
       case 'AUTH_CACHE':
         return 'TRUE';
+      case 'GET_CACHED_AUTH': {
+        // Return cached auth block only if encryption is active
+        if (this._encryptEvents && this.crypto.isEnabled()) {
+          const cached = this._cachedAuthBlock ||
+            (this.settings ? this.settings.get(`auth_block_${this.serverHost}`, '') : '');
+          if (cached) {
+            this._cachedAuthBlock = cached; // Persist in memory for reconnect checks
+            console.log(`[Connection] Returning cached auth (${cached.length} chars)`);
+            return cached;
+          }
+        }
+        console.log('[Connection] No cached auth available');
+        return '';
+      }
       case 'DISPLAY_OVERSCAN':
         return '0;0;1.0;1.0';
       case 'FIRMWARE_VERSION':
@@ -628,6 +690,8 @@ export class MiniClientConnection extends EventTarget {
         console.log(`[Connection] Advanced image caching: ${this._advancedImageCaching}`);
         return 0;
       case 'RECONNECT_SUPPORTED':
+        this.reconnectAllowed = (value === 'TRUE' || value === 'true');
+        console.log(`[Connection] Reconnect allowed: ${this.reconnectAllowed}`);
         return 0;
       case 'MENU_HINT': {
         // Parse "menuName:X,popupName:Y,hasTextInput:true"
@@ -689,9 +753,13 @@ export class MiniClientConnection extends EventTarget {
   _handleResolutionChange(value) {
     const match = value.match(/(\d+)x(\d+)/);
     if (match) {
-      this.width = parseInt(match[1], 10);
-      this.height = parseInt(match[2], 10);
+      const newW = parseInt(match[1], 10);
+      const newH = parseInt(match[2], 10);
+      console.log(`[Connection] GFX_RESOLUTION changed: ${this.width}x${this.height} → ${newW}x${newH}`);
+      this.width = newW;
+      this.height = newH;
       this.renderer.setSize(this.width, this.height);
+      this.dispatchEvent(new CustomEvent('resolutionchange', { detail: { width: newW, height: newH } }));
     }
   }
 
@@ -706,8 +774,9 @@ export class MiniClientConnection extends EventTarget {
     const valBytes = new Uint8Array(value.length);
     for (let i = 0; i < value.length; i++) valBytes[i] = value.charCodeAt(i) & 0xFF;
 
-    const encVal = this.crypto.isEnabled() ? this.crypto.encrypt(valBytes) : valBytes;
-    const origLen = valBytes.length; // header uses original length
+    // Only encrypt when data is non-empty — server skips decryption when dataLen == 0
+    const origLen = valBytes.length;
+    const encVal = (origLen > 0 && this.crypto.isEnabled()) ? this.crypto.encrypt(valBytes) : valBytes;
     const frame = new Uint8Array(16 + encVal.length);
     const dv = new DataView(frame.buffer);
 
@@ -729,8 +798,9 @@ export class MiniClientConnection extends EventTarget {
    * Same frame format as _sendPropertyResponse but takes Uint8Array directly.
    */
   _sendPropertyResponseBytes(rawBytes) {
-    const encVal = this.crypto.isEnabled() ? this.crypto.encrypt(rawBytes) : rawBytes;
-    const origLen = rawBytes.length; // header uses original length
+    // Only encrypt when data is non-empty — server skips decryption when dataLen == 0
+    const origLen = rawBytes.length;
+    const encVal = (origLen > 0 && this.crypto.isEnabled()) ? this.crypto.encrypt(rawBytes) : rawBytes;
     const frame = new Uint8Array(16 + encVal.length);
     const dv = new DataView(frame.buffer);
 
@@ -758,7 +828,10 @@ export class MiniClientConnection extends EventTarget {
     new DataView(retbuf.buffer).setInt32(0, retval, false);
 
     const shouldEncrypt = encrypt !== undefined ? encrypt : this.crypto.isEnabled();
-    const encRet = shouldEncrypt ? this.crypto.encrypt(retbuf) : retbuf;
+    // Use forceEncrypt() to bypass the enabled check — the handler may have already
+    // called crypto.disable() (e.g. CRYPTO_EVENTS_ENABLE=FALSE), but the reply must
+    // still be encrypted based on the snapshot taken before the handler ran.
+    const encRet = shouldEncrypt ? this.crypto.forceEncrypt(retbuf) : retbuf;
 
     // Header length field is always 4 (original data length), matching Java client behavior.
     // When encrypted, actual payload is larger due to PKCS5 padding.
@@ -823,21 +896,38 @@ export class MiniClientConnection extends EventTarget {
     const cmdName = GFXCMD_NAMES[cmd] || `CMD${cmd}`;
     if (this._frameCmdSummary) {
       this._frameCmdSummary[cmdName] = (this._frameCmdSummary[cmdName] || 0) + 1;
+      // Verbose logging: log every command within the frame for debugging
+      if (this._verboseGfxLog) {
+        console.log(`[GFX] ${cmdName} len=${len}`);
+      }
+    } else {
+      // Log commands outside STARTFRAME..FLIPBUFFER (pre-frame setup)
+      if (cmd !== GFXCMD.STARTFRAME) {
+        if (!this._preFrameLogged) this._preFrameLogged = new Set();
+        if (!this._preFrameLogged.has(cmdName)) {
+          this._preFrameLogged.add(cmdName);
+          console.log(`[Connection] Pre-frame cmd: ${cmdName} (len=${len})`);
+        }
+      }
     }
 
     switch (cmd) {
       case GFXCMD.INIT:
         hasret[0] = 1;
+        this.handleCount = 1; // Reset for fresh server session
         this.renderer.init();
         return 1;
 
       case GFXCMD.DEINIT:
+        console.log('[Connection] Server sent GFXCMD_DEINIT — disabling reconnect');
+        this.reconnectAllowed = false;
         this.renderer.deinit();
         break;
 
       case GFXCMD.STARTFRAME:
         this.renderer.startFrame();
         this._frameCmdSummary = {};
+        this.firstFrameStarted = true;
         if (!this._firstFrameFired) {
           this._firstFrameFired = true;
           this.dispatchEvent(new CustomEvent('firstframe'));
@@ -869,12 +959,20 @@ export class MiniClientConnection extends EventTarget {
             // Log DRAWTEXTURED summary for frame 1
             if (this._dtLog) {
               const dtParts = Object.entries(this._dtLog)
-                .map(([k, v]) => `${k}(n=${v.count},blend=${v.blend},a=${v.ba},src=${v.sw}x${v.sh})`)
+                .map(([k, v]) => `${k}(n=${v.count},blend=${v.blend},a=${v.ba},src=${v.sw}x${v.sh},dst=${v.firstDx},${v.firstDy},${v.firstDw}x${v.firstDh},surf=${v.surface})`)
                 .join(', ');
               console.log(`[Frame1] DrawTex: ${dtParts}`);
             }
           }
           this._frameCmdSummary = null;
+        }
+        // Turn off verbose logging after 3 frames
+        if (this._verboseGfxLog) {
+          this._verboseFrameCount = (this._verboseFrameCount || 0) + 1;
+          if (this._verboseFrameCount >= 10) {
+            this._verboseGfxLog = false;
+            console.log('[Connection] Verbose GFX logging disabled after 3 frames');
+          }
         }
         return 0;
       }
@@ -990,16 +1088,29 @@ export class MiniClientConnection extends EventTarget {
           const handle = readInt(16);
           const dx = readInt(0), dy = readInt(4), dw = readInt(8), dh = readInt(12);
           const sx = readInt(20), sy = readInt(24), sw = readInt(28), sh = readInt(32);
-          const blend = readInt(36);
+          let blend = readInt(36);
           // One-shot: log first frame's DRAWTEXTURED calls
           if (!this._firstFrameLogged) {
             const ba = (blend >>> 24) & 0xFF;
             if (!this._dtLog) this._dtLog = {};
             const key = `h${handle}`;
             if (!this._dtLog[key]) {
-              this._dtLog[key] = { count: 0, blend: `0x${(blend >>> 0).toString(16)}`, ba, sw, sh };
+              this._dtLog[key] = { count: 0, blend: `0x${(blend >>> 0).toString(16)}`, ba, sw, sh, firstDx: dx, firstDy: dy, firstDw: dw, firstDh: dh, surface: this.renderer.targetSurface };
             }
             this._dtLog[key].count++;
+            // Detect server rendering resolution from the first full-screen background draw
+            if (!this._serverResDetected && dx === 0 && dy === 0 && dw > 0 && dh > 0) {
+              const absDw = Math.abs(dw);
+              const absDh = Math.abs(dh);
+              if (absDw !== this.width || absDh !== this.height) {
+                console.log(`[Connection] Server renders at ${absDw}x${absDh}, canvas was ${this.width}x${this.height} — resizing`);
+                this.width = absDw;
+                this.height = absDh;
+                this.renderer.setSize(absDw, absDh);
+                this.dispatchEvent(new CustomEvent('resolutionchange', { detail: { width: absDw, height: absDh } }));
+              }
+              this._serverResDetected = true;
+            }
           }
           this.renderer.drawTexture(dx, dy, dw, dh, handle, sx, sy, sw, sh, blend);
         }
@@ -1023,7 +1134,9 @@ export class MiniClientConnection extends EventTarget {
           const imgHandle = this.handleCount++;
           const width = readInt(0);
           const height = readInt(4);
-          if (this.renderer.canCacheImage(width, height)) {
+          const canCache = this.renderer.canCacheImage(width, height);
+          console.log(`[GFX] LOADIMAGE: ${width}x${height} canCache=${canCache} handle=${imgHandle} cachePixels=${this.renderer._currentCachePixels}/${this.renderer._maxCachePixels}`);
+          if (canCache) {
             this.renderer.loadImage(imgHandle, width, height);
             hasret[0] = 1;
             return imgHandle;
@@ -1069,6 +1182,7 @@ export class MiniClientConnection extends EventTarget {
         if (len >= 8) {
           const handle = readInt(0);
           const dataLen = readInt(4);
+          console.log(`[GFX] LOADIMAGECOMPRESSED: handle=${handle} dataLen=${dataLen} advCache=${this._advancedImageCaching}`);
           if (len >= 8 + dataLen) {
             const imgData = cmddata.subarray(12, 12 + dataLen);
             let rvHandle;
@@ -1092,6 +1206,7 @@ export class MiniClientConnection extends EventTarget {
         if (len >= 8) {
           const width = readInt(0);
           const height = readInt(4);
+          console.log(`[GFX] PREPIMAGE: ${width}x${height} canCache=${this.renderer.canCacheImage(width, height)}`);
           let imgHandle = 1;
           if (!this.renderer.canCacheImage(width, height)) {
             imgHandle = 0;
@@ -1125,6 +1240,7 @@ export class MiniClientConnection extends EventTarget {
           const imgHandle = readInt(0);
           const width = readInt(4);
           const height = readInt(8);
+          console.log(`[GFX] PREPIMAGETARGETED: handle=${imgHandle} ${width}x${height}`);
           if (len >= 16) {
             const strLen = readInt(12);
             if (strLen > 1) {
@@ -1165,6 +1281,7 @@ export class MiniClientConnection extends EventTarget {
           const imgHandle = this.handleCount++;
           const width = readInt(0);
           const height = readInt(4);
+          console.log(`[Connection] CREATESURFACE: handle=${imgHandle}, ${width}x${height}`);
           this.renderer.createSurface(imgHandle, width, height);
           hasret[0] = 1;
           return imgHandle;
@@ -1175,6 +1292,7 @@ export class MiniClientConnection extends EventTarget {
       case GFXCMD.SETTARGETSURFACE: {
         if (len === 4) {
           const handle = readInt(0);
+          console.log(`[Connection] SETTARGETSURFACE: handle=${handle}`);
           this.renderer.setTargetSurface(handle);
         }
         break;
@@ -1285,7 +1403,7 @@ export class MiniClientConnection extends EventTarget {
         break;
 
       default:
-        console.warn(`[Connection] Unknown GFX command: ${cmd} (${GFXCMD_NAMES[cmd] || '?'})`);
+        console.warn(`[Connection] Unknown GFX command: ${cmd} (${GFXCMD_NAMES[cmd] || '?'}) len=${len} rawBytes=[${Array.from(cmddata.subarray(0, Math.min(20, cmddata.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ')}]`);
         return -1;
     }
     return 0;
@@ -1320,7 +1438,20 @@ export class MiniClientConnection extends EventTarget {
    */
   _sendGfx(data) {
     if (this.gfxSocket && this.gfxSocket.readyState === WebSocket.OPEN) {
+      if (this._verboseGfxLog && data.length >= 16) {
+        const type = data[0];
+        const origLen = ((data[1]&0xFF)<<16)|((data[2]&0xFF)<<8)|(data[3]&0xFF);
+        const dv = new DataView(data.buffer || new Uint8Array(data).buffer, data.byteOffset || 0);
+        const replyNum = dv.getInt32(8, false);
+        const typeName = {0:'GET_PROP',1:'SET_PROP',0x10:'DRAW_CMD'}[type]||`T${type}`;
+        console.log(`[Reply] ${typeName} reply#${replyNum} origLen=${origLen} wireLen=${data.length-16} enc=${this.crypto.isEnabled()}`);
+      }
       this.gfxSocket.send(data);
+    } else {
+      if (!this._socketClosedWarned) {
+        this._socketClosedWarned = true;
+        console.warn(`[Reply] Socket not open, dropping replies (first: ${data.length}B). Suppressing further warnings.`);
+      }
     }
   }
 
@@ -1344,6 +1475,7 @@ export class MiniClientConnection extends EventTarget {
       this.mediaBuffer.consume(4);
       const payload = len > 0 ? this.mediaBuffer.consume(len) : new Uint8Array(0);
 
+      if (cmd !== 23 && cmd !== 17 && cmd !== 0) console.log(`[Media] cmd=${cmd} len=${len}`);
       this._handleMediaCommand(cmd, len, payload);
     }
   }
@@ -1367,128 +1499,137 @@ export class MiniClientConnection extends EventTarget {
     if (!this.mediaPlayer) return;
 
     switch (cmd) {
-      case 0: { // CYCLEALL: server polls media state
-        const time = this.mediaPlayer.getMediaTimeMillis();
-        this._sendMediaReturn(time & 0x7FFFFFFF);
+      case 0: // MEDIACMD_INIT
+        console.log('[Media] INIT');
+        this._sendMediaReturn(1);
         break;
-      }
 
-      case 16: { // OPENURL
+      case 1: // MEDIACMD_DEINIT
+        console.log('[Media] DEINIT');
+        this.mediaPlayer.stop();
+        this._sendMediaReturn(1);
+        break;
+
+      case 16: { // MEDIACMD_OPENURL
         if (len >= 4) {
-          const majorHint = data[0];
-          const minorHint = data[1];
-          const strLen = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
-          const url = new TextDecoder('iso-8859-1').decode(data.subarray(4, 4 + strLen));
-          const isPush = url.startsWith('push:');
-          console.log(`[Media] OPENURL: ${url} (push=${isPush})`);
-          this.mediaPlayer.load(majorHint, minorHint, '', url, this.serverHost, false, 0);
+          const strLen = readInt(0);
+          let urlString = '';
+          if (strLen > 1) {
+            urlString = new TextDecoder('iso-8859-1').decode(data.subarray(4, 4 + strLen - 1));
+          }
+          const isPush = urlString.startsWith('push:');
+          console.log(`[Media] OPENURL: ${urlString} (push=${isPush})`);
+          this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
         }
+        this._sendMediaReturn(1);
         break;
       }
 
-      case 17: { // GETMEDIATIME
+      case 17: { // MEDIACMD_GETMEDIATIME
         const time = this.mediaPlayer.getMediaTimeMillis();
         this._sendMediaReturn(time & 0x7FFFFFFF);
         break;
       }
 
-      case 18: { // SETMUTE
+      case 18: // MEDIACMD_SETMUTE
         if (len >= 4) {
           this.mediaPlayer.setMute(readInt(0) !== 0);
         }
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(1);
         break;
-      }
 
-      case 19: // STOP
+      case 19: // MEDIACMD_STOP
         this.mediaPlayer.stop();
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(1);
         break;
 
-      case 20: // PAUSE
+      case 20: // MEDIACMD_PAUSE
         this.mediaPlayer.pause();
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(1);
         break;
 
-      case 21: // PLAY
+      case 21: // MEDIACMD_PLAY
         this.mediaPlayer.play();
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(1);
         break;
 
-      case 22: // FLUSH
+      case 22: // MEDIACMD_FLUSH
         this.mediaPlayer.flush();
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(1);
         break;
 
-      case 23: { // PUSHBUFFER
+      case 23: { // MEDIACMD_PUSHBUFFER
         if (len >= 8) {
           const bufSize = readInt(0);
           const flags = readInt(4);
-          if (len >= 8 + bufSize) {
-            const bufData = data.subarray(8, 8 + bufSize);
+          const bufDataOffset = 8;
+          if (bufSize > 0 && len >= bufDataOffset + bufSize) {
+            const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
             this.mediaPlayer.pushData(bufData, flags);
           }
+          if (flags === 0x80) {
+            this.mediaPlayer.setServerEOS();
+          }
         }
-        // Return buffer space remaining
         const bufLeft = this.mediaPlayer.getBufferLeft();
         this._sendMediaReturn(bufLeft);
         break;
       }
 
-      case 24: { // GETVIDEORECT
+      case 24: { // MEDIACMD_GETVIDEORECT
         const dim = this.mediaPlayer.getVideoDimensions();
         this._sendMediaReturn((dim.width << 16) | dim.height);
         break;
       }
 
-      case 25: { // SETVIDEORECT
-        if (len >= 16) {
+      case 25: { // MEDIACMD_SETVIDEORECT
+        if (len >= 32) {
           const srcRect = { x: readInt(0), y: readInt(4), width: readInt(8), height: readInt(12) };
-          const destRect = len >= 32 ?
-            { x: readInt(16), y: readInt(20), width: readInt(24), height: readInt(28) } : srcRect;
+          const destRect = { x: readInt(16), y: readInt(20), width: readInt(24), height: readInt(28) };
           this.mediaPlayer.setVideoRectangles(srcRect, destRect);
         }
         this._sendMediaReturn(0);
         break;
       }
 
-      case 26: { // GETVOLUME
+      case 26: { // MEDIACMD_GETVOLUME
         const vol = this.mediaPlayer.getVolume();
         this._sendMediaReturn(vol);
         break;
       }
 
-      case 27: { // SETVOLUME
+      case 27: { // MEDIACMD_SETVOLUME
         if (len >= 4) {
           const vol = readInt(0);
           this.mediaPlayer.setVolume(vol / 65535);
         }
-        this._sendMediaReturn(0);
+        this._sendMediaReturn(Math.round(this.mediaPlayer.getVolume()));
         break;
       }
 
-      case 28: // FRAMESTEP
+      case 28: // MEDIACMD_FRAMESTEP
         this.mediaPlayer.frameStep();
         this._sendMediaReturn(0);
         break;
 
-      case 29: { // SEEK
+      case 29: { // MEDIACMD_SEEK — no reply per Java client
         if (len >= 8) {
           const timeMS = readLong(0);
+          console.log(`[Media] SEEK: ${timeMS}ms`);
           this.mediaPlayer.seek(timeMS);
         }
-        this._sendMediaReturn(0);
+        // Java returns 0 bytes (no reply)
         break;
       }
 
-      case 36: { // DVD_STREAMS (audio/subtitle selection)
-        if (len >= 4) {
-          const streamType = data[0]; // 0=audio, 1=subtitle
-          const streamIdx = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+      case 36: { // MEDIACMD_DVD_STREAMS
+        if (len >= 8) {
+          const streamType = readInt(0); // 0=audio, 1=subtitle
+          const streamPos = readInt(4);
           if (streamType === 0) {
-            this.mediaPlayer.setAudioTrack(streamIdx);
+            this.mediaPlayer.setAudioTrack(streamPos);
           } else {
-            this.mediaPlayer.setSubtitleTrack(streamIdx);
+            this.mediaPlayer.setSubtitleTrack(streamPos);
           }
         }
         this._sendMediaReturn(0);
@@ -1518,6 +1659,8 @@ export class MiniClientConnection extends EventTarget {
   _sendMedia(data) {
     if (this.mediaSocket && this.mediaSocket.readyState === WebSocket.OPEN) {
       this.mediaSocket.send(data.buffer || data);
+    } else {
+      console.warn(`[Media] Cannot send ${data.length}B — media socket not open`);
     }
   }
 
@@ -1688,14 +1831,37 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _onDisconnect(reason) {
-    const elapsed = this._connectTime ? `${Date.now() - this._connectTime}ms after connect` : '?';
-    console.warn(`[Connection] Disconnected: ${reason} (${elapsed}, cmds=${this._gfxCmdCount||0}, props=${this._propCount||0})`);
-    this.alive = false;
+    const elapsed = this._connectTime ? Date.now() - this._connectTime : 0;
+    const elapsedStr = this._connectTime ? `${elapsed}ms after connect` : '?';
+    console.warn(`[Connection] Disconnected: ${reason} (${elapsedStr}, cmds=${this._gfxCmdCount||0}, props=${this._propCount||0})`);
     this._stopKeepalive();
-    this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason } }));
 
-    if (this.reconnectAllowed && this.firstFrameStarted) {
-      this._scheduleReconnect();
+    // Track consecutive short-lived sessions to prevent infinite reconnect loops
+    if (elapsed < 30000) {
+      this._shortSessionCount++;
+    } else {
+      this._shortSessionCount = 0;
+    }
+
+    // After login: server sends CRYPTO_EVENTS_ENABLE=FALSE then closes socket.
+    // Reconnect using type 5 (session resume by MAC) — matching Java client.
+    // Java condition: reconnectAllowed && alive && firstFrameStarted && !encryptEvents
+    // (no cached auth requirement — type 5 resumes existing server session)
+    if (this.reconnectAllowed && this.firstFrameStarted && !this._encryptEvents) {
+      if (this._shortSessionCount >= 10) {
+        console.warn(`[Connection] Stopping reconnect — ${this._shortSessionCount} consecutive short sessions`);
+        this.alive = false;
+        this._shortSessionCount = 0;
+        this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'Server keeps disconnecting after auth' } }));
+      } else {
+        console.log(`[Connection] Post-login disconnect (short#${this._shortSessionCount}) — attempting type-5 session resume`);
+        this.alive = false;
+        this._attemptSessionReconnect();
+      }
+    } else {
+      this.alive = false;
+      console.log(`[Connection] No reconnect: allowed=${this.reconnectAllowed}, frames=${this.firstFrameStarted}, encrypted=${this._encryptEvents}, hasAuth=${!!this._cachedAuthBlock}`);
+      this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason } }));
     }
   }
 
@@ -1719,33 +1885,201 @@ export class MiniClientConnection extends EventTarget {
       detail: { attempt: this._reconnectAttempts, delay }
     }));
 
-    this._reconnectTimer = setTimeout(() => this._attemptReconnect(), delay);
+    this._reconnectTimer = setTimeout(() => this._attemptFullReconnect(), delay);
   }
 
-  async _attemptReconnect() {
-    console.log('[Connection] Attempting reconnect...');
+  /**
+   * Attempt type-5 session-resume reconnect (matching Java client behavior).
+   * Type 5 tells the server to resume the existing session by MAC address.
+   * No property renegotiation needed — server continues sending GFX commands.
+   * Falls back to type 0 (fresh) with cached auth if type 5 fails.
+   */
+  async _attemptSessionReconnect() {
+    console.log('[Connection] Attempting type-5 session resume reconnect...');
     try {
+      // Close existing sockets cleanly
+      if (this.gfxSocket) {
+        this.gfxSocket.onclose = null;
+        this.gfxSocket.onerror = null;
+        try { this.gfxSocket.close(); } catch (e) { /* ignore */ }
+      }
+      if (this.mediaSocket) {
+        this.mediaSocket.onclose = null;
+        this.mediaSocket.onerror = null;
+        try { this.mediaSocket.close(); } catch (e) { /* ignore */ }
+      }
+
+      // Reset stream state but keep images and crypto state
+      this.gfxBuffer.clear();
+      this.mediaBuffer.clear();
+      this.zipMode = false;
+      this.inflater.reset();
+      this._encryptEvents = false;
+      this.crypto.disable();
+      this._pendingImageDecode = null;
+      this._preFrameLogged = null;
+      this.replyCount = 0;
+      this._gfxCmdCount = 0;
+      this._propCount = 0;
+      this._connectTime = Date.now();
+
       const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
-      this.gfxSocket = new WebSocket(`${this.bridgeUrl}/reconnect${params}`);
+
+      // Open GFX WebSocket with type 5 (session resume by MAC)
+      this.gfxSocket = new WebSocket(`${this.bridgeUrl}/gfx${params}`);
       this.gfxSocket.binaryType = 'arraybuffer';
       await this._waitForOpen(this.gfxSocket, 'GFX-Reconnect');
-      await this._handshake(this.gfxSocket, ConnectionType.GFX_RECONNECT, this.gfxBuffer);
 
-      this.alive = true;
-      this._reconnectAttempts = 0;
-      this.gfxBuffer.clear();
+      try {
+        await this._handshake(this.gfxSocket, ConnectionType.GFX_RECONNECT, this.gfxBuffer);
+        console.log('[Connection] Type-5 session resume accepted');
+      } catch (handshakeErr) {
+        console.warn(`[Connection] Type-5 rejected: ${handshakeErr.message}`);
+        // Close the failed socket
+        try { this.gfxSocket.close(); } catch (e) { /* ignore */ }
+        this.gfxSocket = null;
+
+        // Fall back to type-0 fresh reconnect if we have cached auth
+        if (this._cachedAuthBlock) {
+          console.log('[Connection] Falling back to type-0 fresh reconnect with cached auth');
+          return this._attemptFullReconnect();
+        } else {
+          throw new Error('Type-5 rejected and no cached auth for type-0 fallback');
+        }
+      }
 
       this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
-      this.gfxSocket.onclose = () => this._onDisconnect('GFX reconnect socket closed');
-      this.gfxSocket.onerror = () => this._onDisconnect('GFX reconnect socket error');
+      this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
+      this.gfxSocket.onerror = () => this._onDisconnect('GFX socket error');
+      this._socketClosedWarned = false;
+
+      // Process any leftover handshake bytes
+      if (this.gfxBuffer.length > 0) {
+        this._processGfxBuffer();
+      }
+
+      // Open fresh Media WebSocket (type 1)
+      this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
+      this.mediaSocket.binaryType = 'arraybuffer';
+      await this._waitForOpen(this.mediaSocket, 'Media-Reconnect');
+      await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
+
+      this.alive = true;
+      this.reconnectAllowed = true;
+      this._reconnectAttempts = 0;
+
+      this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
+      this.mediaSocket.onclose = () => console.warn('[Connection] Media socket closed');
+      this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
       this.dispatchEvent(new CustomEvent('reconnected'));
-      console.log('[Connection] Reconnected successfully');
+      console.log('[Connection] Session resume successful — server will continue rendering');
     } catch (err) {
-      console.error('[Connection] Reconnect failed:', err);
+      console.error('[Connection] Session reconnect failed:', err);
       this._scheduleReconnect();
     }
+  }
+
+  /**
+   * Perform a full fresh reconnect (type 0) using cached auth to skip login.
+   * Used as fallback when type-5 session resume is rejected by the server.
+   */
+  async _attemptFullReconnect() {
+    console.log('[Connection] Attempting full reconnect (fresh connection with cached auth)...');
+    try {
+      // Close existing sockets cleanly
+      if (this.gfxSocket) {
+        this.gfxSocket.onclose = null;
+        this.gfxSocket.onerror = null;
+        try { this.gfxSocket.close(); } catch (e) { /* ignore */ }
+      }
+      if (this.mediaSocket) {
+        this.mediaSocket.onclose = null;
+        this.mediaSocket.onerror = null;
+        try { this.mediaSocket.close(); } catch (e) { /* ignore */ }
+      }
+
+      // Reset all connection state for fresh start
+      this.gfxBuffer.clear();
+      this.mediaBuffer.clear();
+      this.zipMode = false;
+      this.inflater.reset();
+      this._encryptEvents = false;
+      this.crypto.disable();
+      this._serverResDetected = false;
+      this._firstFrameLogged = false;
+      this._firstFrameFired = false;
+      this.firstFrameStarted = false;
+      this._frameCmdSummary = null;
+      this._dtLog = null;
+      this._pendingImageDecode = null;
+      this._preFrameLogged = null;
+      this.replyCount = 0;
+      // Do NOT reset handleCount — with ADVANCED_IMAGE_CACHING, the server
+      // assumes client images persist. Keeping handleCount avoids collisions
+      // between old cached images and new LOADIMAGE assignments.
+      this._gfxCmdCount = 0;
+      this._propCount = 0;
+      this._connectTime = Date.now();
+
+      // Do NOT call renderer.deinit() — with ADVANCED_IMAGE_CACHING=TRUE,
+      // the server won't re-send images it already sent in the previous session.
+      // Keeping images in memory lets the server reference them by handle.
+      console.log(`[Connection] Reconnect: keeping ${this.renderer.images.size} cached images, handleCount=${this.handleCount}`);
+
+      // Restore original canvas dimensions (not auto-detected 720x480)
+      this.width = this._originalWidth;
+      this.height = this._originalHeight;
+      this.renderer.setSize(this.width, this.height);
+
+      const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
+
+      // Open fresh GFX WebSocket (type 0, not type 5)
+      this.gfxSocket = new WebSocket(`${this.bridgeUrl}/gfx${params}`);
+      this.gfxSocket.binaryType = 'arraybuffer';
+      await this._waitForOpen(this.gfxSocket, 'GFX-Reconnect');
+      await this._handshake(this.gfxSocket, ConnectionType.GFX, this.gfxBuffer);
+
+      this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
+      this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
+      this.gfxSocket.onerror = () => this._onDisconnect('GFX socket error');
+      this._socketClosedWarned = false;
+
+      // Process any leftover handshake bytes
+      if (this.gfxBuffer.length > 0) {
+        this._processGfxBuffer();
+      }
+
+      // Open fresh Media WebSocket
+      this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
+      this.mediaSocket.binaryType = 'arraybuffer';
+      await this._waitForOpen(this.mediaSocket, 'Media-Reconnect');
+      await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
+
+      this.alive = true;
+      this.reconnectAllowed = true;
+      this._reconnectAttempts = 0;
+
+      this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
+      this.mediaSocket.onclose = () => console.warn('[Connection] Media socket closed');
+      this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
+
+      this._startKeepalive();
+      this.dispatchEvent(new CustomEvent('reconnected'));
+      console.log('[Connection] Full reconnect successful — server will negotiate properties');
+
+      // The server will now send GET_PROPERTY/SET_PROPERTY again.
+      // GET_CACHED_AUTH will return our stored auth block → auto-login.
+    } catch (err) {
+      console.error('[Connection] Full reconnect failed:', err);
+      this._scheduleReconnect();
+    }
+  }
+
+  async _attemptReconnect() {
+    // Delegate to full reconnect
+    return this._attemptFullReconnect();
   }
 
   /**

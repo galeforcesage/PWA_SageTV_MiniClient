@@ -1,16 +1,14 @@
 /**
  * SageTV MiniClient Media Player
  *
- * Implements MiniPlayerPlugin interface using HTML5 <video> + MSE + hls.js.
+ * Implements MiniPlayerPlugin interface using HTML5 <video> + MSE + mux.js.
  *
  * Modes:
  * - PULL mode: Client fetches media via HTTP URL → <video src="..."> or hls.js
- * - PUSH mode: Server pushes MPEG-TS data → MediaSource Extensions (MSE)
+ * - PUSH mode: Server pushes MPEG-TS data → mux.js transmuxes to fMP4 → MSE
  *
- * Safari/iPad strategy:
- * - hls.js handles HLS streams (uses MSE internally on Safari 17+)
- * - For PUSH mode, uses ManagedMediaSource on Safari when ManagedMediaSource is available
- * - Falls back to native HLS for older iPads
+ * Browsers cannot play raw MPEG-TS via MediaSource Extensions (MSE).
+ * MSE requires fragmented MP4 (fMP4). We use mux.js to transmux on-the-fly.
  *
  * Port of: core/src/main/java/sagex/miniclient/MiniPlayerPlugin.java
  */
@@ -40,6 +38,10 @@ export class MediaPlayer extends EventTarget {
     this._pushBusy = false;
     this._pushBufferSize = DESIRED_VIDEO_PREBUFFER;
     this._totalPushed = 0;
+
+    // mux.js transmuxer for MPEG-TS → fMP4
+    this._transmuxer = null;
+    this._initSegmentSent = false;
 
     // hls.js instance for HLS streams
     this._hls = null;
@@ -187,13 +189,22 @@ export class MediaPlayer extends EventTarget {
 
   /**
    * PUSH mode: server sends MPEG-TS data via pushData().
-   * Set up MediaSource Extensions.
+   * Uses mux.js to transmux MPEG-TS → fMP4, then feeds to MSE SourceBuffer.
    */
   async _loadPushMode(url, hostname) {
     this.pushMode = true;
+    this._initSegmentSent = false;
     console.log(`[MediaPlayer] PUSH mode: ${url}`);
 
-    // Use ManagedMediaSource for Safari, MediaSource elsewhere
+    // Load mux.js
+    await this._loadScript('https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js');
+    if (!window.muxjs) {
+      console.error('[MediaPlayer] mux.js not available');
+      this.state = PlayerState.STOPPED;
+      return;
+    }
+
+    // Set up MediaSource
     const MSClass = window.ManagedMediaSource || window.MediaSource;
     if (!MSClass) {
       console.error('[MediaPlayer] MediaSource API not available');
@@ -203,7 +214,6 @@ export class MediaPlayer extends EventTarget {
 
     this.mediaSource = new MSClass();
 
-    // For ManagedMediaSource (Safari), use the streaming attribute
     if (window.ManagedMediaSource) {
       this.video.disableRemotePlayback = true;
       this.video.srcObject = this.mediaSource;
@@ -215,53 +225,54 @@ export class MediaPlayer extends EventTarget {
       this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
     });
 
-    // Determine MIME type from push URL
-    // push: URLs are typically MPEG2-TS
-    const mimeType = this._detectPushMimeType(url);
-    console.log(`[MediaPlayer] Push MIME: ${mimeType}`);
-
+    // Create fMP4 source buffer - this is what we'll feed transmuxed data into
+    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
     if (!MSClass.isTypeSupported(mimeType)) {
-      // Try alternative MIME types
-      const alternatives = [
-        'video/mp2t',
-        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-        'video/mp4',
-      ];
-      let supported = null;
-      for (const alt of alternatives) {
-        if (MSClass.isTypeSupported(alt)) {
-          supported = alt;
-          break;
-        }
-      }
-      if (!supported) {
-        console.error('[MediaPlayer] No supported MIME type for push mode');
+      // Try without audio codec
+      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
+      if (MSClass.isTypeSupported(videoOnly)) {
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
+      } else {
+        console.error('[MediaPlayer] No supported fMP4 MIME type');
         this.state = PlayerState.STOPPED;
         return;
       }
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(supported);
     } else {
       this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
     }
-
     this.sourceBuffer.mode = 'sequence';
     this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
     this.sourceBuffer.addEventListener('error', (e) => {
       console.error('[MediaPlayer] SourceBuffer error:', e);
     });
 
-    this.state = PlayerState.LOADED;
-  }
+    // Create mux.js transmuxer
+    this._transmuxer = new window.muxjs.mp4.Transmuxer({
+      keepOriginalTimestamps: true,
+      remux: true,
+    });
 
-  _detectPushMimeType(url) {
-    if (url.includes('MPEG2-TS') || url.includes('mpegts')) {
-      return 'video/mp2t';
-    }
-    if (url.includes('MPEG2-PS')) {
-      return 'video/mpeg';
-    }
-    // Default to MPEG-TS
-    return 'video/mp2t';
+    // When transmuxer produces fMP4 data, queue it for the SourceBuffer
+    this._transmuxer.on('data', (segment) => {
+      // First segment includes init segment (ftyp + moov boxes)
+      if (!this._initSegmentSent) {
+        const initSegment = new Uint8Array(segment.initSegment.byteLength + segment.data.byteLength);
+        initSegment.set(segment.initSegment, 0);
+        initSegment.set(segment.data, segment.initSegment.byteLength);
+        this._pushQueue.push(initSegment);
+        this._initSegmentSent = true;
+        console.log(`[MediaPlayer] Init segment: ${segment.initSegment.byteLength}B + data: ${segment.data.byteLength}B`);
+      } else {
+        this._pushQueue.push(new Uint8Array(segment.data));
+      }
+    });
+
+    this._transmuxer.on('done', () => {
+      this._processPushQueue();
+    });
+
+    this.state = PlayerState.LOADED;
+    console.log('[MediaPlayer] Push mode ready with mux.js transmuxer');
   }
 
   /**
@@ -303,11 +314,18 @@ export class MediaPlayer extends EventTarget {
   stop() {
     this.video.pause();
     this.video.removeAttribute('src');
+    this.video.removeAttribute('srcObject');
 
     if (this._hls) {
       this._hls.destroy();
       this._hls = null;
     }
+
+    if (this._transmuxer) {
+      this._transmuxer.dispose();
+      this._transmuxer = null;
+    }
+    this._initSegmentSent = false;
 
     if (this.mediaSource) {
       try {
@@ -321,6 +339,8 @@ export class MediaPlayer extends EventTarget {
 
     this._pushQueue = [];
     this._pushBusy = false;
+    this._totalPushed = 0;
+    this._appendErrorLogged = false;
     this.state = PlayerState.STOPPED;
   }
 
@@ -380,14 +400,30 @@ export class MediaPlayer extends EventTarget {
    * @param {number} flags - Push flags
    */
   pushData(data, flags) {
-    if (!this.pushMode || !this.sourceBuffer) return;
-    this._pushQueue.push(data.slice()); // Clone to avoid detached buffer issues
+    if (!this.pushMode || this.state === PlayerState.STOPPED) return;
+    if (!this.mediaSource || this.mediaSource.readyState !== 'open') return;
     this._totalPushed += data.length;
-    this._processPushQueue();
+
+    if (this._transmuxer) {
+      // Feed MPEG-TS to transmuxer → it emits fMP4 via 'data' event
+      this._transmuxer.push(data);
+      this._transmuxer.flush();
+    }
+
+    // Auto-play after receiving enough data
+    if (this._totalPushed > 256 * 1024 && this.state === PlayerState.LOADED) {
+      console.log(`[MediaPlayer] Auto-playing after ${(this._totalPushed / 1024).toFixed(0)}KB pushed`);
+      this.play();
+    }
   }
 
   _processPushQueue() {
     if (!this.sourceBuffer || this.sourceBuffer.updating || this._pushQueue.length === 0) {
+      return;
+    }
+    // Guard against detached SourceBuffer
+    if (!this.mediaSource || this.mediaSource.readyState !== 'open') {
+      this._pushQueue = [];
       return;
     }
 
@@ -416,7 +452,12 @@ export class MediaPlayer extends EventTarget {
         this._evictBuffer();
         this._pushQueue.unshift(combined);
       } else {
-        console.error('[MediaPlayer] appendBuffer error:', e);
+        // SourceBuffer removed or other fatal error — stop trying
+        if (!this._appendErrorLogged) {
+          console.error('[MediaPlayer] appendBuffer error (suppressing further):', e.message);
+          this._appendErrorLogged = true;
+        }
+        this._pushQueue = [];
       }
     }
   }
@@ -441,6 +482,31 @@ export class MediaPlayer extends EventTarget {
    */
   flush() {
     this._pushQueue = [];
+
+    // Reset the transmuxer for fresh data after seek
+    if (this._transmuxer) {
+      this._transmuxer.dispose();
+      this._transmuxer = new window.muxjs.mp4.Transmuxer({
+        keepOriginalTimestamps: true,
+        remux: true,
+      });
+      this._initSegmentSent = false;
+      this._transmuxer.on('data', (segment) => {
+        if (!this._initSegmentSent) {
+          const initSegment = new Uint8Array(segment.initSegment.byteLength + segment.data.byteLength);
+          initSegment.set(segment.initSegment, 0);
+          initSegment.set(segment.data, segment.initSegment.byteLength);
+          this._pushQueue.push(initSegment);
+          this._initSegmentSent = true;
+        } else {
+          this._pushQueue.push(new Uint8Array(segment.data));
+        }
+      });
+      this._transmuxer.on('done', () => {
+        this._processPushQueue();
+      });
+    }
+
     if (this.sourceBuffer && !this.sourceBuffer.updating) {
       try {
         const buffered = this.sourceBuffer.buffered;

@@ -68,6 +68,17 @@ export class CanvasRenderer {
   // ── Lifecycle ─────────────────────────────────────────────
 
   init() {
+    // Clear all cached images, surfaces, and pixel counter — matching Java's
+    // GFXCMD2.INIT which resets all state for a fresh rendering session.
+    // Without this, stale images from previous connections consume the cache
+    // budget and cause new LOADIMAGE calls to return 0 (can't cache).
+    this.images.forEach((img) => {
+      if (img.bitmap && img.bitmap.close) img.bitmap.close();
+    });
+    this.images.clear();
+    this.surfaces.clear();
+    this._currentCachePixels = 0;
+
     this.ctx.fillStyle = '#000';
     this.ctx.fillRect(0, 0, this.width, this.height);
     this.backCtx.fillStyle = '#000';
@@ -321,9 +332,9 @@ export class CanvasRenderer {
 
   /**
    * Load a single line of image data (raw ARGB pixels).
-   * Server sends ARGB in big-endian (A, R, G, B). Canvas putImageData expects
-   * non-premultiplied RGBA. With GFX_BLENDMODE=POSTMULTIPLY the server sends
-   * straight alpha, so a direct byte reorder is correct.
+   * Server sends big-endian ARGB. With PREMULTIPLY mode, RGB values are
+   * pre-multiplied by alpha. Canvas putImageData expects straight (non-premultiplied)
+   * RGBA, so we must un-premultiply: R = R_pm * 255 / A, etc.
    */
   loadImageLine(handle, line, len, data) {
     const img = this.images.get(handle);
@@ -333,31 +344,48 @@ export class CanvasRenderer {
     const imageData = img.ctx.createImageData(pixelCount, 1);
     const pixels = imageData.data;
 
-    // Convert ARGB → RGBA (byte reorder)
+    // Convert premultiplied ARGB → straight RGBA
     for (let i = 0; i < pixelCount; i++) {
       const srcOff = i * 4;
       const dstOff = i * 4;
-      pixels[dstOff]     = data[srcOff + 1]; // R
-      pixels[dstOff + 1] = data[srcOff + 2]; // G
-      pixels[dstOff + 2] = data[srcOff + 3]; // B
-      pixels[dstOff + 3] = data[srcOff];     // A
+      const a = data[srcOff];     // A (premultiplied alpha)
+      const rPm = data[srcOff + 1]; // R (premultiplied)
+      const gPm = data[srcOff + 2]; // G (premultiplied)
+      const bPm = data[srcOff + 3]; // B (premultiplied)
+      if (a === 0) {
+        pixels[dstOff] = 0;
+        pixels[dstOff + 1] = 0;
+        pixels[dstOff + 2] = 0;
+        pixels[dstOff + 3] = 0;
+      } else if (a === 255) {
+        pixels[dstOff] = rPm;
+        pixels[dstOff + 1] = gPm;
+        pixels[dstOff + 2] = bPm;
+        pixels[dstOff + 3] = 255;
+      } else {
+        // Un-premultiply: straight = premultiplied * 255 / alpha
+        pixels[dstOff] = Math.min(255, (rPm * 255 / a) | 0);
+        pixels[dstOff + 1] = Math.min(255, (gPm * 255 / a) | 0);
+        pixels[dstOff + 2] = Math.min(255, (bPm * 255 / a) | 0);
+        pixels[dstOff + 3] = a;
+      }
     }
 
     img.ctx.putImageData(imageData, 0, line);
     img.loaded = true;
 
-    // One-shot diagnostic: dump first non-zero pixel from first line of each image
-    if (line === 0 && !img._diagnosed) {
-      img._diagnosed = true;
+    // One-shot diagnostic: dump first non-zero pixel from line 0 and a mid-line
+    if (!img._diagnosed && (line === 0 || line === Math.floor(img.height / 2))) {
+      if (line > 0) img._diagnosed = true; // diagnose after mid-line
       let sample = 'all-zero';
-      for (let i = 0; i < pixelCount && i < 200; i++) {
+      for (let i = 0; i < pixelCount && i < 400; i++) {
         const a = data[i * 4], r = data[i * 4 + 1], g = data[i * 4 + 2], b = data[i * 4 + 3];
         if (a !== 0 || r !== 0 || g !== 0 || b !== 0) {
           sample = `px${i}:ARGB(${a},${r},${g},${b})`;
           break;
         }
       }
-      console.log(`[Renderer] Image h${handle} line0: ${sample} (${width}x${height})`);
+      console.log(`[Renderer] Image h${handle} line${line}: ${sample} (${img.width}x${img.height})`);
     }
   }
 
@@ -430,25 +458,60 @@ export class CanvasRenderer {
   drawTexture(x, y, width, height, handle, srcx, srcy, srcw, srch, blend) {
     const ctx = this.activeCtx;
     const img = this.images.get(handle) || this.surfaces.get(handle);
-    if (!img) {
-      // Fallback: draw transparent rect
-      return;
-    }
+    if (!img) return;
 
     const source = img.canvas || img.bitmap;
     if (!source) return;
 
+    if (srcw === 0 || srch === 0 || width === 0 || height === 0) return;
+
+    // Java: negative height = opaque overwrite (GL_ONE, GL_ZERO)
+    // Width/height are always used as absolute values for drawing
+    const opaqueOverwrite = height < 0;
+    const absW = Math.abs(width);
+    const absH = Math.abs(height);
+
+    const blendA = ((blend >>> 24) & 0xFF) / 255;
+    const blendR = (blend >>> 16) & 0xFF;
+    const blendG = (blend >>> 8) & 0xFF;
+    const blendB = blend & 0xFF;
+
     ctx.save();
 
-    // Apply blend/alpha
-    const alpha = ((blend >>> 24) & 0xFF) / 255;
-    ctx.globalAlpha = alpha;
-    ctx.globalCompositeOperation = 'source-over';
+    if (opaqueOverwrite) {
+      // Equivalent to GL_ONE, GL_ZERO: source replaces destination completely
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1.0;
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = blendA;
+    }
 
     try {
-      // Ensure source dimensions are valid
-      if (srcw > 0 && srch > 0 && width > 0 && height > 0) {
-        ctx.drawImage(source, srcx, srcy, srcw, srch, x, y, width, height);
+      if (blendR === 255 && blendG === 255 && blendB === 255) {
+        // No color tint — just apply alpha and draw
+        ctx.drawImage(source, srcx, srcy, srcw, srch, x, y, absW, absH);
+      } else {
+        // Apply color tint via temporary canvas
+        if (!this._tintCanvas || this._tintCanvas.width < absW || this._tintCanvas.height < absH) {
+          this._tintCanvas = document.createElement('canvas');
+          this._tintCanvas.width = Math.max(absW, 256);
+          this._tintCanvas.height = Math.max(absH, 256);
+          this._tintCtx = this._tintCanvas.getContext('2d');
+        }
+        const tc = this._tintCtx;
+        tc.globalCompositeOperation = 'source-over';
+        tc.clearRect(0, 0, absW, absH);
+        tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
+        // Multiply RGB with tint color
+        tc.globalCompositeOperation = 'multiply';
+        tc.fillStyle = `rgb(${blendR},${blendG},${blendB})`;
+        tc.fillRect(0, 0, absW, absH);
+        // Restore original alpha (multiply destroys it for translucent pixels)
+        tc.globalCompositeOperation = 'destination-in';
+        tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
+        // Draw tinted result onto target
+        ctx.drawImage(this._tintCanvas, 0, 0, absW, absH, x, y, absW, absH);
       }
     } catch (e) {
       // Image may not be loaded yet

@@ -306,12 +306,36 @@ export class CryptoManager {
   }
 
   /**
+   * Encrypt unconditionally using the symmetric cipher (ignoring enabled state).
+   * Used when replying to CRYPTO_EVENTS_ENABLE=FALSE: the reply must be encrypted
+   * because the server still has encryption enabled, even though our handler already
+   * called disable().
+   * @param {Uint8Array} data
+   * @returns {Uint8Array}
+   */
+  forceEncrypt(data) {
+    if (!this.cipher) return data;
+    return this.cipher.encrypt(data);
+  }
+
+  /**
    * Decrypt incoming data.
    * @param {Uint8Array} data
    * @returns {Uint8Array}
    */
   decrypt(data) {
     if (!this.encryptionEnabled || !this.cipher) return data;
+    return this.cipher.decrypt(data);
+  }
+
+  /**
+   * Decrypt a block unconditionally using the symmetric cipher (ignoring enabled state).
+   * Used for SET_CACHED_AUTH which needs decryption even when event encryption is active.
+   * @param {Uint8Array} data
+   * @returns {Uint8Array}
+   */
+  decryptBlock(data) {
+    if (!this.cipher) throw new Error('No cipher available');
     return this.cipher.decrypt(data);
   }
 

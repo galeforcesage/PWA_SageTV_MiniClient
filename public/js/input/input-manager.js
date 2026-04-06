@@ -217,8 +217,8 @@ export class InputManager {
    * @param {number} serverHeight - Server-side resolution height
    */
   updateScale(canvasWidth, canvasHeight, serverWidth, serverHeight) {
-    this.scaleX = serverWidth / canvasWidth;
-    this.scaleY = serverHeight / canvasHeight;
+    this.scaleX = canvasWidth > 0 ? serverWidth / canvasWidth : 1;
+    this.scaleY = canvasHeight > 0 ? serverHeight / canvasHeight : 1;
   }
 
   /**
@@ -297,7 +297,7 @@ export class InputManager {
     const { x, y } = this._toServerCoords(event.clientX, event.clientY);
     const mods = domModsToJava(event);
     const button = event.button === 0 ? 1 : event.button === 2 ? 3 : 2;
-
+    console.log(`[Input] Click: client(${event.clientX},${event.clientY}) → server(${x},${y}), scale(${this.scaleX.toFixed(3)},${this.scaleY.toFixed(3)}), rect=${JSON.stringify(this.target.getBoundingClientRect())}`);
     this.connection.sendMouseEvent(EventType.MOUSE_PRESSED, x, y, mods, button, 1);
   }
 
@@ -312,7 +312,10 @@ export class InputManager {
   }
 
   _onPointerMove(event) {
-    // Only send move events occasionally to avoid flooding
+    // Throttle moves to ~30/sec to avoid flooding the server
+    const now = performance.now();
+    if (now - (this._lastMoveTime || 0) < 33) return;
+    this._lastMoveTime = now;
     if (event.movementX === 0 && event.movementY === 0) return;
     const { x, y } = this._toServerCoords(event.clientX, event.clientY);
     const mods = domModsToJava(event);

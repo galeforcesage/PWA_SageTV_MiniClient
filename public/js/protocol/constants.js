@@ -321,7 +321,7 @@ export const FSPathAttr = {
 
 // ── Client capability properties ───────────────────────────
 export const ClientProperty = {
-  GFX_BLENDMODE: 'POSTMULTIPLY',
+  GFX_BLENDMODE: 'PREMULTIPLY',
   GFX_COMPOSITE: 'BLEND',
   GFX_SURFACES: 'TRUE',
   GFX_COLORKEY: '080010',

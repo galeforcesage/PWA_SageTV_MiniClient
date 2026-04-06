@@ -144,6 +144,11 @@ export class SessionManager extends EventTarget {
     this._resizeHandler = () => this._onResize();
     window.addEventListener('resize', this._resizeHandler);
 
+    // Handle resolution change from server rendering detection
+    this.connection.addEventListener('resolutionchange', () => {
+      this._onResize();
+    });
+
     // Handle video bounds from renderer
     this.canvas.addEventListener('videobounds', (e) => {
       this.mediaPlayer.setVideoRectangles(e.detail.src, e.detail.dest);
@@ -201,6 +206,9 @@ export class SessionManager extends EventTarget {
     const containerHeight = this.container.clientHeight;
     const serverWidth = this.canvas.width;
     const serverHeight = this.canvas.height;
+
+    // Guard against zero dimensions (canvas hidden or not yet sized)
+    if (serverWidth === 0 || serverHeight === 0 || containerWidth === 0 || containerHeight === 0) return;
 
     const scale = Math.min(containerWidth / serverWidth, containerHeight / serverHeight);
     const displayWidth = Math.round(serverWidth * scale);

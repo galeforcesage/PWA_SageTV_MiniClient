@@ -6,7 +6,10 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-v4';
+const CACHE_NAME = 'sagetv-miniclient-v5-dev';
+
+// During development, use network-first strategy
+const DEV_MODE = true;
 
 const STATIC_ASSETS = [
   '/',
@@ -61,7 +64,15 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
 
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    DEV_MODE
+      ? fetch(event.request).then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        }).catch(() => caches.match(event.request).then((c) => c || new Response('Offline', { status: 503 })))
+      : caches.match(event.request).then((cached) => {
       if (cached) {
         // Return cached, but also update cache in background (stale-while-revalidate)
         const fetchPromise = fetch(event.request)
@@ -94,5 +105,5 @@ self.addEventListener('fetch', (event) => {
           return new Response('Offline', { status: 503 });
         });
     })
-  );
-});
+  ); // end respondWith
+}); // end fetch listener

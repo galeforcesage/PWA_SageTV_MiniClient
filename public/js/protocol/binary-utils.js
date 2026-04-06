@@ -205,14 +205,16 @@ export function argbComponents(argb) {
  * Stored in localStorage for session persistence.
  */
 export function getOrCreateMacAddress() {
-  let mac = localStorage.getItem('sagetv_mac');
-  if (!mac) {
-    const bytes = new Uint8Array(6);
-    crypto.getRandomValues(bytes);
-    bytes[0] = (bytes[0] & 0xFE) | 0x02; // locally administered
-    mac = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(':');
-    localStorage.setItem('sagetv_mac', mac);
-  }
+  const key = 'sagetv_mac_address';
+  let mac = localStorage.getItem(key);
+  if (mac) return mac;
+
+  // Generate a random locally-administered unicast MAC
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  bytes[0] = (bytes[0] | 0x02) & 0xFE; // locally administered, unicast
+  mac = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(':');
+  localStorage.setItem(key, mac);
   return mac;
 }
 
