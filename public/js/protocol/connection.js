@@ -179,6 +179,10 @@ export class MiniClientConnection extends EventTarget {
     // Keepalive (ping the WebSocket bridge)
     this._keepaliveInterval = null;
     this._keepaliveTimeout = 15000; // ms between pings
+
+    // Media stats protocol
+    this._detailedBufferStats = false;
+    this._serverMuxTime = -1;
   }
 
   // ── Connection Lifecycle ──────────────────────────────────
@@ -577,23 +581,19 @@ export class MiniClientConnection extends EventTarget {
         return pref('streaming_mode', 'fixed');
       case 'STREAMING_PROTOCOLS':
         return ClientProperty.STREAMING_PROTOCOLS;
-      case 'VIDEO_CODECS': {
-        const base = ClientProperty.VIDEO_CODECS;
-        const extra = pref('extra_video_codecs', '');
-        return extra ? `${base},${extra}` : base;
-      }
-      case 'AUDIO_CODECS': {
-        const base = ClientProperty.AUDIO_CODECS;
-        const extra = pref('extra_audio_codecs', '');
-        return extra ? `${base},${extra}` : base;
-      }
+      case 'VIDEO_CODECS':
+        // Report native codec support so server uses pull mode (no transcoding)
+        // Bridge will handle transcoding with system ffmpeg
+        return 'MPEG2-Video';
+      case 'AUDIO_CODECS':
+        return 'AC3';
       case 'PUSH_AV_CONTAINERS':
-        return ClientProperty.PUSH_AV_CONTAINERS;
+        return '';  // No push — use pull mode
       case 'PULL_AV_CONTAINERS':
-        return ClientProperty.PULL_AV_CONTAINERS;
+        return 'MPEG2-PS,MPEG2-TS';
       // Transcoding settings
       case 'FIXED_ENCODING_PREFERENCE':
-        return pref('fixed_encoding/preference', 'needed');
+        return pref('fixed_encoding/preference', 'off');
       case 'FIXED_ENCODING_FORMAT':
         return pref('fixed_encoding/format', 'matroska');
       case 'FIXED_ENCODING_VIDEO_BITRATE_KBPS':
@@ -608,7 +608,7 @@ export class MiniClientConnection extends EventTarget {
         return pref('fixed_encoding/audio_bitrate_kbps', '128');
       // Remuxing settings
       case 'FIXED_REMUXING_PREFERENCE':
-        return pref('fixed_remuxing/preference', 'needed');
+        return pref('fixed_remuxing/preference', 'off');
       case 'FIXED_REMUXING_FORMAT':
         return pref('fixed_remuxing/format', 'matroska');
       case 'CRYPTO_ALGORITHMS':
@@ -638,7 +638,17 @@ export class MiniClientConnection extends EventTarget {
       case 'MEDIA_PLAYER_BUFFER_DELAY':
         return '0';
       case 'FIXED_PUSH_MEDIA_FORMAT':
+        // Bridge handles transcoding — no server-side transcoding needed
         return '';
+      case 'FIXED_PUSH_REMUX_FORMAT':
+        return '';
+      case 'PUSH_BUFFER_SEEKING':
+        return 'TRUE';
+      case 'DETAILED_BUFFER_STATS':
+        this._detailedBufferStats = true;
+        return 'TRUE';
+      case 'FORCED_MEDIA_RECONNECT':
+        return 'TRUE';
       default:
         console.log(`[Connection] Unknown property requested: ${name}`);
         return '';
@@ -1475,7 +1485,19 @@ export class MiniClientConnection extends EventTarget {
       this.mediaBuffer.consume(4);
       const payload = len > 0 ? this.mediaBuffer.consume(len) : new Uint8Array(0);
 
-      if (cmd !== 23 && cmd !== 17 && cmd !== 0) console.log(`[Media] cmd=${cmd} len=${len}`);
+      // Log all commands except high-frequency GETVIDEORECT (24)
+      if (cmd === 23) {
+        if (!this._pushCount) this._pushCount = 0;
+        this._pushCount++;
+        if (this._pushCount <= 10 || this._pushCount % 100 === 0) {
+          const bufSize = payload.length >= 4 ? ((payload[0]&0xFF)<<24|(payload[1]&0xFF)<<16|(payload[2]&0xFF)<<8|(payload[3]&0xFF)) : -1;
+          const flags = payload.length >= 8 ? ((payload[4]&0xFF)<<24|(payload[5]&0xFF)<<16|(payload[6]&0xFF)<<8|(payload[7]&0xFF)) : -1;
+          const hdr = Array.from(payload.subarray(0, Math.min(24, payload.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+          console.log(`[Media] PUSHBUFFER #${this._pushCount} len=${len} bufSize=${bufSize} flags=0x${(flags>>>0).toString(16)} raw=[${hdr}]`);
+        }
+      } else if (cmd !== 24 && cmd !== 0) {
+        console.log(`[Media] cmd=${cmd} len=${len}`);
+      }
       this._handleMediaCommand(cmd, len, payload);
     }
   }
@@ -1501,6 +1523,7 @@ export class MiniClientConnection extends EventTarget {
     switch (cmd) {
       case 0: // MEDIACMD_INIT
         console.log('[Media] INIT');
+        this._serverMuxTime = -1;
         this._sendMediaReturn(1);
         break;
 
@@ -1511,6 +1534,7 @@ export class MiniClientConnection extends EventTarget {
         break;
 
       case 16: { // MEDIACMD_OPENURL
+        this._serverMuxTime = -1;
         if (len >= 4) {
           const strLen = readInt(0);
           let urlString = '';
@@ -1518,8 +1542,25 @@ export class MiniClientConnection extends EventTarget {
             urlString = new TextDecoder('iso-8859-1').decode(data.subarray(4, 4 + strLen - 1));
           }
           const isPush = urlString.startsWith('push:');
-          console.log(`[Media] OPENURL: ${urlString} (push=${isPush})`);
-          this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+          const isStv = urlString.startsWith('stv://');
+          const isAbsPath = urlString.startsWith('/');
+          console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
+
+          if (isStv) {
+            // Pull mode with stv:// — extract file path, use bridge transcoder
+            // Format: stv://hostname/full/path/to/file.mpg
+            const stvUrl = urlString.substring(6); // remove 'stv://'
+            const slashIdx = stvUrl.indexOf('/');
+            const filePath = slashIdx >= 0 ? stvUrl.substring(slashIdx) : '/' + stvUrl;
+            console.log(`[Media] Pull mode via bridge transcoder: ${filePath}`);
+            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, false, 0, filePath);
+          } else if (isAbsPath) {
+            // Plain absolute path from server — use bridge transcoder
+            console.log(`[Media] Pull mode via bridge transcoder (abs path): ${urlString}`);
+            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, false, 0, urlString);
+          } else {
+            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+          }
         }
         this._sendMediaReturn(1);
         break;
@@ -1527,7 +1568,15 @@ export class MiniClientConnection extends EventTarget {
 
       case 17: { // MEDIACMD_GETMEDIATIME
         const time = this.mediaPlayer.getMediaTimeMillis();
-        this._sendMediaReturn(time & 0x7FFFFFFF);
+        if (this._detailedBufferStats) {
+          // 5 bytes: [4B time][1B playerState]
+          const buf = new Uint8Array(5);
+          new DataView(buf.buffer).setInt32(0, time & 0x7FFFFFFF, false);
+          buf[4] = this.mediaPlayer.getState() & 0xFF;
+          this._sendMedia(buf);
+        } else {
+          this._sendMediaReturn(time & 0x7FFFFFFF);
+        }
         break;
       }
 
@@ -1554,6 +1603,7 @@ export class MiniClientConnection extends EventTarget {
         break;
 
       case 22: // MEDIACMD_FLUSH
+        this._serverMuxTime = -1;
         this.mediaPlayer.flush();
         this._sendMediaReturn(1);
         break;
@@ -1562,7 +1612,26 @@ export class MiniClientConnection extends EventTarget {
         if (len >= 8) {
           const bufSize = readInt(0);
           const flags = readInt(4);
-          const bufDataOffset = 8;
+          let bufDataOffset = 8;
+
+          // Log first few pushes and periodic status
+          if (!this._pushDataCount) this._pushDataCount = 0;
+          this._pushDataCount++;
+          if (this._pushDataCount <= 10 || this._pushDataCount % 200 === 0) {
+            const hex = Array.from(data.subarray(0, Math.min(32, data.length)))
+              .map(b => b.toString(16).padStart(2, '0')).join(' ');
+            console.log(`[Media] PUSH#${this._pushDataCount}: len=${len} bufSize=${bufSize} flags=0x${flags.toString(16)} raw=[${hex}]`);
+          }
+
+          // With detailedBufferStats, extra 10-byte stats header precedes buffer data
+          if (this._detailedBufferStats && bufSize > 0 && len > bufSize + 13) {
+            bufDataOffset += 10;
+            const serverMuxTime = readInt(14);
+            if (this._serverMuxTime < 0 && serverMuxTime > 0) {
+              this._serverMuxTime = serverMuxTime;
+            }
+          }
+
           if (bufSize > 0 && len >= bufDataOffset + bufSize) {
             const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
             this.mediaPlayer.pushData(bufData, flags);
@@ -1571,8 +1640,19 @@ export class MiniClientConnection extends EventTarget {
             this.mediaPlayer.setServerEOS();
           }
         }
+
         const bufLeft = this.mediaPlayer.getBufferLeft();
-        this._sendMediaReturn(bufLeft);
+        if (this._detailedBufferStats) {
+          // 9 bytes: [4B bufferLeft][4B mediaTime][1B playerState]
+          const buf = new Uint8Array(9);
+          const dv = new DataView(buf.buffer);
+          dv.setInt32(0, bufLeft, false);
+          dv.setInt32(4, this.mediaPlayer.getMediaTimeMillis() & 0x7FFFFFFF, false);
+          buf[8] = this.mediaPlayer.getState() & 0xFF;
+          this._sendMedia(buf);
+        } else {
+          this._sendMediaReturn(bufLeft);
+        }
         break;
       }
 
@@ -2016,6 +2096,8 @@ export class MiniClientConnection extends EventTarget {
       this._pendingImageDecode = null;
       this._preFrameLogged = null;
       this.replyCount = 0;
+      this._detailedBufferStats = false;
+      this._serverMuxTime = -1;
       // Do NOT reset handleCount — with ADVANCED_IMAGE_CACHING, the server
       // assumes client images persist. Keeping handleCount avoids collisions
       // between old cached images and new LOADIMAGE assignments.

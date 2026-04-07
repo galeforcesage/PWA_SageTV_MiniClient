@@ -454,7 +454,9 @@ html, body {
 
 #sage-canvas {
   display: block;
-  background: #000;
+  background: transparent;   /* let video show through cleared areas */
+  position: relative;
+  z-index: 2;                /* canvas OSD above video */
   outline: none;
   touch-action: none;
 }
@@ -462,30 +464,34 @@ html, body {
 #sage-video {
   position: absolute;
   pointer-events: none;
-  z-index: 1;
+  z-index: 1;                /* video below canvas OSD */
   background: transparent;
 }
 
-/* ── Toolbar ─────────────────────────────────────────── */
-
-.toolbar {
+/* ── Floating Buttons ────────────────────────────────── */
+.float-btn {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: calc(44px + var(--safe-top));
-  padding-top: var(--safe-top);
-  background: linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%);
+  width: 28px;
+  height: 28px;
+  background: rgba(0,0,0,0.4);
+  border: none;
+  border-radius: 50%;
+  color: rgba(255,255,255,0.5);
+  font-size: 14px;
+  cursor: pointer;
+  z-index: 10;
+  pointer-events: auto;
+  transition: background 0.2s, color 0.2s;
   display: flex;
   align-items: center;
-  padding-left: 8px;
-  padding-right: 8px;
-  gap: 8px;
-  opacity: 0;
-  transition: opacity 0.3s;
-  z-index: 10;
+  justify-content: center;
 }
-.toolbar:hover, .toolbar.visible { opacity: 1; }
+.float-btn:hover {
+  color: #fff;
+  background: rgba(0,0,0,0.8);
+}
+.float-btn-tl { top: 4px; left: 4px; }
+.float-btn-tr { top: 4px; right: 4px; }
 
 .toolbar-title {
   flex: 1;

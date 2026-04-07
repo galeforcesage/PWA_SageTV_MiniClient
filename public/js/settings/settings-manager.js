@@ -84,7 +84,7 @@ const DEFAULTS = {
   'streaming_mode': 'fixed',
 
   // Fixed Transcoding (AndroidPrefStore keys)
-  'fixed_encoding/preference': 'needed',
+  'fixed_encoding/preference': 'off',
   'fixed_encoding/format': 'matroska',
   'fixed_encoding/video_bitrate_kbps': '4000',
   'fixed_encoding/video_resolution': 'SOURCE',
@@ -94,7 +94,7 @@ const DEFAULTS = {
   'fixed_encoding/audio_channels': '',
 
   // Fixed Remuxing
-  'fixed_remuxing/preference': 'needed',
+  'fixed_remuxing/preference': 'off',
   'fixed_remuxing/format': 'matroska',
 
   // Rendering
@@ -179,10 +179,7 @@ export class SettingsManager {
       }
     }
 
-    // Seed a default test server if none exist
-    if (getAllServerCookies().length === 0) {
-      setServerCookie({ name: 'SageTV Server', host: 'YOUR_SERVER_IP', port: 31099 });
-    }
+    // No default server — user adds their own via "Add Server"
 
     setCookie(SETTINGS_INIT_COOKIE, '1');
   }

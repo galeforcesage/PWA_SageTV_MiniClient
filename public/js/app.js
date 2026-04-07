@@ -39,10 +39,11 @@ const settingsDialog = document.getElementById('settings-dialog');
 // ── Initialization ───────────────────────────────────────
 
 async function init() {
-  // Show debug overlay by default (dev mode)
+  // Debug: Shift+F12 opens debug popup window. Overlay is always hidden now.
+  debugOverlay.hidden = true;
   const debugEnabled = session.settings ? session.settings.get('debug_overlay', 'true') : 'true';
   if (debugEnabled === 'true') {
-    debugOverlay.hidden = false;
+    _openDebugWindow();
   }
 
   // Register service worker
@@ -118,13 +119,21 @@ function setupEventHandlers() {
   });
 
   // Disconnect
-  document.getElementById('btn-disconnect').addEventListener('click', handleDisconnect);
+  const btnDisconnect = document.getElementById('btn-disconnect');
+  if (btnDisconnect) btnDisconnect.addEventListener('click', handleDisconnect);
 
   // Fullscreen
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', () => {
+    // Trigger resize after fullscreen transition settles
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 200);
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 500);
+  });
 
-  // Touch nav toggle
-  document.getElementById('btn-touch-nav').addEventListener('click', () => {
+  // Touch nav toggle (button removed)
+  const btnTouchNav = document.getElementById('btn-touch-nav');
+  if (btnTouchNav) btnTouchNav.addEventListener('click', () => {
     touchNavVisible = !touchNavVisible;
     touchNav.hidden = !touchNavVisible;
   });
@@ -213,15 +222,10 @@ function setupEventHandlers() {
     if (session.connected) session.disconnect();
   });
 
-  // Keyboard shortcut: Escape = disconnect, Shift+F12 = debug overlay
+  // Keyboard shortcut: Shift+F12 = debug popup
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      handleDisconnect();
-      e.preventDefault();
-      return;
-    }
     if (e.key === 'F12' && e.shiftKey) {
-      debugOverlay.hidden = !debugOverlay.hidden;
+      _openDebugWindow();
       e.preventDefault();
     }
   });
@@ -442,25 +446,46 @@ function escapeAttr(str) {
   return (str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-// ── Debug Logging ────────────────────────────────────────
+// ── Debug Logging (popup window) ─────────────────────────
 
 const origLog = console.log;
 const origWarn = console.warn;
 const origError = console.error;
 
+let _debugWin = null;
+let _debugDoc = null;
+let _debugPre = null;
+
+function _openDebugWindow() {
+  if (_debugWin && !_debugWin.closed) return;
+  _debugWin = window.open('', 'sage_debug', 'width=600,height=500,scrollbars=yes,resizable=yes');
+  if (!_debugWin) return; // popup blocked
+  _debugDoc = _debugWin.document;
+  _debugDoc.title = 'SageTV Debug Log';
+  _debugDoc.body.style.cssText = 'background:#111;color:#0f0;font:11px Consolas,Menlo,monospace;margin:0;padding:8px;';
+  _debugPre = _debugDoc.createElement('pre');
+  _debugPre.style.cssText = 'white-space:pre-wrap;word-break:break-all;margin:0;';
+  _debugDoc.body.appendChild(_debugPre);
+}
+
 function appendDebug(level, args) {
+  // Always write to the in-page hidden log too
   const line = `[${level}] ${Array.from(args).join(' ')}\n`;
-  // Only auto-scroll if user is already at the bottom (not scrolled up / selecting)
-  const atBottom = debugLog.scrollTop + debugLog.clientHeight >= debugLog.scrollHeight - 20;
-  const hasSelection = window.getSelection && window.getSelection().toString().length > 0;
-  // Append as text node to preserve existing DOM selections
   debugLog.appendChild(document.createTextNode(line));
-  // Trim old lines by removing leading child nodes
   while (debugLog.childNodes.length > 500) {
     debugLog.removeChild(debugLog.firstChild);
   }
-  if (atBottom && !hasSelection) {
-    debugLog.scrollTop = debugLog.scrollHeight;
+
+  // Write to popup window if open
+  if (_debugPre && _debugWin && !_debugWin.closed) {
+    _debugPre.appendChild(_debugDoc.createTextNode(line));
+    while (_debugPre.childNodes.length > 500) {
+      _debugPre.removeChild(_debugPre.firstChild);
+    }
+    const atBottom = _debugWin.innerHeight + _debugWin.scrollY >= _debugDoc.body.scrollHeight - 30;
+    if (atBottom) {
+      _debugWin.scrollTo(0, _debugDoc.body.scrollHeight);
+    }
   }
 }
 

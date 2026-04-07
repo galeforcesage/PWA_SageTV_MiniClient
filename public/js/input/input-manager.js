@@ -129,6 +129,8 @@ export class InputManager {
   constructor(target, connection) {
     this.target = target;
     this.connection = connection;
+    // The canvas element for accurate coordinate mapping
+    this._canvas = target.querySelector('canvas') || target;
 
     // Scale factors for pointer events (canvas coords vs server coords)
     this.scaleX = 1;
@@ -225,7 +227,7 @@ export class InputManager {
    * Convert DOM pointer coordinates to server coordinates.
    */
   _toServerCoords(clientX, clientY) {
-    const rect = this.target.getBoundingClientRect();
+    const rect = this._canvas.getBoundingClientRect();
     const x = Math.round((clientX - rect.left) * this.scaleX);
     const y = Math.round((clientY - rect.top) * this.scaleY);
     return { x, y };

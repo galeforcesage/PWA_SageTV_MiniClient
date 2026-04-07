@@ -332,9 +332,9 @@ export const ClientProperty = {
   GFX_OFFLINE_IMAGE_CACHE: 'TRUE',
   ADVANCED_IMAGE_CACHING: 'TRUE',
   PUSH_AV_CONTAINERS: 'MPEG2-TS',
-  PULL_AV_CONTAINERS: 'AVI,FLV,Quicktime,Ogg,MP3,AAC,ASF,FLAC,MATROSKA,WAV,AC3',
-  VIDEO_CODECS: 'MPEG2-VIDEO,MPEG4-VIDEO,H.264,H.265,VC1,VP8,VP9',
-  AUDIO_CODECS: 'MPEG2-AUDIO,AAC,AC3,DTS,EAC3,FLAC,VORBIS,OPUS,MP3,PCM',
+  PULL_AV_CONTAINERS: '',  // Browser can't access SageTV media port directly
+  VIDEO_CODECS: 'H.264',
+  AUDIO_CODECS: 'AAC',
 };
 
 // ── Crypto algorithms ──────────────────────────────────────

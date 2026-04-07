@@ -223,6 +223,11 @@ export class SessionManager extends EventTarget {
     if (this.inputManager) {
       this.inputManager.updateScale(displayWidth, displayHeight, serverWidth, serverHeight);
     }
+
+    // Re-apply video positioning for new canvas size
+    if (this.mediaPlayer && this.mediaPlayer._applyVideoRectangles) {
+      this.mediaPlayer._applyVideoRectangles();
+    }
   }
 
   /**

@@ -28,8 +28,13 @@ export class MediaPlayer extends EventTarget {
     // Player state
     this.state = PlayerState.NO_STATE;
     this.pushMode = false;
+    this.bridgeMode = false;
     this.serverEOS = false;
     this.lastServerStartTime = 0;
+    this._bridgeFilePath = null;
+    this._bridgeAbortController = null;
+    this._bridgeSessionId = 'pwa-' + Date.now();
+    this._bridgeTimeOffsetMs = 0;  // offset added to video.currentTime for seek
 
     // MSE for push mode
     this.mediaSource = null;
@@ -102,12 +107,16 @@ export class MediaPlayer extends EventTarget {
    * @param {boolean} timeshifted - Whether this is a timeshifted recording
    * @param {number} bufferSize - Buffer size hint
    */
-  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize) {
+  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath) {
     this.stop(); // Clean up any previous playback
     this.serverEOS = false;
     this._totalPushed = 0;
 
-    if (url.startsWith('push:')) {
+    if (bridgeFilePath) {
+      console.log(`[MediaPlayer] BRIDGE mode: ${bridgeFilePath}`);
+      await this._loadBridgeMode(bridgeFilePath, hostname);
+    } else if (url.startsWith('push:')) {
+      console.log(`[MediaPlayer] PUSH mode: ${url}`);
       await this._loadPushMode(url, hostname);
     } else {
       await this._loadPullMode(url, hostname);
@@ -142,6 +151,151 @@ export class MediaPlayer extends EventTarget {
     }
 
     this.state = PlayerState.LOADED;
+  }
+
+  /**
+   * BRIDGE mode: fetch transcoded H.264+AAC fragmented MP4 from bridge's ffmpeg.
+   * Bridge runs on same machine as SageTV, reads file directly, transcodes with system ffmpeg.
+   * ffmpeg outputs fMP4 (frag_keyframe+empty_moov) which feeds directly into MSE — no transmuxing.
+   */
+  async _loadBridgeMode(filePath, hostname) {
+    this.pushMode = false;
+    this.bridgeMode = true;
+    this._bridgeFilePath = filePath;
+    this._bridgeSessionId = 'pwa-' + Date.now();
+
+    // Set up MSE
+    const MSClass = window.ManagedMediaSource || window.MediaSource;
+    if (!MSClass) {
+      console.error('[MediaPlayer] MediaSource API not available');
+      this.state = PlayerState.STOPPED;
+      return;
+    }
+
+    this.mediaSource = new MSClass();
+    if (window.ManagedMediaSource) {
+      this.video.disableRemotePlayback = true;
+      this.video.srcObject = this.mediaSource;
+    } else {
+      this.video.src = URL.createObjectURL(this.mediaSource);
+    }
+
+    await new Promise((resolve) => {
+      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
+    });
+
+    // Create fMP4 source buffer for H.264+AAC
+    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+    if (!MSClass.isTypeSupported(mimeType)) {
+      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
+      if (MSClass.isTypeSupported(videoOnly)) {
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
+      } else {
+        console.error('[MediaPlayer] No supported fMP4 MIME type');
+        this.state = PlayerState.STOPPED;
+        return;
+      }
+    } else {
+      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
+    }
+    this.sourceBuffer.mode = 'segments';
+    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+    this.sourceBuffer.addEventListener('error', (e) => {
+      console.error('[MediaPlayer] SourceBuffer error:', e);
+    });
+
+    this.state = PlayerState.LOADED;
+
+    // Start fetching transcoded stream from bridge
+    this._startBridgeStream(filePath, 0);
+  }
+
+  /**
+   * Start (or restart) fetching the transcoded stream from the bridge.
+   */
+  async _startBridgeStream(filePath, seekSec) {
+    // Abort any previous fetch
+    if (this._bridgeAbortController) {
+      this._bridgeAbortController.abort();
+    }
+    this._bridgeAbortController = new AbortController();
+
+    // Build bridge URL — bridge is on same origin (same host:port as PWA)
+    const bridgeUrl = `/transcode?file=${encodeURIComponent(filePath)}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
+
+    try {
+      const response = await fetch(bridgeUrl, {
+        signal: this._bridgeAbortController.signal,
+      });
+
+      if (!response.ok) {
+        console.error(`[MediaPlayer] Bridge transcode failed: ${response.status} ${response.statusText}`);
+        this.state = PlayerState.STOPPED;
+        return;
+      }
+
+      const reader = response.body.getReader();
+      let totalBytes = 0;
+      let autoPlayed = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log(`[MediaPlayer] Bridge stream ended, total: ${(totalBytes / 1024).toFixed(0)}KB`);
+          // Signal EOS
+          if (this.mediaSource && this.mediaSource.readyState === 'open') {
+            // Wait for all pending appends
+            const waitForBuffer = () => new Promise((resolve) => {
+              if (!this.sourceBuffer || !this.sourceBuffer.updating) resolve();
+              else this.sourceBuffer.addEventListener('updateend', resolve, { once: true });
+            });
+            await waitForBuffer();
+            try { this.mediaSource.endOfStream(); } catch { /* ignore */ }
+          }
+          break;
+        }
+
+        totalBytes += value.length;
+
+        // First chunk — log fMP4 header for debugging
+        if (totalBytes === value.length) {
+          const hdr = Array.from(value.subarray(0, Math.min(16, value.length)))
+            .map(b => b.toString(16).padStart(2, '0')).join(' ');
+          console.log(`[MediaPlayer] Bridge first chunk: ${value.length}B, header=[${hdr}]`);
+        }
+
+        // Feed fMP4 directly to SourceBuffer
+        if (this.sourceBuffer && this.mediaSource && this.mediaSource.readyState === 'open') {
+          this._pushQueue.push(new Uint8Array(value));
+          this._processPushQueue();
+
+          // After seek, reset video.currentTime to start of new buffered data
+          if (this._bridgeNeedTimeReset && this.sourceBuffer.buffered.length > 0) {
+            this.video.currentTime = this.sourceBuffer.buffered.start(0);
+            this._bridgeNeedTimeReset = false;
+          }
+        }
+
+        // Auto-play after enough data
+        if (!autoPlayed && totalBytes > 128 * 1024 && this.state === PlayerState.LOADED) {
+          console.log(`[MediaPlayer] Bridge auto-playing after ${(totalBytes / 1024).toFixed(0)}KB`);
+          this.play();
+          autoPlayed = true;
+        }
+
+        // Log progress
+        if (totalBytes > 0 && (totalBytes % (1024 * 1024)) < value.length) {
+          console.log(`[MediaPlayer] Bridge: ${(totalBytes / 1024 / 1024).toFixed(1)}MB total, queue=${this._pushQueue.length}`);
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log('[MediaPlayer] Bridge stream aborted (seek or stop)');
+      } else {
+        console.error('[MediaPlayer] Bridge stream error:', err);
+      }
+    }
   }
 
   /**
@@ -188,13 +342,12 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
-   * PUSH mode: server sends MPEG-TS data via pushData().
-   * Uses mux.js to transmux MPEG-TS → fMP4, then feeds to MSE SourceBuffer.
+   * PUSH mode: server transcodes to H.264+AAC in MPEG-TS.
+   * Uses mux.js to transmux MPEG-TS → fMP4 → MSE SourceBuffer.
    */
   async _loadPushMode(url, hostname) {
     this.pushMode = true;
     this._initSegmentSent = false;
-    console.log(`[MediaPlayer] PUSH mode: ${url}`);
 
     // Load mux.js
     await this._loadScript('https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js');
@@ -225,10 +378,9 @@ export class MediaPlayer extends EventTarget {
       this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
     });
 
-    // Create fMP4 source buffer - this is what we'll feed transmuxed data into
+    // Create fMP4 source buffer
     const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
     if (!MSClass.isTypeSupported(mimeType)) {
-      // Try without audio codec
       const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
       if (MSClass.isTypeSupported(videoOnly)) {
         this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
@@ -252,9 +404,7 @@ export class MediaPlayer extends EventTarget {
       remux: true,
     });
 
-    // When transmuxer produces fMP4 data, queue it for the SourceBuffer
     this._transmuxer.on('data', (segment) => {
-      // First segment includes init segment (ftyp + moov boxes)
       if (!this._initSegmentSent) {
         const initSegment = new Uint8Array(segment.initSegment.byteLength + segment.data.byteLength);
         initSegment.set(segment.initSegment, 0);
@@ -272,7 +422,7 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.state = PlayerState.LOADED;
-    console.log('[MediaPlayer] Push mode ready with mux.js transmuxer');
+    console.log('[MediaPlayer] Push mode ready with mux.js transmuxer (H.264 path)');
   }
 
   /**
@@ -313,8 +463,20 @@ export class MediaPlayer extends EventTarget {
 
   stop() {
     this.video.pause();
-    this.video.removeAttribute('src');
-    this.video.removeAttribute('srcObject');
+
+    // Stop bridge transcode
+    if (this._bridgeAbortController) {
+      this._bridgeAbortController.abort();
+      this._bridgeAbortController = null;
+    }
+    if (this.bridgeMode && this._bridgeSessionId) {
+      // Fire-and-forget stop request to bridge
+      fetch(`/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
+    }
+    this.bridgeMode = false;
+    this._bridgeFilePath = null;
+    this._bridgeTimeOffsetMs = 0;
+    this._bridgeNeedTimeReset = false;
 
     if (this._hls) {
       this._hls.destroy();
@@ -337,6 +499,16 @@ export class MediaPlayer extends EventTarget {
       this.sourceBuffer = null;
     }
 
+    // Revoke blob URL BEFORE clearing src (otherwise the URL is lost)
+    if (this.video.src && this.video.src.startsWith('blob:')) {
+      URL.revokeObjectURL(this.video.src);
+    }
+
+    // Fully reset the video element — srcObject is a property, not an attribute
+    this.video.srcObject = null;
+    this.video.removeAttribute('src');
+    this.video.load(); // Forces video element to release internal decoder state
+
     this._pushQueue = [];
     this._pushBusy = false;
     this._totalPushed = 0;
@@ -349,7 +521,16 @@ export class MediaPlayer extends EventTarget {
    */
   seek(timeMS) {
     const timeSec = timeMS / 1000;
-    if (isFinite(timeSec) && timeSec >= 0) {
+    if (!isFinite(timeSec) || timeSec < 0) return;
+
+    if (this.bridgeMode && this._bridgeFilePath) {
+      // Restart bridge ffmpeg at new position
+      console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s`);
+      this._bridgeTimeOffsetMs = timeMS;
+      this._bridgeNeedTimeReset = true;
+      this.flush();
+      this._startBridgeStream(this._bridgeFilePath, timeSec);
+    } else {
       this.video.currentTime = timeSec;
     }
   }
@@ -361,7 +542,10 @@ export class MediaPlayer extends EventTarget {
     if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) {
       return 0;
     }
-    return Math.floor((this.video.currentTime || 0) * 1000);
+    const rawMs = Math.floor((this.video.currentTime || 0) * 1000);
+    // In bridge mode, ffmpeg outputs timestamps starting from 0 after each seek,
+    // so we add the seek offset to report the correct file position.
+    return this.bridgeMode ? this._bridgeTimeOffsetMs + rawMs : rawMs;
   }
 
   getState() {
@@ -382,8 +566,8 @@ export class MediaPlayer extends EventTarget {
 
   setServerEOS() {
     this.serverEOS = true;
+    console.log(`[MediaPlayer] Server EOS, total pushed: ${(this._totalPushed / 1024).toFixed(0)}KB`);
     if (this.pushMode && this.mediaSource && this.mediaSource.readyState === 'open') {
-      // Wait for pending appends, then end stream
       if (!this.sourceBuffer || !this.sourceBuffer.updating) {
         try {
           this.mediaSource.endOfStream();
@@ -395,25 +579,35 @@ export class MediaPlayer extends EventTarget {
   // ── Push Mode ─────────────────────────────────────────────
 
   /**
-   * Push media data from the server.
+   * Push media data from the server (H.264+AAC in MPEG-TS, transcoded by server).
    * @param {Uint8Array} data - MPEG-TS data chunk
    * @param {number} flags - Push flags
    */
   pushData(data, flags) {
     if (!this.pushMode || this.state === PlayerState.STOPPED) return;
-    if (!this.mediaSource || this.mediaSource.readyState !== 'open') return;
     this._totalPushed += data.length;
 
-    if (this._transmuxer) {
-      // Feed MPEG-TS to transmuxer → it emits fMP4 via 'data' event
-      this._transmuxer.push(data);
-      this._transmuxer.flush();
+    // Log first push to diagnose format
+    if (this._totalPushed === data.length) {
+      const hdr = Array.from(data.subarray(0, Math.min(16, data.length)))
+        .map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[MediaPlayer] First push: ${data.length}B, header=[${hdr}]`);
     }
+
+    if (!this._transmuxer || !this.mediaSource || this.mediaSource.readyState !== 'open') return;
+
+    this._transmuxer.push(data);
+    this._transmuxer.flush();
 
     // Auto-play after receiving enough data
     if (this._totalPushed > 256 * 1024 && this.state === PlayerState.LOADED) {
       console.log(`[MediaPlayer] Auto-playing after ${(this._totalPushed / 1024).toFixed(0)}KB pushed`);
       this.play();
+    }
+
+    // Log progress periodically
+    if (this._totalPushed > 0 && (this._totalPushed % (1024 * 1024)) < data.length) {
+      console.log(`[MediaPlayer] Pushed ${(this._totalPushed / 1024 / 1024).toFixed(1)}MB total, queue=${this._pushQueue.length}`);
     }
   }
 
@@ -483,8 +677,14 @@ export class MediaPlayer extends EventTarget {
   flush() {
     this._pushQueue = [];
 
-    // Reset the transmuxer for fresh data after seek
-    if (this._transmuxer) {
+    if (this.bridgeMode) {
+      // Bridge mode: abort current stream, clear SourceBuffer
+      if (this._bridgeAbortController) {
+        this._bridgeAbortController.abort();
+        this._bridgeAbortController = null;
+      }
+    } else if (this._transmuxer) {
+      // Push/transmux mode: reset the transmuxer for fresh data after seek
       this._transmuxer.dispose();
       this._transmuxer = new window.muxjs.mp4.Transmuxer({
         keepOriginalTimestamps: true,
@@ -507,6 +707,7 @@ export class MediaPlayer extends EventTarget {
       });
     }
 
+    // Clear SourceBuffer so new data starts fresh
     if (this.sourceBuffer && !this.sourceBuffer.updating) {
       try {
         const buffered = this.sourceBuffer.buffered;
@@ -575,14 +776,33 @@ export class MediaPlayer extends EventTarget {
 
   /**
    * Position the video element according to server-specified rectangles.
+   * destRect is in server coordinates (e.g. 720x480); we scale to match canvas CSS size.
    */
   setVideoRectangles(srcRect, destRect) {
-    // Position the <video> element to match destRect
-    this.video.style.position = 'absolute';
-    this.video.style.left = `${destRect.x}px`;
-    this.video.style.top = `${destRect.y}px`;
-    this.video.style.width = `${destRect.width}px`;
-    this.video.style.height = `${destRect.height}px`;
+    this._lastSrcRect = srcRect;
+    this._lastDestRect = destRect;
+    this._applyVideoRectangles();
+  }
+
+  _applyVideoRectangles() {
+    const destRect = this._lastDestRect;
+    if (!destRect) return;
+    const canvas = this.container.querySelector('canvas');
+    if (!canvas || !canvas.width || !canvas.height) return;
+
+    const scaleX = canvas.clientWidth / canvas.width;
+    const scaleY = canvas.clientHeight / canvas.height;
+
+    // Canvas position within container
+    const canvasRect = canvas.getBoundingClientRect();
+    const containerRect = this.container.getBoundingClientRect();
+    const offsetX = canvasRect.left - containerRect.left;
+    const offsetY = canvasRect.top - containerRect.top;
+
+    this.video.style.left = `${offsetX + destRect.x * scaleX}px`;
+    this.video.style.top = `${destRect.y * scaleY + offsetY}px`;
+    this.video.style.width = `${destRect.width * scaleX}px`;
+    this.video.style.height = `${destRect.height * scaleY}px`;
     this.video.style.objectFit = 'fill';
   }
 

@@ -22,7 +22,7 @@ export class CanvasRenderer {
    */
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.ctx = canvas.getContext('2d', { alpha: true });
     this.width = canvas.width;
     this.height = canvas.height;
 
@@ -53,7 +53,7 @@ export class CanvasRenderer {
     this.backCanvas = document.createElement('canvas');
     this.backCanvas.width = this.width;
     this.backCanvas.height = this.height;
-    this.backCtx = this.backCanvas.getContext('2d', { alpha: false });
+    this.backCtx = this.backCanvas.getContext('2d', { alpha: true });
     this.activeCtx = this.backCtx;
 
     // Max cache size (128MB equivalent in pixels)
@@ -105,8 +105,8 @@ export class CanvasRenderer {
     this.canvas.height = height;
     this.backCanvas.width = width;
     this.backCanvas.height = height;
-    this.ctx = this.canvas.getContext('2d', { alpha: false });
-    this.backCtx = this.backCanvas.getContext('2d', { alpha: false });
+    this.ctx = this.canvas.getContext('2d', { alpha: true });
+    this.backCtx = this.backCanvas.getContext('2d', { alpha: true });
     this.activeCtx = this.backCtx;
     console.log(`[Renderer] Resized to ${width}x${height}`);
   }
@@ -118,8 +118,11 @@ export class CanvasRenderer {
   }
 
   flipBuffer() {
-    // Blit back buffer → front canvas
+    // Use 'copy' compositing so transparent areas (video window) pass through
+    // to the front canvas, allowing the <video> element to show beneath.
+    this.ctx.globalCompositeOperation = 'copy';
     this.ctx.drawImage(this.backCanvas, 0, 0);
+    this.ctx.globalCompositeOperation = 'source-over';
     this._firstFrameRendered = true;
   }
 
