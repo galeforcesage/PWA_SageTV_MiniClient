@@ -580,39 +580,6 @@ html, body {
 }
 .btn-play:hover { transform: scale(1.1); }
 
-/* ── Debug Overlay ───────────────────────────────────── */
-
-.debug-overlay {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 380px;
-  min-width: 200px;
-  max-width: 80vw;
-  resize: horizontal;
-  overflow: auto;
-  direction: rtl;          /* puts resize handle on left edge */
-  background: rgba(0,0,0,0.9);
-  font-family: 'Menlo', 'Consolas', monospace;
-  font-size: 11px;
-  padding: 8px;
-  z-index: 100;
-  color: #0f0;
-  border-left: 1px solid #333;
-  user-select: text;
-  -webkit-user-select: text;
-}
-.debug-overlay pre {
-  direction: ltr;          /* restore text direction */
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: text;
-  margin: 0;
-}
-
 /* ── Loading spinner ─────────────────────────────────── */
 
 @keyframes spin {

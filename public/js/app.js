@@ -22,8 +22,6 @@ const container = document.getElementById('client-container');
 const toolbar = document.getElementById('toolbar');
 const touchNav = document.getElementById('touch-nav');
 const playOverlay = document.getElementById('play-overlay');
-const debugOverlay = document.getElementById('debug-overlay');
-const debugLog = document.getElementById('debug-log');
 const reconnectBanner = document.getElementById('reconnect-banner');
 const reconnectText = document.getElementById('reconnect-text');
 
@@ -39,13 +37,6 @@ const settingsDialog = document.getElementById('settings-dialog');
 // ── Initialization ───────────────────────────────────────
 
 async function init() {
-  // Debug: Shift+F12 opens debug popup window. Overlay is always hidden now.
-  debugOverlay.hidden = true;
-  const debugEnabled = session.settings ? session.settings.get('debug_overlay', 'true') : 'true';
-  if (debugEnabled === 'true') {
-    _openDebugWindow();
-  }
-
   // Register service worker
   if ('serviceWorker' in navigator) {
     try {
@@ -220,14 +211,6 @@ function setupEventHandlers() {
   // Window beforeunload
   window.addEventListener('beforeunload', () => {
     if (session.connected) session.disconnect();
-  });
-
-  // Keyboard shortcut: Shift+F12 = debug popup
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'F12' && e.shiftKey) {
-      _openDebugWindow();
-      e.preventDefault();
-    }
   });
 
   // Triple-tap on canvas to show toolbar (touch devices like iPad)
@@ -445,53 +428,6 @@ function escapeHtml(str) {
 function escapeAttr(str) {
   return (str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
-
-// ── Debug Logging (popup window) ─────────────────────────
-
-const origLog = console.log;
-const origWarn = console.warn;
-const origError = console.error;
-
-let _debugWin = null;
-let _debugDoc = null;
-let _debugPre = null;
-
-function _openDebugWindow() {
-  if (_debugWin && !_debugWin.closed) return;
-  _debugWin = window.open('', 'sage_debug', 'width=600,height=500,scrollbars=yes,resizable=yes');
-  if (!_debugWin) return; // popup blocked
-  _debugDoc = _debugWin.document;
-  _debugDoc.title = 'SageTV Debug Log';
-  _debugDoc.body.style.cssText = 'background:#111;color:#0f0;font:11px Consolas,Menlo,monospace;margin:0;padding:8px;';
-  _debugPre = _debugDoc.createElement('pre');
-  _debugPre.style.cssText = 'white-space:pre-wrap;word-break:break-all;margin:0;';
-  _debugDoc.body.appendChild(_debugPre);
-}
-
-function appendDebug(level, args) {
-  // Always write to the in-page hidden log too
-  const line = `[${level}] ${Array.from(args).join(' ')}\n`;
-  debugLog.appendChild(document.createTextNode(line));
-  while (debugLog.childNodes.length > 500) {
-    debugLog.removeChild(debugLog.firstChild);
-  }
-
-  // Write to popup window if open
-  if (_debugPre && _debugWin && !_debugWin.closed) {
-    _debugPre.appendChild(_debugDoc.createTextNode(line));
-    while (_debugPre.childNodes.length > 500) {
-      _debugPre.removeChild(_debugPre.firstChild);
-    }
-    const atBottom = _debugWin.innerHeight + _debugWin.scrollY >= _debugDoc.body.scrollHeight - 30;
-    if (atBottom) {
-      _debugWin.scrollTo(0, _debugDoc.body.scrollHeight);
-    }
-  }
-}
-
-console.log = function(...args) { origLog.apply(console, args); appendDebug('LOG', args); };
-console.warn = function(...args) { origWarn.apply(console, args); appendDebug('WRN', args); };
-console.error = function(...args) { origError.apply(console, args); appendDebug('ERR', args); };
 
 // ── Start ────────────────────────────────────────────────
 
