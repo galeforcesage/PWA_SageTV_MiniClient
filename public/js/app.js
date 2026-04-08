@@ -50,6 +50,7 @@ function openEditServerDialog(card) {
   document.getElementById('dlg-server-host').value = host;
   document.getElementById('dlg-bridge-url').value = bridgeUrl;
   document.getElementById('dlg-save').textContent = 'SAVE';
+  document.getElementById('dlg-delete').hidden = false;
   addServerDialog.hidden = false;
   document.getElementById('dlg-server-name').focus();
 }
@@ -91,6 +92,7 @@ function setupEventHandlers() {
     document.getElementById('dlg-server-host').value = '';
     document.getElementById('dlg-bridge-url').value = '';
     document.getElementById('dlg-save').textContent = 'ADD';
+    document.getElementById('dlg-delete').hidden = true;
     addServerDialog.hidden = false;
     document.getElementById('dlg-server-host').focus();
   });
@@ -124,6 +126,16 @@ function setupEventHandlers() {
   document.getElementById('dlg-cancel')?.addEventListener('click', () => {
     _editingServer = null;
     addServerDialog.hidden = true;
+  });
+
+  // Add/Edit Server dialog — Delete
+  document.getElementById('dlg-delete')?.addEventListener('click', () => {
+    if (_editingServer) {
+      session.settings.removeSavedServer(_editingServer.host, _editingServer.port);
+      _editingServer = null;
+      addServerDialog.hidden = true;
+      renderServerGrid();
+    }
   });
 
   // Settings button
