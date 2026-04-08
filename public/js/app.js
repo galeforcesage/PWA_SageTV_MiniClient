@@ -51,6 +51,7 @@ function openEditServerDialog(card) {
   document.getElementById('dlg-bridge-url').value = bridgeUrl;
   document.getElementById('dlg-save').textContent = 'SAVE';
   document.getElementById('dlg-delete').hidden = false;
+  document.getElementById('dlg-delete-confirm').hidden = true;
   addServerDialog.hidden = false;
   document.getElementById('dlg-server-name').focus();
 }
@@ -93,6 +94,7 @@ function setupEventHandlers() {
     document.getElementById('dlg-bridge-url').value = '';
     document.getElementById('dlg-save').textContent = 'ADD';
     document.getElementById('dlg-delete').hidden = true;
+    document.getElementById('dlg-delete-confirm').hidden = true;
     addServerDialog.hidden = false;
     document.getElementById('dlg-server-host').focus();
   });
@@ -128,14 +130,25 @@ function setupEventHandlers() {
     addServerDialog.hidden = true;
   });
 
-  // Add/Edit Server dialog — Delete
+  // Add/Edit Server dialog — Delete (show confirmation)
   document.getElementById('dlg-delete')?.addEventListener('click', () => {
+    document.getElementById('dlg-delete-confirm').hidden = false;
+  });
+
+  // Delete confirmation — OK
+  document.getElementById('dlg-delete-ok')?.addEventListener('click', () => {
     if (_editingServer) {
       session.settings.removeSavedServer(_editingServer.host, _editingServer.port);
       _editingServer = null;
+      document.getElementById('dlg-delete-confirm').hidden = true;
       addServerDialog.hidden = true;
       renderServerGrid();
     }
+  });
+
+  // Delete confirmation — Cancel
+  document.getElementById('dlg-delete-no')?.addEventListener('click', () => {
+    document.getElementById('dlg-delete-confirm').hidden = true;
   });
 
   // Settings button

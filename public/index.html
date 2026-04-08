@@ -46,6 +46,11 @@
     <!-- Add Server Dialog -->
     <div id="add-server-dialog" class="modal-overlay" hidden>
       <div class="modal-card">
+        <div id="dlg-delete-confirm" class="delete-confirm" hidden>
+          <span>Delete this server?</span>
+          <button id="dlg-delete-ok" class="action-btn" style="background:rgba(239,68,68,0.35);color:#ef4444;padding:4px 14px;font-size:13px">OK</button>
+          <button id="dlg-delete-no" class="action-btn" style="background:rgba(255,255,255,0.1);padding:4px 14px;font-size:13px">Cancel</button>
+        </div>
         <div class="form-group">
           <label for="dlg-server-name">Server Name</label>
           <input type="text" id="dlg-server-name" value="My Server" autocomplete="off">

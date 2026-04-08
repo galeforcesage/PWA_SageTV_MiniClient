@@ -241,6 +241,19 @@ html, body {
   font-size: 20px;
   margin-bottom: 20px;
 }
+.delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.3);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: #fca5a5;
+}
+.delete-confirm span { flex: 1; }
 .modal-card-wide {
   max-width: 560px;
   max-height: 85vh;
