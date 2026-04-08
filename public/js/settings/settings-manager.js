@@ -86,8 +86,6 @@ const DEFAULTS = {
   'log_level': 'debug',
 
   // Connection
-  'bridge_url': '',
-
   // Streaming
   'streaming_mode': 'fixed',
 

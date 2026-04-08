@@ -68,6 +68,7 @@ function setupEventHandlers() {
   document.getElementById('btn-add-server').addEventListener('click', () => {
     document.getElementById('dlg-server-name').value = 'My Server';
     document.getElementById('dlg-server-host').value = '';
+    document.getElementById('dlg-bridge-url').value = '';
     addServerDialog.hidden = false;
     document.getElementById('dlg-server-host').focus();
   });
@@ -84,7 +85,8 @@ function setupEventHandlers() {
       document.getElementById('dlg-server-name').focus();
       return;
     }
-    session.settings.addSavedServer(host, 31099, name);
+    const bridgeUrl = document.getElementById('dlg-bridge-url').value.trim() || undefined;
+    session.settings.addSavedServer(host, 31099, name, bridgeUrl);
     addServerDialog.hidden = true;
     renderServerGrid();
   });
@@ -284,14 +286,15 @@ async function handleConnect(host, port) {
   if (!host) return;
   connectError.hidden = true;
 
-  const bridgeUrl = session.settings.get('bridge_url', '') || undefined;
+  // Find bridge URL from the per-server config
+  const servers = session.getSavedServers();
+  const srv = servers.find(s => s.host === host && s.port === port);
+  const bridgeUrl = srv?.bridgeUrl || undefined;
 
   try {
     await session.connect(host, port, bridgeUrl);
     // Update lastUsed on the server cookie
-    const servers = session.getSavedServers();
-    const srv = servers.find(s => s.host === host && s.port === port);
-    if (srv) session.settings.addSavedServer(srv.host, srv.port, srv.name);
+    if (srv) session.settings.addSavedServer(srv.host, srv.port, srv.name, srv.bridgeUrl);
   } catch (err) {
     console.error('[App] Connect failed:', err);
   }
@@ -339,7 +342,6 @@ function openSettings() {
   document.getElementById('set-log-level').value = g('log_level', 'debug');
 
   // Connection
-  document.getElementById('set-bridge-url').value = g('bridge_url', '');
   const w = g('resolution_width', '1280');
   const h = g('resolution_height', '720');
   document.getElementById('set-resolution').value = `${w}x${h}`;
@@ -407,7 +409,6 @@ function saveSettings() {
   s('log_level', document.getElementById('set-log-level').value);
 
   // Connection
-  s('bridge_url', document.getElementById('set-bridge-url').value.trim());
   const [rw, rh] = document.getElementById('set-resolution').value.split('x');
   s('resolution_width', rw);
   s('resolution_height', rh);

@@ -78,14 +78,10 @@ export class SessionManager extends EventTarget {
       this.disconnect();
     }
 
-    // Auto-detect bridge URL if not provided
+    // Auto-detect bridge URL if not provided — default to the SageTV server address on port 8099
     if (!bridgeUrl) {
-      bridgeUrl = this.settings.get('bridge_url');
-      if (!bridgeUrl) {
-        // Default: same host as page, port 8099
-        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        bridgeUrl = `${protocol}//${location.hostname}:8099`;
-      }
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      bridgeUrl = `${protocol}//${serverHost}:8099`;
     }
 
     const width = this.settings.getInt('resolution_width', 1280);

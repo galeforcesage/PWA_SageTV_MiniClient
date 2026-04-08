@@ -54,6 +54,11 @@
           <label for="dlg-server-host">Server Address or Locator ID</label>
           <input type="text" id="dlg-server-host" autocomplete="off" spellcheck="false">
         </div>
+        <div class="form-group">
+          <label for="dlg-bridge-url">Bridge Server URL</label>
+          <input type="text" id="dlg-bridge-url" placeholder="ws://address:8099" autocomplete="off" spellcheck="false">
+          <small>Leave blank to use the SageTV server address on port 8099</small>
+        </div>
         <div class="modal-buttons modal-buttons-center">
           <button id="dlg-save" class="action-btn">ADD</button>
         </div>
@@ -115,10 +120,6 @@
           <!-- Connection -->
           <details class="settings-group">
             <summary>Connection</summary>
-            <div class="settings-item">
-              <div class="settings-item-text"><strong>Bridge Server URL</strong><br><small>WebSocket bridge (leave blank for same host:8099)</small></div>
-              <input type="text" id="set-bridge-url" class="settings-input" placeholder="ws://192.168.1.100:8099" autocomplete="off" spellcheck="false">
-            </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Resolution</strong><br><small>UI rendering resolution sent to server</small></div>
               <select id="set-resolution" class="settings-select">
