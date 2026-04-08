@@ -8,17 +8,13 @@
  */
 
 const LS_PREFIX = 'sagetv_';
+const LS_SERVERS_KEY = LS_PREFIX + 'servers'; // JSON array of server objects
+const MAX_SERVERS = 10;
+
+// ── Legacy Cookie Helpers (for migration only) ──────────────
+
 const COOKIE_PREFIX = 'sagetv_';
-const COOKIE_MAX_AGE_DAYS = 365;
-const SERVER_COOKIE_PREFIX = 'stv_srv_'; // one cookie per server
-
-// ── Cookie Helpers ──────────────────────────────────────────
-
-function setCookie(name, value, days = COOKIE_MAX_AGE_DAYS) {
-  const maxAge = days * 24 * 60 * 60;
-  const encoded = encodeURIComponent(value);
-  document.cookie = `${COOKIE_PREFIX}${name}=${encoded}; max-age=${maxAge}; path=/; SameSite=Lax`;
-}
+const SERVER_COOKIE_PREFIX = 'stv_srv_';
 
 function getCookie(name) {
   const fullName = COOKIE_PREFIX + name;
@@ -36,43 +32,69 @@ function deleteCookie(name) {
   document.cookie = `${COOKIE_PREFIX}${name}=; max-age=0; path=/; SameSite=Lax`;
 }
 
-/**
- * Set a per-server cookie. Cookie name encodes server identity.
- * Value is JSON: { name, host, port, bridgeUrl? }
- */
-function setServerCookie(server) {
-  const key = _serverCookieKey(server.host, server.port);
-  const maxAge = COOKIE_MAX_AGE_DAYS * 24 * 60 * 60;
-  const val = encodeURIComponent(JSON.stringify(server));
-  document.cookie = `${key}=${val}; max-age=${maxAge}; path=/; SameSite=Lax`;
+/** Delete all legacy cookies (settings + servers) so they stop bloating headers. */
+function _purgeAllLegacyCookies() {
+  for (const c of document.cookie.split('; ')) {
+    const eqIdx = c.indexOf('=');
+    if (eqIdx === -1) continue;
+    const k = c.substring(0, eqIdx);
+    if (k.startsWith(COOKIE_PREFIX) || k.startsWith(SERVER_COOKIE_PREFIX)) {
+      document.cookie = `${k}=; max-age=0; path=/; SameSite=Lax`;
+    }
+  }
 }
 
-function deleteServerCookie(host, port) {
-  const key = _serverCookieKey(host, port);
-  document.cookie = `${key}=; max-age=0; path=/; SameSite=Lax`;
+// ── Server List (localStorage) ──────────────────────────────
+
+function _getServerList() {
+  try {
+    const json = localStorage.getItem(LS_SERVERS_KEY);
+    if (json) return JSON.parse(json);
+  } catch { /* ignore */ }
+  return [];
 }
 
-/** Read all server cookies and return array of server objects. */
-function getAllServerCookies() {
-  const servers = [];
+function _saveServerList(servers) {
+  localStorage.setItem(LS_SERVERS_KEY, JSON.stringify(servers.slice(0, MAX_SERVERS)));
+}
+
+/** Migrate any legacy server cookies into the localStorage list. */
+function _migrateLegacyServers() {
+  let migrated = false;
+  const existing = _getServerList();
+
+  // Migrate per-server cookies (stv_srv_*)
   for (const c of document.cookie.split('; ')) {
     const eqIdx = c.indexOf('=');
     if (eqIdx === -1) continue;
     const k = c.substring(0, eqIdx);
     if (!k.startsWith(SERVER_COOKIE_PREFIX)) continue;
     try {
-      const val = decodeURIComponent(c.substring(eqIdx + 1));
-      const srv = JSON.parse(val);
-      if (srv && srv.host) servers.push(srv);
-    } catch { /* skip malformed */ }
+      const srv = JSON.parse(decodeURIComponent(c.substring(eqIdx + 1)));
+      if (srv && srv.host && !existing.some(e => e.host === srv.host && e.port === srv.port)) {
+        existing.push(srv);
+        migrated = true;
+      }
+    } catch { /* skip */ }
   }
-  return servers;
-}
 
-/** Deterministic cookie key for a server (safe chars only). */
-function _serverCookieKey(host, port) {
-  const safe = (host || '').replace(/[^a-zA-Z0-9]/g, '_');
-  return `${SERVER_COOKIE_PREFIX}${safe}_${port || 31099}`;
+  // Migrate old single-JSON cookie / localStorage array
+  try {
+    const oldJson = getCookie('saved_servers') ||
+                    localStorage.getItem(LS_PREFIX + 'saved_servers');
+    if (oldJson) {
+      const old = JSON.parse(oldJson);
+      for (const s of old) {
+        if (s && s.host && !existing.some(e => e.host === s.host && e.port === s.port)) {
+          existing.push(s);
+          migrated = true;
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  if (migrated || existing.length > 0) _saveServerList(existing);
+  return existing;
 }
 
 /** Default preference values matching PrefStore.java / AndroidPrefStore.java */
@@ -136,8 +158,8 @@ const DEFAULTS = {
   'debug_sage_commands': 'false',
 };
 
-/** Cookie name that indicates defaults have been written */
-const SETTINGS_INIT_COOKIE = 'settings_initialized';
+/** Key that indicates defaults have been written */
+const SETTINGS_INIT_KEY = LS_PREFIX + 'settings_initialized';
 
 export class SettingsManager {
   constructor() {
@@ -168,37 +190,44 @@ export class SettingsManager {
       request.onsuccess = (event) => {
         this._db = event.target.result;
         this._dbReady = true;
-        this._ensureDefaultCookies();
+        this._ensureDefaults();
         resolve();
       };
 
       request.onerror = (event) => {
         console.warn('[Settings] IndexedDB unavailable, using localStorage only');
-        this._ensureDefaultCookies();
+        this._ensureDefaults();
         resolve(); // Don't reject, localStorage still works
       };
     });
   }
 
   /**
-   * On first run, write all DEFAULTS into cookies so they persist.
-   * Only runs once — sets a marker cookie to avoid repeating.
+   * On first run, write all DEFAULTS into localStorage.
+   * Migrates legacy cookies to localStorage and purges them.
    */
-  _ensureDefaultCookies() {
-    if (getCookie(SETTINGS_INIT_COOKIE)) return; // already initialized
+  _ensureDefaults() {
+    // Migrate legacy server cookies to localStorage
+    _migrateLegacyServers();
 
-    console.log('[Settings] First run — writing default settings to cookies');
+    if (localStorage.getItem(SETTINGS_INIT_KEY)) {
+      // Already initialized — just purge any leftover cookies
+      _purgeAllLegacyCookies();
+      return;
+    }
+
+    console.log('[Settings] First run — writing default settings to localStorage');
     for (const [key, value] of Object.entries(DEFAULTS)) {
-      // Only write if neither localStorage nor cookie already has a value
-      if (localStorage.getItem(LS_PREFIX + key) === null && getCookie(key) === null) {
-        setCookie(key, value);
-        localStorage.setItem(LS_PREFIX + key, value);
+      if (localStorage.getItem(LS_PREFIX + key) === null) {
+        // Migrate from cookie if present
+        const cookieVal = getCookie(key);
+        localStorage.setItem(LS_PREFIX + key, cookieVal !== null ? cookieVal : value);
       }
     }
 
-    // No default server — user adds their own via "Add Server"
-
-    setCookie(SETTINGS_INIT_COOKIE, '1');
+    // Purge all legacy cookies now that everything is in localStorage
+    _purgeAllLegacyCookies();
+    localStorage.setItem(SETTINGS_INIT_KEY, '1');
   }
 
   // ── localStorage preferences ──────────────────────────────
@@ -211,11 +240,8 @@ export class SettingsManager {
    * @returns {string}
    */
   get(key, defaultValue) {
-    // Check localStorage first (fastest), then cookie fallback
     const val = localStorage.getItem(LS_PREFIX + key);
     if (val !== null) return val;
-    const cookieVal = getCookie(key);
-    if (cookieVal !== null) return cookieVal;
     if (defaultValue !== undefined) return defaultValue;
     return DEFAULTS[key] || '';
   }
@@ -228,8 +254,6 @@ export class SettingsManager {
    */
   set(key, value) {
     localStorage.setItem(LS_PREFIX + key, value);
-    // Mirror all settings to cookies for persistence across sessions
-    setCookie(key, value);
   }
 
   /**
@@ -263,41 +287,36 @@ export class SettingsManager {
    * @returns {Array<{name: string, host: string, port: number, bridgeUrl?: string}>}
    */
   getSavedServers() {
-    const fromCookies = getAllServerCookies();
-    if (fromCookies.length > 0) return fromCookies;
-
-    // Migrate old single-JSON cookie / localStorage if present
-    try {
-      const oldJson = getCookie('saved_servers') ||
-                      localStorage.getItem(LS_PREFIX + 'saved_servers');
-      if (oldJson) {
-        const servers = JSON.parse(oldJson);
-        for (const s of servers) {
-          setServerCookie(s);
-        }
-        deleteCookie('saved_servers');
-        localStorage.removeItem(LS_PREFIX + 'saved_servers');
-        return servers;
-      }
-    } catch { /* ignore */ }
-    return [];
+    return _getServerList();
   }
 
   /**
-   * Save a server connection as its own cookie (1-year expiry).
+   * Save a server connection (up to 10 servers in localStorage).
    */
   addSavedServer(host, port, name, bridgeUrl) {
-    const server = { name: name || host, host, port: port || 31099 };
+    const servers = _getServerList();
+    const idx = servers.findIndex(s => s.host === host && s.port === (port || 31099));
+    const server = { name: name || host, host, port: port || 31099, lastUsed: Date.now() };
     if (bridgeUrl) server.bridgeUrl = bridgeUrl;
-    server.lastUsed = Date.now();
-    setServerCookie(server);
+    if (idx >= 0) {
+      servers[idx] = server;
+    } else {
+      if (servers.length >= MAX_SERVERS) {
+        // Drop the oldest (least recently used) to make room
+        servers.sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0));
+        servers.shift();
+      }
+      servers.push(server);
+    }
+    _saveServerList(servers);
   }
 
   /**
-   * Remove a saved server cookie.
+   * Remove a saved server.
    */
   removeSavedServer(host, port) {
-    deleteServerCookie(host, port || 31099);
+    const servers = _getServerList().filter(s => !(s.host === host && s.port === (port || 31099)));
+    _saveServerList(servers);
   }
 
   // ── IndexedDB operations ──────────────────────────────────
