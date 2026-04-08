@@ -45,7 +45,9 @@ html, body {
 /* ── Connect Screen (Server Selection) ───────────────── */
 
 #connect-screen {
-  background: linear-gradient(135deg, #1a3a1a 0%, #111 40%, #0a1a2e 100%);
+  background:
+    linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.6) 100%),
+    linear-gradient(135deg, #0d2818 0%, #0a1628 40%, #121a2e 70%, #0d1f1a 100%);
   flex-direction: row;
   overflow: hidden;
 }
@@ -88,14 +90,14 @@ html, body {
 /* SageTV logo */
 .server-logo {
   position: absolute;
-  top: 20px;
-  right: 30px;
-  font-size: 36px;
-  font-weight: 800;
-  letter-spacing: -1px;
+  top: 16px;
+  right: 24px;
 }
-.logo-sage { color: #fff; }
-.logo-tv { color: #5cb85c; font-style: italic; }
+.logo-img {
+  height: 56px;
+  width: auto;
+  object-fit: contain;
+}
 
 /* Server card grid */
 .server-grid {
@@ -341,7 +343,8 @@ html, body {
   .sidebar-heading { font-size: 20px; margin-bottom: 0; }
   #connect-screen { flex-direction: column; }
   .server-main { padding: 20px; }
-  .server-logo { top: 8px; right: 12px; font-size: 24px; }
+  .server-logo { top: 8px; right: 12px; }
+  .logo-img { height: 36px; }
   .server-card { width: 150px; height: 140px; }
 }
 
