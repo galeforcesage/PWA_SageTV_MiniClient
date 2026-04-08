@@ -34,6 +34,26 @@ const connectStatus = document.getElementById('connect-status');
 const addServerDialog = document.getElementById('add-server-dialog');
 const settingsDialog = document.getElementById('settings-dialog');
 
+// Tracks server being edited (null = adding new)
+let _editingServer = null;
+
+/**
+ * Open the Add Server dialog pre-filled for editing an existing server card.
+ */
+function openEditServerDialog(card) {
+  const host = card.dataset.host;
+  const port = parseInt(card.dataset.port, 10) || 31099;
+  const name = card.dataset.name || host;
+  const bridgeUrl = card.dataset.bridgeUrl || '';
+  _editingServer = { host, port };
+  document.getElementById('dlg-server-name').value = name;
+  document.getElementById('dlg-server-host').value = host;
+  document.getElementById('dlg-bridge-url').value = bridgeUrl;
+  document.getElementById('dlg-save').textContent = 'SAVE';
+  addServerDialog.hidden = false;
+  document.getElementById('dlg-server-name').focus();
+}
+
 // ── Initialization ───────────────────────────────────────
 
 async function init() {
@@ -66,14 +86,16 @@ async function init() {
 function setupEventHandlers() {
   // Add Server button
   document.getElementById('btn-add-server').addEventListener('click', () => {
+    _editingServer = null;
     document.getElementById('dlg-server-name').value = 'My Server';
     document.getElementById('dlg-server-host').value = '';
     document.getElementById('dlg-bridge-url').value = '';
+    document.getElementById('dlg-save').textContent = 'ADD';
     addServerDialog.hidden = false;
     document.getElementById('dlg-server-host').focus();
   });
 
-  // Add Server dialog — Save
+  // Add/Edit Server dialog — Save
   document.getElementById('dlg-save').addEventListener('click', () => {
     const name = document.getElementById('dlg-server-name').value.trim();
     const host = document.getElementById('dlg-server-host').value.trim();
@@ -86,13 +108,21 @@ function setupEventHandlers() {
       return;
     }
     const bridgeUrl = document.getElementById('dlg-bridge-url').value.trim() || undefined;
+
+    // If editing an existing server with a changed host, remove the old entry first
+    if (_editingServer && (_editingServer.host !== host || _editingServer.port !== 31099)) {
+      session.settings.removeSavedServer(_editingServer.host, _editingServer.port);
+    }
+
     session.settings.addSavedServer(host, 31099, name, bridgeUrl);
+    _editingServer = null;
     addServerDialog.hidden = true;
     renderServerGrid();
   });
 
-  // Add Server dialog — Cancel on overlay click handled generically below
+  // Add/Edit Server dialog — Cancel
   document.getElementById('dlg-cancel')?.addEventListener('click', () => {
+    _editingServer = null;
     addServerDialog.hidden = true;
   });
 
@@ -250,7 +280,8 @@ function renderServerGrid() {
     const host = escapeHtml(s.host);
     const port = s.port || 31099;
     html += `
-      <div class="server-card" data-host="${escapeAttr(s.host)}" data-port="${port}" data-name="${escapeAttr(s.name || '')}">
+      <div class="server-card" data-host="${escapeAttr(s.host)}" data-port="${port}" data-name="${escapeAttr(s.name || '')}" data-bridge-url="${escapeAttr(s.bridgeUrl || '')}">
+        <button class="card-edit" title="Edit server">✎</button>
         <button class="card-delete" title="Remove server">✕</button>
         <div class="card-icon"></div>
         <div class="card-name">${name}</div>
@@ -262,10 +293,32 @@ function renderServerGrid() {
   // Click card → connect
   serverGrid.querySelectorAll('.server-card').forEach((card) => {
     card.addEventListener('click', (e) => {
-      if (e.target.classList.contains('card-delete')) return;
+      if (e.target.classList.contains('card-delete') || e.target.classList.contains('card-edit')) return;
       const host = card.dataset.host;
       const port = parseInt(card.dataset.port, 10) || 31099;
       handleConnect(host, port);
+    });
+
+    // Right-click → edit
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openEditServerDialog(card);
+    });
+
+    // Long-press → edit (touch devices)
+    let lpTimer = null;
+    card.addEventListener('touchstart', (e) => {
+      lpTimer = setTimeout(() => { lpTimer = null; openEditServerDialog(card); }, 600);
+    }, { passive: true });
+    card.addEventListener('touchend', () => { if (lpTimer) clearTimeout(lpTimer); });
+    card.addEventListener('touchmove', () => { if (lpTimer) clearTimeout(lpTimer); });
+  });
+
+  // Edit button
+  serverGrid.querySelectorAll('.card-edit').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openEditServerDialog(btn.closest('.server-card'));
     });
   });
 
