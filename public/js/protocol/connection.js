@@ -929,9 +929,10 @@ export class MiniClientConnection extends EventTarget {
         return 1;
 
       case GFXCMD.DEINIT:
-        console.log('[Connection] Server sent GFXCMD_DEINIT — disabling reconnect');
+        console.log('[Connection] Server sent GFXCMD_DEINIT — exiting to connect screen');
         this.reconnectAllowed = false;
         this.renderer.deinit();
+        this.dispatchEvent(new CustomEvent('exit'));
         break;
 
       case GFXCMD.STARTFRAME:

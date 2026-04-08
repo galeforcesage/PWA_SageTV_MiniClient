@@ -123,6 +123,12 @@ export class SessionManager extends EventTarget {
       this.dispatchEvent(new CustomEvent('firstframe'));
     });
 
+    this.connection.addEventListener('exit', () => {
+      console.log('[Session] Server exit — returning to connect screen');
+      this.disconnect();
+      this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'exit' } }));
+    });
+
     this.connection.addEventListener('reconnecting', (e) => {
       this.dispatchEvent(new CustomEvent('reconnecting', { detail: e.detail }));
     });

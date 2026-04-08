@@ -66,39 +66,85 @@
         <h2>Settings</h2>
         <div class="settings-scroll">
 
-          <!-- Connection -->
-          <div class="settings-section">
-            <div class="form-group">
-              <label for="set-bridge-url">Bridge Server URL</label>
-              <input type="text" id="set-bridge-url" placeholder="ws://192.168.1.100:8099" autocomplete="off" spellcheck="false">
-              <small>WebSocket bridge (leave blank for same host:8099)</small>
+          <!-- General -->
+          <details class="settings-group" open>
+            <summary>General</summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Auto Connect to Last Server</strong><br><small>Automatically connect on startup</small></div>
+              <label class="toggle"><input type="checkbox" id="set-auto-connect"><span class="slider"></span></label>
             </div>
-            <div class="form-group">
-              <label for="set-resolution">Resolution</label>
-              <select id="set-resolution">
-                <option value="1280x720">1280×720</option>
-                <option value="1920x1080">1920×1080</option>
-                <option value="960x540">960×540</option>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Auto Connect Delay</strong><br><small>Seconds to wait before auto-connecting</small></div>
+              <select id="set-auto-connect-delay" class="settings-select">
+                <option value="5">5s</option>
+                <option value="10">10s</option>
+                <option value="15">15s</option>
+                <option value="30">30s</option>
               </select>
             </div>
-          </div>
-
-          <!-- Streaming Mode -->
-          <div class="settings-item" data-key="streaming_mode">
-            <div class="settings-item-text">
-              <strong>Streaming Mode</strong>
-              <span class="settings-desc">Fixed is preferred and offers HD transcoding and remuxing. Dynamic adapts to bandwidth but only in SD</span>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Keep Screen On</strong><br><small>Prevent display from sleeping while connected</small></div>
+              <label class="toggle"><input type="checkbox" id="set-keep-screen-on"><span class="slider"></span></label>
             </div>
-            <select id="set-streaming-mode" class="settings-select">
-              <option value="fixed">Fixed</option>
-              <option value="dynamic">Dynamic</option>
-              <option value="pull">Pull</option>
-            </select>
-          </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Exit to Connect on Standby</strong><br><small>Return to server list when SageTV screensaver activates</small></div>
+              <label class="toggle"><input type="checkbox" id="set-exit-on-standby"><span class="slider"></span></label>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Image Cache Size</strong><br><small>Memory allocated for caching UI images</small></div>
+              <select id="set-image-cache" class="settings-select">
+                <option value="32">32 MB</option>
+                <option value="64">64 MB</option>
+                <option value="96">96 MB</option>
+                <option value="128">128 MB</option>
+                <option value="160">160 MB</option>
+                <option value="192">192 MB</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Logging Level</strong><br><small>Console log verbosity</small></div>
+              <select id="set-log-level" class="settings-select">
+                <option value="debug">Debug</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+              </select>
+            </div>
+          </details>
+
+          <!-- Connection -->
+          <details class="settings-group">
+            <summary>Connection</summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Bridge Server URL</strong><br><small>WebSocket bridge (leave blank for same host:8099)</small></div>
+              <input type="text" id="set-bridge-url" class="settings-input" placeholder="ws://192.168.1.100:8099" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Resolution</strong><br><small>UI rendering resolution sent to server</small></div>
+              <select id="set-resolution" class="settings-select">
+                <option value="960x540">960×540</option>
+                <option value="1280x720">1280×720</option>
+                <option value="1920x1080">1920×1080</option>
+              </select>
+            </div>
+          </details>
+
+          <!-- Streaming -->
+          <details class="settings-group">
+            <summary>Streaming</summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Streaming Mode</strong><br><small>Fixed offers HD transcoding. Dynamic adapts to bandwidth (SD only)</small></div>
+              <select id="set-streaming-mode" class="settings-select">
+                <option value="fixed">Fixed</option>
+                <option value="dynamic">Dynamic</option>
+                <option value="pull">Pull</option>
+              </select>
+            </div>
+          </details>
 
           <!-- Fixed Transcoding Settings -->
           <details class="settings-group">
-            <summary>Fixed Transcoding Settings<br><small>Change the setting SageTV server will use to transcode content when using fixed streaming</small></summary>
+            <summary>Fixed Transcoding<br><small>Settings SageTV server uses to transcode content</small></summary>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Transcoding Preference</strong></div>
               <select id="set-transcode-pref" class="settings-select">
@@ -118,22 +164,18 @@
               <select id="set-transcode-vbitrate" class="settings-select">
                 <option value="1000">1000</option>
                 <option value="2000">2000</option>
-                <option value="3000">3000</option>
                 <option value="4000">4000</option>
-                <option value="5000">5000</option>
                 <option value="6000">6000</option>
                 <option value="8000">8000</option>
-                <option value="10000">10000</option>
               </select>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Video Resolution</strong></div>
               <select id="set-transcode-vres" class="settings-select">
                 <option value="SOURCE">Use Source</option>
-                <option value="CIF">CIF (352×240)</option>
-                <option value="D1">D1 (720×480)</option>
-                <option value="720">720p (1280×720)</option>
-                <option value="1080">1080p (1920×1080)</option>
+                <option value="480">480p</option>
+                <option value="720">720p</option>
+                <option value="1080">1080p</option>
               </select>
             </div>
             <div class="settings-item">
@@ -141,32 +183,40 @@
               <select id="set-transcode-fps" class="settings-select">
                 <option value="SOURCE">Use Source</option>
                 <option value="24">24 fps</option>
-                <option value="29.97">29.97 fps</option>
-                <option value="59.94">59.94 fps</option>
+                <option value="30">30 fps</option>
+                <option value="60">60 fps</option>
               </select>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Audio Codec</strong></div>
               <select id="set-transcode-acodec" class="settings-select">
                 <option value="ac3">AC3</option>
-                <option value="mp2">MP2</option>
+                <option value="aac">AAC</option>
+                <option value="mp3">MP3</option>
               </select>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Audio Bitrate (kbps)</strong></div>
               <select id="set-transcode-abitrate" class="settings-select">
-                <option value="96">96</option>
-                <option value="112">112</option>
+                <option value="64">64</option>
                 <option value="128">128</option>
-                <option value="160">160</option>
                 <option value="192">192</option>
+                <option value="256">256</option>
+              </select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Audio Channels</strong></div>
+              <select id="set-transcode-achannels" class="settings-select">
+                <option value="">Default</option>
+                <option value="2">Stereo</option>
+                <option value="6">5.1</option>
               </select>
             </div>
           </details>
 
           <!-- Fixed Remuxing Settings -->
           <details class="settings-group">
-            <summary>Fixed Remuxing Settings<br><small>Change the setting SageTV server will use to remux content when using fixed streaming</small></summary>
+            <summary>Fixed Remuxing<br><small>Settings SageTV server uses to remux content</small></summary>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Remuxing Preference</strong></div>
               <select id="set-remux-pref" class="settings-select">
@@ -179,21 +229,69 @@
               <div class="settings-item-text"><strong>Container Format</strong></div>
               <select id="set-remux-format" class="settings-select">
                 <option value="matroska">Matroska (MKV)</option>
-                <option value="dvd">DVD (MPEG-PS)</option>
-                <option value="mpegts">MPEG-TS</option>
               </select>
             </div>
           </details>
 
-          <!-- Codec and Container Settings -->
+          <!-- Media Key Mappings -->
           <details class="settings-group">
-            <summary>Codec and Container Settings<br><small>Change how the application reports to SageTV which containers and codecs it supports</small></summary>
+            <summary>Media Key Mappings<br><small>Keyboard repeat behavior</small></summary>
             <div class="settings-item">
-              <div class="settings-item-text"><strong>Extra Video Codecs</strong><br><small>Comma-separated list of extra video codecs to report</small></div>
+              <div class="settings-item-text"><strong>Key Repeat Rate (ms)</strong><br><small>Milliseconds between repeats when key is held</small></div>
+              <input type="number" id="set-key-repeat" class="settings-input" min="50" max="500" step="10">
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Key Repeat Delay (ms)</strong><br><small>Delay before repeats start</small></div>
+              <input type="number" id="set-key-repeat-delay" class="settings-input" min="200" max="3000" step="100">
+            </div>
+          </details>
+
+          <!-- Touch/Mouse Mappings -->
+          <details class="settings-group">
+            <summary>Touch/Mouse Mappings<br><small>Gesture-to-command assignments</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Swipe Left</strong></div>
+              <select id="set-swipe-left" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Swipe Right</strong></div>
+              <select id="set-swipe-right" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Swipe Up</strong></div>
+              <select id="set-swipe-up" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Swipe Down</strong></div>
+              <select id="set-swipe-down" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Double Tap</strong></div>
+              <select id="set-double-tap" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Long Press</strong></div>
+              <select id="set-long-press" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Edge Swipe Top</strong></div>
+              <select id="set-edge-swipe-top" class="settings-select settings-cmd-select"></select>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Edge Swipe Bottom</strong></div>
+              <select id="set-edge-swipe-bottom" class="settings-select settings-cmd-select"></select>
+            </div>
+          </details>
+
+          <!-- Codec Overrides -->
+          <details class="settings-group">
+            <summary>Codec Overrides<br><small>Report additional codecs to SageTV server</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Extra Video Codecs</strong><br><small>Comma-separated (e.g. HEVC,VP9)</small></div>
               <input type="text" id="set-extra-vcodecs" class="settings-input" placeholder="e.g. HEVC,VP9">
             </div>
             <div class="settings-item">
-              <div class="settings-item-text"><strong>Extra Audio Codecs</strong><br><small>Comma-separated list of extra audio codecs to report</small></div>
+              <div class="settings-item-text"><strong>Extra Audio Codecs</strong><br><small>Comma-separated (e.g. OPUS,FLAC)</small></div>
               <input type="text" id="set-extra-acodecs" class="settings-input" placeholder="e.g. OPUS,FLAC">
             </div>
           </details>
@@ -208,6 +306,10 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Client ID</strong></div>
               <span id="set-client-id" class="settings-value"></span>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Available Memory</strong></div>
+              <span id="set-available-memory" class="settings-value"></span>
             </div>
           </details>
 

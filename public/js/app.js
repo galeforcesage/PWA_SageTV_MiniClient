@@ -170,9 +170,13 @@ function setupEventHandlers() {
   });
 
   session.addEventListener('disconnected', (e) => {
-    if (e.detail?.reason !== 'user') {
+    const reason = e.detail?.reason;
+    if (reason === 'user' || reason === 'exit') {
+      // User clicked disconnect or SageTV exit — return to connect screen cleanly
       showScreen('connect');
-      connectError.textContent = `Disconnected: ${e.detail?.reason || 'unknown'}`;
+    } else if (reason) {
+      showScreen('connect');
+      connectError.textContent = `Disconnected: ${reason}`;
       connectError.hidden = false;
     }
     connectStatus.hidden = true;
@@ -300,8 +304,39 @@ function handleDisconnect() {
 
 // ── Settings Dialog ──────────────────────────────────────
 
+/** Populate a <select> with SageCommand options */
+function populateCmdSelect(select, selectedName) {
+  if (select.options.length > 0) {
+    // Already populated, just set value
+    select.value = selectedName || 'None';
+    return;
+  }
+  const cmds = [
+    'None', 'Left', 'Right', 'Up', 'Down', 'Select', 'Back', 'Options', 'Menu',
+    'Home', 'Guide', 'Info', 'Search', 'Play/Pause', 'Play', 'Pause', 'Stop',
+    'Skip Fwd/Page Right', 'Skip Bkwd/Page Left', 'Page Up', 'Page Down',
+    'Channel Up/Page Up', 'Channel Down/Page Down', 'Volume Up', 'Volume Down', 'Mute',
+    'Full Screen', 'Record', 'Delete', 'Favorite',
+  ];
+  for (const name of cmds) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  select.value = selectedName || 'None';
+}
+
 function openSettings() {
   const g = (k, d) => session.settings.get(k, d);
+
+  // General
+  document.getElementById('set-auto-connect').checked = g('auto_connect', 'false') === 'true';
+  document.getElementById('set-auto-connect-delay').value = g('auto_connect_delay', '10');
+  document.getElementById('set-keep-screen-on').checked = g('keep_screen_on', 'true') === 'true';
+  document.getElementById('set-exit-on-standby').checked = g('exit_on_standby', 'true') === 'true';
+  document.getElementById('set-image-cache').value = g('image_cache_size_mb', '96');
+  document.getElementById('set-log-level').value = g('log_level', 'debug');
 
   // Connection
   document.getElementById('set-bridge-url').value = g('bridge_url', '');
@@ -320,10 +355,25 @@ function openSettings() {
   document.getElementById('set-transcode-fps').value = g('fixed_encoding/video_fps', 'SOURCE');
   document.getElementById('set-transcode-acodec').value = g('fixed_encoding/audio_codec', 'ac3');
   document.getElementById('set-transcode-abitrate').value = g('fixed_encoding/audio_bitrate_kbps', '128');
+  document.getElementById('set-transcode-achannels').value = g('fixed_encoding/audio_channels', '');
 
   // Remuxing
   document.getElementById('set-remux-pref').value = g('fixed_remuxing/preference', 'needed');
   document.getElementById('set-remux-format').value = g('fixed_remuxing/format', 'matroska');
+
+  // Key Mappings
+  document.getElementById('set-key-repeat').value = g('key_repeat_ms', '100');
+  document.getElementById('set-key-repeat-delay').value = g('key_repeat_delay_ms', '1000');
+
+  // Touch/Mouse Mappings
+  const touchFields = ['swipe-left', 'swipe-right', 'swipe-up', 'swipe-down',
+                        'double-tap', 'long-press', 'edge-swipe-top', 'edge-swipe-bottom'];
+  const touchKeys = ['swipe_left', 'swipe_right', 'swipe_up', 'swipe_down',
+                      'double_tap', 'long_press', 'edge_swipe_top', 'edge_swipe_bottom'];
+  const touchDefaults = ['Left', 'Right', 'Up', 'Down', 'Select', 'Options', 'Menu', 'Options'];
+  for (let i = 0; i < touchFields.length; i++) {
+    populateCmdSelect(document.getElementById(`set-${touchFields[i]}`), g(touchKeys[i], touchDefaults[i]));
+  }
 
   // Codecs
   document.getElementById('set-extra-vcodecs').value = g('extra_video_codecs', '');
@@ -333,11 +383,28 @@ function openSettings() {
   document.getElementById('set-client-id').textContent =
     localStorage.getItem('sagetv_mac') || '(not set)';
 
+  // Available memory
+  const memInfo = navigator.deviceMemory
+    ? `${navigator.deviceMemory} GB device memory`
+    : 'Not available';
+  const jsHeap = performance.memory
+    ? `${(performance.memory.jsHeapSizeLimit / 1024 / 1024).toFixed(0)} MB heap limit, ${(performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0)} MB used`
+    : memInfo;
+  document.getElementById('set-available-memory').textContent = jsHeap;
+
   settingsDialog.hidden = false;
 }
 
 function saveSettings() {
   const s = (k, v) => session.settings.set(k, v);
+
+  // General
+  s('auto_connect', document.getElementById('set-auto-connect').checked ? 'true' : 'false');
+  s('auto_connect_delay', document.getElementById('set-auto-connect-delay').value);
+  s('keep_screen_on', document.getElementById('set-keep-screen-on').checked ? 'true' : 'false');
+  s('exit_on_standby', document.getElementById('set-exit-on-standby').checked ? 'true' : 'false');
+  s('image_cache_size_mb', document.getElementById('set-image-cache').value);
+  s('log_level', document.getElementById('set-log-level').value);
 
   // Connection
   s('bridge_url', document.getElementById('set-bridge-url').value.trim());
@@ -356,16 +423,55 @@ function saveSettings() {
   s('fixed_encoding/video_fps', document.getElementById('set-transcode-fps').value);
   s('fixed_encoding/audio_codec', document.getElementById('set-transcode-acodec').value);
   s('fixed_encoding/audio_bitrate_kbps', document.getElementById('set-transcode-abitrate').value);
+  s('fixed_encoding/audio_channels', document.getElementById('set-transcode-achannels').value);
 
   // Remuxing
   s('fixed_remuxing/preference', document.getElementById('set-remux-pref').value);
   s('fixed_remuxing/format', document.getElementById('set-remux-format').value);
 
+  // Key Mappings
+  s('key_repeat_ms', document.getElementById('set-key-repeat').value);
+  s('key_repeat_delay_ms', document.getElementById('set-key-repeat-delay').value);
+
+  // Touch/Mouse Mappings
+  const touchFields = ['swipe-left', 'swipe-right', 'swipe-up', 'swipe-down',
+                        'double-tap', 'long-press', 'edge-swipe-top', 'edge-swipe-bottom'];
+  const touchKeys = ['swipe_left', 'swipe_right', 'swipe_up', 'swipe_down',
+                      'double_tap', 'long_press', 'edge_swipe_top', 'edge_swipe_bottom'];
+  for (let i = 0; i < touchFields.length; i++) {
+    s(touchKeys[i], document.getElementById(`set-${touchFields[i]}`).value);
+  }
+
   // Codecs
   s('extra_video_codecs', document.getElementById('set-extra-vcodecs').value.trim());
   s('extra_audio_codecs', document.getElementById('set-extra-acodecs').value.trim());
 
+  // Apply log level immediately
+  _applyLogLevel(document.getElementById('set-log-level').value);
+
   settingsDialog.hidden = true;
+}
+
+/** Apply log level — suppress console methods below the chosen level */
+function _applyLogLevel(level) {
+  const noop = () => {};
+  const levels = ['debug', 'info', 'warn', 'error'];
+  const idx = levels.indexOf(level);
+  // Restore all first (in case level was raised then lowered)
+  if (window._origConsole) {
+    console.log = window._origConsole.log;
+    console.info = window._origConsole.info;
+    console.warn = window._origConsole.warn;
+    console.error = window._origConsole.error;
+  } else {
+    window._origConsole = {
+      log: console.log, info: console.info, warn: console.warn, error: console.error,
+    };
+  }
+  if (idx > 0) console.log = noop;
+  if (idx > 1) console.info = noop;
+  if (idx > 2) console.warn = noop;
+  // Never suppress console.error
 }
 
 // ── Screen Navigation ────────────────────────────────────

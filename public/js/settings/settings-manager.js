@@ -77,6 +77,14 @@ function _serverCookieKey(host, port) {
 
 /** Default preference values matching PrefStore.java / AndroidPrefStore.java */
 const DEFAULTS = {
+  // General
+  'auto_connect': 'false',
+  'auto_connect_delay': '10',
+  'keep_screen_on': 'true',
+  'exit_on_standby': 'true',
+  'image_cache_size_mb': '96',
+  'log_level': 'debug',
+
   // Connection
   'bridge_url': '',
 
@@ -101,6 +109,20 @@ const DEFAULTS = {
   'resolution_width': '1280',
   'resolution_height': '720',
 
+  // Key Mappings
+  'key_repeat_ms': '100',
+  'key_repeat_delay_ms': '1000',
+
+  // Touch/Mouse Mappings
+  'swipe_left': 'Left',
+  'swipe_right': 'Right',
+  'swipe_up': 'Up',
+  'swipe_down': 'Down',
+  'double_tap': 'Select',
+  'long_press': 'Options',
+  'edge_swipe_top': 'Menu',
+  'edge_swipe_bottom': 'Options',
+
   // Codecs
   'extra_video_codecs': '',
   'extra_audio_codecs': '',
@@ -109,12 +131,9 @@ const DEFAULTS = {
   'video_buffer_size': String(16 * 1024 * 1024),
   'audio_buffer_size': String(2 * 1024 * 1024),
 
-  // Image cache
-  'image_cache_size_mb': '64',
+  // Other
   'disk_image_cache_size_mb': '512',
   'cache_images_on_disk': 'true',
-
-  // UI / PWA
   'install_prompted': 'false',
   'debug_sage_commands': 'false',
 };
