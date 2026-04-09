@@ -325,14 +325,18 @@ export const ClientProperty = {
   GFX_COMPOSITE: 'BLEND',
   GFX_SURFACES: 'TRUE',
   GFX_COLORKEY: '080010',
-  INPUT_DEVICES: 'IR,KEYBOARD,MOUSE',
-  STREAMING_PROTOCOLS: 'file,stv',
-  GFX_TEXTMODE: '',      // empty = no text rendering, server uses textures
+  GFX_TEXTMODE: '',      // empty = no text mode, matching Java MiniClient
   GFX_SCALING: 'hardware',
   GFX_OFFLINE_IMAGE_CACHE: 'TRUE',
   ADVANCED_IMAGE_CACHING: 'TRUE',
+  GFX_DRAWMODE: 'FULLSCREEN',
+  GFX_HIRES_SURFACES: 'TRUE',
+  GFX_VIDEO_MASKS: '31',
+  GFX_SUPPORTED_ASPECTS: '16:9',
+  INPUT_DEVICES: 'IR,KEYBOARD,MOUSE',
+  STREAMING_PROTOCOLS: 'file,stv',
   PUSH_AV_CONTAINERS: 'MPEG2-TS',
-  PULL_AV_CONTAINERS: '',  // Browser can't access SageTV media port directly
+  PULL_AV_CONTAINERS: '',
   VIDEO_CODECS: 'H.264',
   AUDIO_CODECS: 'AAC',
 };

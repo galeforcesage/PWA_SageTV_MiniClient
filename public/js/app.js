@@ -194,6 +194,9 @@ function setupEventHandlers() {
     });
   });
 
+  // ── Navigation Drawer (swipe from left edge or mouse drag) ──
+  initNavDrawer();
+
   // Play overlay (autoplay unblock)
   document.getElementById('btn-play').addEventListener('click', () => {
     video.muted = false;
@@ -574,6 +577,105 @@ function toggleFullscreen() {
   }
 }
 
+// ── Navigation Drawer ────────────────────────────────────
+
+function initNavDrawer() {
+  const drawer = document.getElementById('nav-drawer');
+  const backdrop = document.getElementById('nav-drawer-backdrop');
+  const closeBtn = document.getElementById('nav-drawer-close');
+  const container = document.getElementById('client-container');
+
+  if (!drawer || !backdrop || !container) return;
+
+  const EDGE_ZONE = 30; // px from left edge to detect swipe start
+  const SWIPE_THRESHOLD = 60; // px of horizontal movement to trigger open
+
+  let drawerOpen = false;
+
+  function openDrawer() {
+    if (drawerOpen) return;
+    drawerOpen = true;
+    drawer.hidden = false;
+    backdrop.hidden = false;
+    // Force reflow then animate
+    drawer.offsetHeight;
+    drawer.classList.add('open');
+  }
+
+  function closeDrawer() {
+    if (!drawerOpen) return;
+    drawerOpen = false;
+    drawer.classList.remove('open');
+    setTimeout(() => {
+      drawer.hidden = true;
+      backdrop.hidden = true;
+    }, 250);
+  }
+
+  // Close on backdrop click
+  backdrop.addEventListener('click', closeDrawer);
+  closeBtn.addEventListener('click', closeDrawer);
+
+  // Wire drawer buttons to SageCommands
+  drawer.querySelectorAll('.nav-drawer-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const cmdId = parseInt(btn.dataset.cmd, 10);
+      if (!isNaN(cmdId)) {
+        session.sendCommand(cmdId);
+      }
+    });
+  });
+
+  // ── Touch swipe from left edge ──\n  let touchStartX = 0;\n  let touchStartY = 0;\n  let isSwiping = false;\n\n  document.addEventListener('touchstart', (e) => {\n    if (drawerOpen) return;\n    const touch = e.touches[0];\n    if (touch.clientX <= EDGE_ZONE) {\n      touchStartX = touch.clientX;\n      touchStartY = touch.clientY;\n      isSwiping = true;\n    }\n  }, { passive: true });\n\n  document.addEventListener('touchmove', (e) => {\n    if (!isSwiping) return;\n    const touch = e.touches[0];\n    const dx = touch.clientX - touchStartX;\n    const dy = Math.abs(touch.clientY - touchStartY);\n    if (dx > SWIPE_THRESHOLD && dx > dy * 1.5) {\n      isSwiping = false;\n      openDrawer();\n    }\n  }, { passive: true });\n\n  document.addEventListener('touchend', () => {\n    isSwiping = false;\n  }, { passive: true });
+
+
+  // ── Pointer drag from left edge (works with mouse + touch + pen) ──
+  // Using pointer events because the canvas calls preventDefault() on
+  // pointerdown which suppresses mousedown, but pointerdown still bubbles.
+  let ptrStartX = 0;
+  let ptrStartY = 0;
+  let isPtrSwiping = false;
+
+  document.addEventListener('pointerdown', (e) => {
+    if (drawerOpen) return;
+    // Only detect edges when the client screen is active
+    if (clientScreen.classList.contains('active') || !clientScreen.hidden) {
+      if (e.clientX <= EDGE_ZONE) {
+        ptrStartX = e.clientX;
+        ptrStartY = e.clientY;
+        isPtrSwiping = true;
+      }
+    }
+  });
+
+  document.addEventListener('pointermove', (e) => {
+    if (!isPtrSwiping) return;
+    const dx = e.clientX - ptrStartX;
+    const dy = Math.abs(e.clientY - ptrStartY);
+    if (dx > SWIPE_THRESHOLD && dx > dy * 1.5) {
+      isPtrSwiping = false;
+      openDrawer();
+    }
+  });
+
+  document.addEventListener('pointerup', () => {
+    isPtrSwiping = false;
+  });
+
+  // ── Menu button to open drawer ──
+  const menuBtn = document.getElementById('btn-nav-menu');
+  if (menuBtn) menuBtn.addEventListener('click', openDrawer);
+
+  // Close on Escape
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && drawerOpen) {
+      closeDrawer();
+      e.preventDefault();
+    }
+  });
+}
+
 // ── PWA Install Prompt ───────────────────────────────────
 
 let _deferredInstallPrompt = null;
@@ -607,13 +709,13 @@ function checkInstallPrompt() {
   if (isIOS && isSafari) {
     installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
   } else if (isChrome) {
-    installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV MiniClient</strong> (requires HTTPS)';
+    installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV PWA-MiniClient</strong> (requires HTTPS)';
   } else if (isEdge) {
     installText.innerHTML = 'Install as app: <strong>⋯ Menu</strong> → <strong>Apps</strong> → <strong>Install this site as an app</strong>';
   } else if (isFirefox) {
     installText.innerHTML = 'Add to Home Screen from your browser menu for app-like experience';
   } else {
-    installText.innerHTML = '<strong>SageTV MiniClient</strong> — use your browser menu to install as an app';
+    installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> — use your browser menu to install as an app';
   }
   banner.hidden = false;
 
@@ -622,7 +724,7 @@ function checkInstallPrompt() {
     e.preventDefault();
     _deferredInstallPrompt = e;
     console.log('[App] Native install prompt available');
-    installText.innerHTML = '<strong>SageTV MiniClient</strong> can be installed as an app';
+    installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> can be installed as an app';
     installBtn.hidden = false;
 
     installBtn.addEventListener('click', async () => {

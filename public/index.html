@@ -348,6 +348,7 @@
     </div>
     <!-- Floating buttons -->
     <button id="btn-disconnect" class="float-btn float-btn-tl" title="Disconnect">✕</button>
+    <button id="btn-nav-menu" class="float-btn float-btn-ml" title="Menu">☰</button>
     <button id="btn-fullscreen" class="float-btn float-btn-tr" title="Full Screen">⛶</button>
 
     <!-- On-screen navigation overlay (for touch devices) -->
@@ -359,6 +360,58 @@
       <button data-cmd="5" class="nav-btn nav-down" aria-label="Down">▼</button>
       <button data-cmd="75" class="nav-btn nav-back" aria-label="Back">⮌</button>
       <button data-cmd="28" class="nav-btn nav-home" aria-label="Home">⌂</button>
+    </div>
+
+    <!-- Navigation Drawer (swipe from left edge) -->
+    <div id="nav-drawer-backdrop" class="nav-drawer-backdrop" hidden></div>
+    <div id="nav-drawer" class="nav-drawer" hidden>
+      <div class="nav-drawer-header">
+        <span>Navigation</span>
+        <button id="nav-drawer-close" class="nav-drawer-close" aria-label="Close">✕</button>
+      </div>
+      <div class="nav-drawer-section">
+        <div class="nav-drawer-label">Navigation</div>
+        <div class="nav-drawer-row">
+          <button data-cmd="28" class="nav-drawer-btn" title="Home">🏠</button>
+          <button data-cmd="75" class="nav-drawer-btn" title="Back">⮌</button>
+          <button data-cmd="29" class="nav-drawer-btn" title="Options">☰</button>
+          <button data-cmd="24" class="nav-drawer-btn" title="Info">ℹ</button>
+        </div>
+        <div class="nav-drawer-row">
+          <button data-cmd="4" class="nav-drawer-btn" title="Up">▲</button>
+        </div>
+        <div class="nav-drawer-row">
+          <button data-cmd="2" class="nav-drawer-btn" title="Left">◄</button>
+          <button data-cmd="20" class="nav-drawer-btn nav-drawer-select" title="Select">●</button>
+          <button data-cmd="3" class="nav-drawer-btn" title="Right">►</button>
+        </div>
+        <div class="nav-drawer-row">
+          <button data-cmd="5" class="nav-drawer-btn" title="Down">▼</button>
+        </div>
+        <div class="nav-drawer-row">
+          <button data-cmd="55" class="nav-drawer-btn" title="Page Up">⇞</button>
+          <button data-cmd="56" class="nav-drawer-btn" title="Page Down">⇟</button>
+        </div>
+      </div>
+      <div class="nav-drawer-section">
+        <div class="nav-drawer-label">Media</div>
+        <div class="nav-drawer-row">
+          <button data-cmd="62" class="nav-drawer-btn" title="Skip Back">⏮</button>
+          <button data-cmd="9" class="nav-drawer-btn" title="Rewind">⏪</button>
+          <button data-cmd="6" class="nav-drawer-btn" title="Pause">⏸</button>
+          <button data-cmd="7" class="nav-drawer-btn" title="Play">▶</button>
+          <button data-cmd="8" class="nav-drawer-btn" title="Fast Forward">⏩</button>
+          <button data-cmd="61" class="nav-drawer-btn" title="Skip Forward">⏭</button>
+        </div>
+      </div>
+      <div class="nav-drawer-section-bottom">
+        <div class="nav-drawer-label">Volume</div>
+        <div class="nav-drawer-row">
+          <button data-cmd="14" class="nav-drawer-btn" title="Vol Down">🔉</button>
+          <button data-cmd="26" class="nav-drawer-btn" title="Mute">🔇</button>
+          <button data-cmd="13" class="nav-drawer-btn" title="Vol Up">🔊</button>
+        </div>
+      </div>
     </div>
 
     <!-- Play button overlay (for autoplay-blocked media) -->

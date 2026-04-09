@@ -564,6 +564,20 @@ export class MiniClientConnection extends EventTarget {
         return ClientProperty.GFX_COLORKEY;
       case 'GFX_SCALING':
         return ClientProperty.GFX_SCALING;
+      case 'GFX_DRAWMODE':
+        return ClientProperty.GFX_DRAWMODE;
+      case 'GFX_HIRES_SURFACES':
+        return ClientProperty.GFX_HIRES_SURFACES;
+      case 'GFX_VIDEO_MASKS':
+        return ClientProperty.GFX_VIDEO_MASKS;
+      case 'GFX_SUPPORTED_ASPECTS':
+        return ClientProperty.GFX_SUPPORTED_ASPECTS;
+      case 'GFX_SUBTITLES':
+        return 'TRUE';
+      case 'OPENURL_INIT':
+        return 'TRUE';
+      case 'FRAME_STEP':
+        return 'TRUE';
       case 'GFX_RESOLUTION': {
         const res = `${this.width}x${this.height}`;
         console.log(`[Connection] Reporting GFX_RESOLUTION = ${res}`);
@@ -634,7 +648,7 @@ export class MiniClientConnection extends EventTarget {
       case 'DISPLAY_OVERSCAN':
         return '0;0;1.0;1.0';
       case 'FIRMWARE_VERSION':
-        return 'PWA/1.0';
+        return '9.0.0';
       case 'MEDIA_PLAYER_BUFFER_DELAY':
         return '0';
       case 'FIXED_PUSH_MEDIA_FORMAT':

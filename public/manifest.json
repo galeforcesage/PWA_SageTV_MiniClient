@@ -1,5 +1,5 @@
 {
-  "name": "SageTV MiniClient",
+  "name": "SageTV PWA-MiniClient",
   "short_name": "SageTV",
   "description": "SageTV MiniClient for the web - control your SageTV server from any browser",
   "start_url": "/",

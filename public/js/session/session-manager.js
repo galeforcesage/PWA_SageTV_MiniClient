@@ -78,6 +78,12 @@ export class SessionManager extends EventTarget {
       this.disconnect();
     }
 
+    // If serverHost contains a port (e.g. "1.2.3.4:8099"), strip it
+    if (serverHost && serverHost.includes(':')) {
+      const parts = serverHost.split(':');
+      serverHost = parts[0];
+    }
+
     // Auto-detect bridge URL if not provided — default to the SageTV server address on port 8099
     if (!bridgeUrl) {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
