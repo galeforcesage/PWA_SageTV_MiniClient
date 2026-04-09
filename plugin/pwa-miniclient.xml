@@ -1,0 +1,42 @@
+<SageTVPlugin>
+  <Name>PWA MiniClient</Name>
+  <Identifier>pwa-miniclient</Identifier>
+  <Description>HTML5/PWA MiniClient for SageTV. Access your SageTV server from any modern browser — iPad, PC, Android, and more. Includes a Node.js WebSocket bridge that relays the SageTV MiniClient binary protocol over WebSockets, and a fully client-side PWA with Canvas 2D rendering, encryption, compression, media playback, and touch/gamepad input.</Description>
+  <Author>galeforcesage</Author>
+  <CreationDate>2025.01.01</CreationDate>
+  <ModificationDate>2025.01.01</ModificationDate>
+  <Version beta="true">1.0.0</Version>
+  <Desktop>false</Desktop>
+  <ServerOnly>true</ServerOnly>
+  <ResourcePath>pwa-miniclient</ResourcePath>
+  <Webpage><![CDATA[https://github.com/galeforcesage/PWA_SageTV_MiniClient]]></Webpage>
+  <Screenshot><![CDATA[https://github.com/galeforcesage/PWA_SageTV_MiniClient/raw/main/pwa/public/icons/sage_logo_256.png]]></Screenshot>
+
+  <Dependency>
+    <Core/>
+    <MinVersion>9.0.0</MinVersion>
+  </Dependency>
+
+  <PluginType>Standard</PluginType>
+
+  <Package>
+    <PackageType>System</PackageType>
+    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0/pwa-miniclient-1.0.0.zip</Location>
+    <MD5>REPLACE_WITH_ACTUAL_MD5</MD5>
+    <Overwrite>true</Overwrite>
+  </Package>
+
+  <ReleaseNotes><![CDATA[
+1.0.0 - Initial release
+  - Full SageTV MiniClient protocol support (handshake, properties, GFX commands)
+  - RSA key exchange + Blowfish encryption
+  - ZLIB streaming decompression
+  - Canvas 2D rendering with surface compositing and transforms
+  - Font streaming and text rendering
+  - Keyboard, mouse, touch, and gamepad input
+  - HTML5 media playback via MSE with ffmpeg transcoding
+  - Multi-server management with per-server bridge URL
+  - PWA installable with service worker
+  - 28+ configurable settings matching Android MiniClient
+  ]]></ReleaseNotes>
+</SageTVPlugin>

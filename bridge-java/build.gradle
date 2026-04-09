@@ -1,0 +1,54 @@
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'sagex.miniclient.pwa'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Embedded Jetty (HTTP server + WebSocket)
+    implementation 'org.eclipse.jetty:jetty-server:11.0.24'
+    implementation 'org.eclipse.jetty:jetty-servlet:11.0.24'
+    implementation 'org.eclipse.jetty.websocket:websocket-jetty-server:11.0.24'
+    implementation 'org.eclipse.jetty.websocket:websocket-jetty-api:11.0.24'
+
+    // Logging
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    implementation 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+shadowJar {
+    archiveBaseName.set('pwa-miniclient-bridge')
+    archiveClassifier.set('')
+    mergeServiceFiles()
+
+    manifest {
+        attributes(
+            'Main-Class': 'sagex.miniclient.pwa.BridgeMain'
+        )
+    }
+}
+
+tasks.named('jar') {
+    // Standard jar just for SageTV plugin (no main class needed)
+    archiveBaseName.set('pwa-miniclient-bridge')
+}
+
+// Copy PWA static files into resources for embedding in JAR
+processResources {
+    from('../public') {
+        into 'pwa-public'
+    }
+}
+
+build.dependsOn shadowJar

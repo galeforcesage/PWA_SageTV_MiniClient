@@ -237,7 +237,7 @@ export class MiniClientConnection extends EventTarget {
 
     // Media socket messages
     this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-    this.mediaSocket.onclose = () => console.warn('[Connection] Media socket closed');
+    this.mediaSocket.onclose = () => this._onMediaSocketClosed();
     this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
     this.dispatchEvent(new CustomEvent('connected'));
@@ -1745,6 +1745,31 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
+  /**
+   * Auto-reconnect the media WebSocket when SageTV closes the TCP connection
+   * between videos. The GFX channel stays open; only media needs reconnecting.
+   */
+  async _onMediaSocketClosed() {
+    console.warn('[Connection] Media socket closed — will auto-reconnect');
+    if (!this.alive || !this.gfxSocket || this.gfxSocket.readyState !== WebSocket.OPEN) {
+      console.warn('[Connection] GFX not alive, skipping media reconnect');
+      return;
+    }
+    try {
+      const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
+      this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
+      this.mediaSocket.binaryType = 'arraybuffer';
+      await this._waitForOpen(this.mediaSocket, 'Media-Auto-Reconnect');
+      await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
+      this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
+      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
+      this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
+      console.log('[Connection] Media socket auto-reconnected');
+    } catch (err) {
+      console.error('[Connection] Media auto-reconnect failed:', err);
+    }
+  }
+
   // ── Event Sending (Client → Server) ──────────────────────
 
   /**
@@ -2050,7 +2075,7 @@ export class MiniClientConnection extends EventTarget {
       this._reconnectAttempts = 0;
 
       this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-      this.mediaSocket.onclose = () => console.warn('[Connection] Media socket closed');
+      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
@@ -2145,7 +2170,7 @@ export class MiniClientConnection extends EventTarget {
       this._reconnectAttempts = 0;
 
       this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-      this.mediaSocket.onclose = () => console.warn('[Connection] Media socket closed');
+      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
