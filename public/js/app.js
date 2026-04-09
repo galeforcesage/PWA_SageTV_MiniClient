@@ -576,29 +576,60 @@ function toggleFullscreen() {
 
 // ── PWA Install Prompt ───────────────────────────────────
 
+let _deferredInstallPrompt = null;
+
 function checkInstallPrompt() {
   const isInstalled = window.matchMedia('(display-mode: standalone)').matches ||
                       window.navigator.standalone === true;
 
   if (isInstalled) return;
+  if (session.settings.getBool('install_prompted')) return;
 
-  const isIPad = /iPad/.test(navigator.userAgent) ||
-                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+  const banner = document.getElementById('install-banner');
+  const installBtn = document.getElementById('btn-install');
+  const installText = document.getElementById('install-text');
 
-  if (isIPad && isSafari && !session.settings.getBool('install_prompted')) {
-    const banner = document.getElementById('install-banner');
-    banner.hidden = false;
+  document.getElementById('btn-dismiss-install').addEventListener('click', () => {
+    banner.hidden = true;
+    session.settings.set('install_prompted', 'true');
+  });
 
-    document.getElementById('btn-dismiss-install').addEventListener('click', () => {
-      banner.hidden = true;
-      session.settings.set('install_prompted', 'true');
-    });
-  }
-
+  // Chrome/Edge/Samsung: beforeinstallprompt fires when eligible
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
+    _deferredInstallPrompt = e;
     console.log('[App] Install prompt available');
+    installText.innerHTML = '<strong>SageTV MiniClient</strong> can be installed as an app';
+    installBtn.hidden = false;
+    banner.hidden = false;
+
+    installBtn.addEventListener('click', async () => {
+      if (!_deferredInstallPrompt) return;
+      _deferredInstallPrompt.prompt();
+      const result = await _deferredInstallPrompt.userChoice;
+      console.log('[App] Install result:', result.outcome);
+      _deferredInstallPrompt = null;
+      banner.hidden = true;
+      session.settings.set('install_prompted', 'true');
+    }, { once: true });
+  });
+
+  // iOS Safari: no beforeinstallprompt — show manual instructions
+  const isIPad = /iPad/.test(navigator.userAgent) ||
+                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
+  const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+
+  if (isIOS && isSafari) {
+    installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
+    banner.hidden = false;
+  }
+
+  // Auto-hide if user installs via browser UI
+  window.addEventListener('appinstalled', () => {
+    console.log('[App] App installed');
+    banner.hidden = true;
+    session.settings.set('install_prompted', 'true');
   });
 }
 

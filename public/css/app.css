@@ -485,7 +485,7 @@ html, body {
   bottom: calc(20px + var(--safe-bottom));
   left: 20px;
   right: 20px;
-  max-width: 420px;
+  max-width: 480px;
   margin: 0 auto;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -496,6 +496,24 @@ html, body {
   justify-content: space-between;
   font-size: 13px;
   gap: 12px;
+  z-index: 9999;
+}
+
+.btn-install {
+  background: #4CAF50;
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.btn-install:hover {
+  background: #45a049;
 }
 
 /* ── Client Screen ───────────────────────────────────── */
