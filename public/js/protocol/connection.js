@@ -174,6 +174,7 @@ export class MiniClientConnection extends EventTarget {
     this._maxReconnectAttempts = 5;
     this._reconnectTimer = null;
     this._shortSessionCount = 0; // consecutive sessions < 30s
+    this._exitRequested = false; // true after GFXCMD_DEINIT
     this._verboseGfxLog = false; // log every GFX cmd for diagnostics
 
     // Keepalive (ping the WebSocket bridge)
@@ -211,7 +212,7 @@ export class MiniClientConnection extends EventTarget {
     // Immediately wire up GFX message handler so we don't lose
     // property requests the server sends while we open the Media socket
     this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
-    this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
+    this.gfxSocket.onclose = (ev) => this._onDisconnect('GFX socket closed', ev.code);
     this.gfxSocket.onerror = (e) => this._onDisconnect('GFX socket error');
     this._socketClosedWarned = false;
 
@@ -944,6 +945,7 @@ export class MiniClientConnection extends EventTarget {
 
       case GFXCMD.DEINIT:
         console.log('[Connection] Server sent GFXCMD_DEINIT — exiting to connect screen');
+        this._exitRequested = true;
         this.reconnectAllowed = false;
         this.renderer.deinit();
         this.dispatchEvent(new CustomEvent('exit'));
@@ -1950,7 +1952,17 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
-  _onDisconnect(reason) {
+  _onDisconnect(reason, closeCode) {
+    // If server sent DEINIT or bridge closed cleanly (code 1000/1001),
+    // go straight to connect screen — no reconnect
+    if (this._exitRequested || closeCode === 1000 || closeCode === 1001) {
+      console.log(`[Connection] Clean disconnect (exit=${this._exitRequested}, code=${closeCode}) — skipping reconnect`);
+      this.alive = false;
+      this._stopKeepalive();
+      this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'exit' } }));
+      return;
+    }
+
     const elapsed = this._connectTime ? Date.now() - this._connectTime : 0;
     const elapsedStr = this._connectTime ? `${elapsed}ms after connect` : '?';
     console.warn(`[Connection] Disconnected: ${reason} (${elapsedStr}, cmds=${this._gfxCmdCount||0}, props=${this._propCount||0})`);
@@ -2069,7 +2081,7 @@ export class MiniClientConnection extends EventTarget {
       }
 
       this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
-      this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
+      this.gfxSocket.onclose = (ev) => this._onDisconnect('GFX socket closed', ev.code);
       this.gfxSocket.onerror = () => this._onDisconnect('GFX socket error');
       this._socketClosedWarned = false;
 
@@ -2164,9 +2176,8 @@ export class MiniClientConnection extends EventTarget {
       await this._handshake(this.gfxSocket, ConnectionType.GFX, this.gfxBuffer);
 
       this.gfxSocket.onmessage = (event) => this._onGfxData(event.data);
-      this.gfxSocket.onclose = () => this._onDisconnect('GFX socket closed');
+      this.gfxSocket.onclose = (ev) => this._onDisconnect('GFX socket closed', ev.code);
       this.gfxSocket.onerror = () => this._onDisconnect('GFX socket error');
-      this._socketClosedWarned = false;
 
       // Process any leftover handshake bytes
       if (this.gfxBuffer.length > 0) {
