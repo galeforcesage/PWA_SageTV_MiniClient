@@ -594,14 +594,36 @@ function checkInstallPrompt() {
     session.settings.set('install_prompted', 'true');
   });
 
-  // Chrome/Edge/Samsung: beforeinstallprompt fires when eligible
+  // Detect browser type for appropriate instructions
+  const isIPad = /iPad/.test(navigator.userAgent) ||
+                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
+  const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+  const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
+  const isEdge = /Edg/.test(navigator.userAgent);
+  const isFirefox = /Firefox/.test(navigator.userAgent);
+
+  // Show banner immediately for all browsers
+  if (isIOS && isSafari) {
+    installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
+  } else if (isChrome) {
+    installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV MiniClient</strong> (requires HTTPS)';
+  } else if (isEdge) {
+    installText.innerHTML = 'Install as app: <strong>⋯ Menu</strong> → <strong>Apps</strong> → <strong>Install this site as an app</strong>';
+  } else if (isFirefox) {
+    installText.innerHTML = 'Add to Home Screen from your browser menu for app-like experience';
+  } else {
+    installText.innerHTML = '<strong>SageTV MiniClient</strong> — use your browser menu to install as an app';
+  }
+  banner.hidden = false;
+
+  // Chrome/Edge/Samsung: beforeinstallprompt fires when eligible (HTTPS only)
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     _deferredInstallPrompt = e;
-    console.log('[App] Install prompt available');
+    console.log('[App] Native install prompt available');
     installText.innerHTML = '<strong>SageTV MiniClient</strong> can be installed as an app';
     installBtn.hidden = false;
-    banner.hidden = false;
 
     installBtn.addEventListener('click', async () => {
       if (!_deferredInstallPrompt) return;
@@ -613,17 +635,6 @@ function checkInstallPrompt() {
       session.settings.set('install_prompted', 'true');
     }, { once: true });
   });
-
-  // iOS Safari: no beforeinstallprompt — show manual instructions
-  const isIPad = /iPad/.test(navigator.userAgent) ||
-                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
-  const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
-
-  if (isIOS && isSafari) {
-    installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
-    banner.hidden = false;
-  }
 
   // Auto-hide if user installs via browser UI
   window.addEventListener('appinstalled', () => {
