@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-v5-dev';
+const CACHE_NAME = 'sagetv-miniclient-v6';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
@@ -65,7 +65,7 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith(
     DEV_MODE
-      ? fetch(event.request).then((response) => {
+      ? fetch(event.request, { cache: 'no-cache' }).then((response) => {
           if (response.ok) {
             const clone = response.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));

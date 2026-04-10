@@ -53,7 +53,12 @@ function openEditServerDialog(card) {
   document.getElementById('dlg-delete').hidden = false;
   document.getElementById('dlg-delete-confirm').hidden = true;
   addServerDialog.hidden = false;
-  document.getElementById('dlg-server-name').focus();
+  // Wait for layout after unhiding before focusing
+  requestAnimationFrame(() => {
+    const nameInput = document.getElementById('dlg-server-name');
+    nameInput.focus();
+    nameInput.setSelectionRange(0, nameInput.value.length);
+  });
 }
 
 // ── Initialization ───────────────────────────────────────
@@ -96,7 +101,10 @@ function setupEventHandlers() {
     document.getElementById('dlg-delete').hidden = true;
     document.getElementById('dlg-delete-confirm').hidden = true;
     addServerDialog.hidden = false;
-    document.getElementById('dlg-server-host').focus();
+    // Wait for layout after unhiding before focusing
+    requestAnimationFrame(() => {
+      document.getElementById('dlg-server-host').focus();
+    });
   });
 
   // Add/Edit Server dialog — Save
