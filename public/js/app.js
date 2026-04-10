@@ -130,6 +130,18 @@ function setupEventHandlers() {
     addServerDialog.hidden = true;
   });
 
+  // Keyboard shortcuts for the Add/Edit Server dialog
+  addServerDialog.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('dlg-save').click();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      _editingServer = null;
+      addServerDialog.hidden = true;
+    }
+  });
+
   // Add/Edit Server dialog — Delete (show confirmation)
   document.getElementById('dlg-delete')?.addEventListener('click', () => {
     document.getElementById('dlg-delete-confirm').hidden = false;

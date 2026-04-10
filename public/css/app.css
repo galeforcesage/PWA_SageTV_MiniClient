@@ -436,6 +436,10 @@ html, body {
   font-size: 15px;
   outline: none;
   transition: border-color 0.15s;
+  /* Override body user-select:none so inputs are typeable on all browsers */
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: manipulation;
 }
 .form-group input:focus,
 .form-group select:focus {

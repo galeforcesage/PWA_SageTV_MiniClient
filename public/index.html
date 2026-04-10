@@ -53,21 +53,21 @@
         </div>
         <div class="form-group">
           <label for="dlg-server-name">Server Name</label>
-          <input type="text" id="dlg-server-name" value="My Server" autocomplete="off">
+          <input type="text" id="dlg-server-name" value="My Server" autocomplete="off" tabindex="1">
         </div>
         <div class="form-group">
           <label for="dlg-server-host">Server Address or Locator ID</label>
-          <input type="text" id="dlg-server-host" autocomplete="off" spellcheck="false">
+          <input type="text" id="dlg-server-host" autocomplete="off" spellcheck="false" tabindex="2">
         </div>
         <div class="form-group">
           <label for="dlg-bridge-url">Bridge Server URL</label>
-          <input type="text" id="dlg-bridge-url" placeholder="ws://address:8099" autocomplete="off" spellcheck="false">
+          <input type="text" id="dlg-bridge-url" placeholder="ws://address:8099" autocomplete="off" spellcheck="false" tabindex="3">
           <small>Leave blank to use the SageTV server address on port 8099</small>
         </div>
         <div class="modal-buttons modal-buttons-center">
-          <button id="dlg-save" class="action-btn">ADD</button>
-          <button id="dlg-delete" class="action-btn" style="background:rgba(239,68,68,0.25);color:#ef4444" hidden>DELETE</button>
-          <button id="dlg-cancel" class="action-btn" style="background:rgba(255,255,255,0.1)">CANCEL</button>
+          <button id="dlg-save" class="action-btn" tabindex="4">ADD</button>
+          <button id="dlg-delete" class="action-btn" style="background:rgba(239,68,68,0.25);color:#ef4444" hidden tabindex="5">DELETE</button>
+          <button id="dlg-cancel" class="action-btn" style="background:rgba(255,255,255,0.1)" tabindex="6">CANCEL</button>
         </div>
       </div>
     </div>
