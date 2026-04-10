@@ -19,6 +19,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
     private static final Logger log = LoggerFactory.getLogger(BridgePlugin.class);
     private static final String PROP_PORT = "pwa_miniclient/port";
     private static final String PROP_WEB_ROOT = "pwa_miniclient/web_root";
+    private static final String PROP_FFMPEG_PATH = "pwa_miniclient/ffmpeg_path";
     private static final int DEFAULT_PORT = 8099;
 
     private final sage.SageTVPluginRegistry registry;
@@ -46,6 +47,14 @@ public class BridgePlugin implements sage.SageTVPlugin {
             // ignore
         }
 
+        String ffmpegPath = "ffmpeg";
+        try {
+            String val = registry.getSetting(PROP_FFMPEG_PATH, "");
+            if (val != null && !val.isEmpty()) ffmpegPath = val;
+        } catch (Exception e) {
+            // ignore
+        }
+
         // Default web root to SageTV/pwa-miniclient/public
         if (webRoot == null || webRoot.isEmpty()) {
             java.io.File sageDir = new java.io.File(System.getProperty("user.dir", "."));
@@ -56,7 +65,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
         }
 
         try {
-            server = new BridgeServer(port, webRoot);
+            server = new BridgeServer(port, webRoot, ffmpegPath);
             server.start();
             log.info("PWA MiniClient plugin started on port {}", port);
         } catch (Exception e) {
@@ -85,7 +94,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public String[] getConfigSettings() {
-        return new String[]{PROP_PORT, PROP_WEB_ROOT};
+        return new String[]{PROP_PORT, PROP_WEB_ROOT, PROP_FFMPEG_PATH};
     }
 
     @Override
@@ -95,6 +104,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
         }
         if (PROP_WEB_ROOT.equals(setting)) {
             return registry.getSetting(PROP_WEB_ROOT, "");
+        }
+        if (PROP_FFMPEG_PATH.equals(setting)) {
+            return registry.getSetting(PROP_FFMPEG_PATH, "");
         }
         return "";
     }
@@ -114,6 +126,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
         registry.setSetting(setting, value);
         if (PROP_PORT.equals(setting)) {
             log.info("Port changed to {} — restart plugin to apply", value);
+        }
+        if (PROP_FFMPEG_PATH.equals(setting)) {
+            log.info("FFmpeg path changed to {} — restart plugin to apply", value);
         }
     }
 
@@ -135,6 +150,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
         if (PROP_WEB_ROOT.equals(setting)) {
             return "Path to PWA static files (leave blank for default: SageTV/pwa-miniclient/public)";
         }
+        if (PROP_FFMPEG_PATH.equals(setting)) {
+            return "Path to ffmpeg executable (leave blank to use 'ffmpeg' from system PATH)";
+        }
         return "";
     }
 
@@ -142,6 +160,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
     public String getConfigLabel(String setting) {
         if (PROP_PORT.equals(setting)) return "Bridge Port";
         if (PROP_WEB_ROOT.equals(setting)) return "Web Root Path";
+        if (PROP_FFMPEG_PATH.equals(setting)) return "FFmpeg Path";
         return setting;
     }
 
@@ -149,6 +168,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
     public void resetConfig() {
         registry.setSetting(PROP_PORT, String.valueOf(DEFAULT_PORT));
         registry.setSetting(PROP_WEB_ROOT, "");
+        registry.setSetting(PROP_FFMPEG_PATH, "");
     }
 
     @Override

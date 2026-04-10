@@ -10,6 +10,7 @@ public class BridgeMain {
     public static void main(String[] args) throws Exception {
         int port = 8099;
         String webRoot = null;
+        String ffmpegPath = "ffmpeg";
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -19,10 +20,13 @@ public class BridgeMain {
                 case "--web-root":
                     if (i + 1 < args.length) webRoot = args[++i];
                     break;
+                case "--ffmpeg":
+                    if (i + 1 < args.length) ffmpegPath = args[++i];
+                    break;
             }
         }
 
-        BridgeServer server = new BridgeServer(port, webRoot);
+        BridgeServer server = new BridgeServer(port, webRoot, ffmpegPath);
         server.start();
 
         // Shutdown hook for clean exit

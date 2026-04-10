@@ -23,6 +23,12 @@ import java.util.List;
 public class TranscodeServlet extends HttpServlet {
     private static final Logger log = LoggerFactory.getLogger(TranscodeServlet.class);
 
+    private final String ffmpegPath;
+
+    public TranscodeServlet(String ffmpegPath) {
+        this.ffmpegPath = ffmpegPath;
+    }
+
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String filePath = req.getParameter("file");
@@ -63,7 +69,7 @@ public class TranscodeServlet extends HttpServlet {
                 filePath, seekSec, sessionId, file.exists(), file.canRead());
 
         List<String> ffmpegArgs = new ArrayList<>();
-        ffmpegArgs.add("ffmpeg");
+        ffmpegArgs.add(ffmpegPath);
 
         if (seekSec > 0) {
             ffmpegArgs.add("-ss");
