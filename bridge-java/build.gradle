@@ -53,16 +53,14 @@ processResources {
 
 // ── SageTV Plugin Release Packaging ─────────────────────────
 
-// ZIP 1: Shadow JAR → JARs/ (SageTV loads JARs from this folder)
+// ZIP 1: Shadow JAR (SageTV JAR PackageType extracts into JARs/ automatically)
 tasks.register('pluginJarZip', Zip) {
     dependsOn shadowJar
     archiveBaseName.set('pwa-miniclient-jar')
     archiveVersion.set(project.version.toString())
     destinationDirectory.set(layout.buildDirectory.dir('plugin-release'))
 
-    from(shadowJar.archiveFile) {
-        into 'JARs'
-    }
+    from(shadowJar.archiveFile)
 }
 
 // ZIP 2: PWA static files → pwa-miniclient/public/
