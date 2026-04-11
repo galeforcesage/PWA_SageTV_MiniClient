@@ -32,6 +32,14 @@ shadowJar {
     archiveClassifier.set('')
     mergeServiceFiles()
 
+    // Relocate Jetty and Jakarta to avoid conflicts with SageTV's bundled Jetty 9
+    relocate 'org.eclipse.jetty', 'pwa.shadow.org.eclipse.jetty'
+    relocate 'jakarta.servlet', 'pwa.shadow.jakarta.servlet'
+    relocate 'jakarta.websocket', 'pwa.shadow.jakarta.websocket'
+
+    // Relocate SLF4J to avoid conflicts with SageTV's SLF4J
+    relocate 'org.slf4j', 'pwa.shadow.org.slf4j'
+
     // Exclude SageTV stub classes — the real ones are provided at runtime
     exclude 'sage/Sage.class'
     exclude 'sage/SageTVPlugin.class'
