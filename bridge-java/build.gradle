@@ -32,6 +32,12 @@ shadowJar {
     archiveClassifier.set('')
     mergeServiceFiles()
 
+    // Exclude SageTV stub classes — the real ones are provided at runtime
+    exclude 'sage/Sage.class'
+    exclude 'sage/SageTVPlugin.class'
+    exclude 'sage/SageTVPluginRegistry.class'
+    exclude 'sage/SageTVEventListener.class'
+
     manifest {
         attributes(
             'Main-Class': 'sagex.miniclient.pwa.BridgeMain'

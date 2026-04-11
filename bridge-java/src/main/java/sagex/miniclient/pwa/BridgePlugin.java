@@ -35,21 +35,21 @@ public class BridgePlugin implements sage.SageTVPlugin {
         String webRoot = "";
 
         try {
-            String portStr = registry.getSetting(PROP_PORT, String.valueOf(DEFAULT_PORT));
+            String portStr = sage.Sage.get(PROP_PORT, String.valueOf(DEFAULT_PORT));
             port = Integer.parseInt(portStr);
         } catch (Exception e) {
             log.warn("Invalid port setting, using default {}", DEFAULT_PORT);
         }
 
         try {
-            webRoot = registry.getSetting(PROP_WEB_ROOT, "");
+            webRoot = sage.Sage.get(PROP_WEB_ROOT, "");
         } catch (Exception e) {
             // ignore
         }
 
         String ffmpegPath = "ffmpeg";
         try {
-            String val = registry.getSetting(PROP_FFMPEG_PATH, "");
+            String val = sage.Sage.get(PROP_FFMPEG_PATH, "");
             if (val != null && !val.isEmpty()) ffmpegPath = val;
         } catch (Exception e) {
             // ignore
@@ -100,13 +100,13 @@ public class BridgePlugin implements sage.SageTVPlugin {
     @Override
     public String getConfigValue(String setting) {
         if (PROP_PORT.equals(setting)) {
-            return registry.getSetting(PROP_PORT, String.valueOf(DEFAULT_PORT));
+            return sage.Sage.get(PROP_PORT, String.valueOf(DEFAULT_PORT));
         }
         if (PROP_WEB_ROOT.equals(setting)) {
-            return registry.getSetting(PROP_WEB_ROOT, "");
+            return sage.Sage.get(PROP_WEB_ROOT, "");
         }
         if (PROP_FFMPEG_PATH.equals(setting)) {
-            return registry.getSetting(PROP_FFMPEG_PATH, "");
+            return sage.Sage.get(PROP_FFMPEG_PATH, "");
         }
         return "";
     }
@@ -123,7 +123,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public void setConfigValue(String setting, String value) {
-        registry.setSetting(setting, value);
+        sage.Sage.put(setting, value);
         if (PROP_PORT.equals(setting)) {
             log.info("Port changed to {} — restart plugin to apply", value);
         }
@@ -166,9 +166,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public void resetConfig() {
-        registry.setSetting(PROP_PORT, String.valueOf(DEFAULT_PORT));
-        registry.setSetting(PROP_WEB_ROOT, "");
-        registry.setSetting(PROP_FFMPEG_PATH, "");
+        sage.Sage.put(PROP_PORT, String.valueOf(DEFAULT_PORT));
+        sage.Sage.put(PROP_WEB_ROOT, "");
+        sage.Sage.put(PROP_FFMPEG_PATH, "");
     }
 
     @Override
