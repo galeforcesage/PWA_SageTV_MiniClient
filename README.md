@@ -106,6 +106,10 @@ Open `http://localhost:8099/` in your browser.
 | Media playback | 🚧 |
 | Reconnection | 🚧 |
 
+## Screenshot
+
+![PWA MiniClient Server Selection](plugin/screenshot.png)
+
 ## SageTV Plugin
 
 This project is structured as a standard [SageTV V9 plugin](https://github.com/OpenSageTV/sagetv-plugin-repo) for easy installation via the SageTV Plugin Manager.

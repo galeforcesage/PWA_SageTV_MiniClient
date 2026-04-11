@@ -18,6 +18,8 @@ Features:
   - Configurable bridge port and web root path
   - Navigation drawer with volume controls
   - Touch and keyboard input support
+
+After install, open http://{SageTV-IP}:8099 in your browser to connect.
   ]]></Description>
   <Author>galeforcesage</Author>
   <CreationDate>2026.04.01</CreationDate>
