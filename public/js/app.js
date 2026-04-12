@@ -19,7 +19,9 @@ const clientScreen = document.getElementById('client-screen');
 const canvas = document.getElementById('sage-canvas');
 const video = document.getElementById('sage-video');
 const container = document.getElementById('client-container');
-const toolbar = document.getElementById('toolbar');
+const statusBar = document.getElementById('status-bar');
+const statusBitrate = document.getElementById('status-bitrate');
+const statusSignal = document.getElementById('status-signal');
 const touchNav = document.getElementById('touch-nav');
 const playOverlay = document.getElementById('play-overlay');
 const reconnectBanner = document.getElementById('reconnect-banner');
@@ -193,6 +195,8 @@ function setupEventHandlers() {
   // Fullscreen
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);
   document.addEventListener('fullscreenchange', () => {
+    // Hide status bar in fullscreen, show when windowed
+    if (statusBar) statusBar.hidden = !!document.fullscreenElement;
     // Trigger resize after fullscreen transition settles
     setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
     setTimeout(() => window.dispatchEvent(new Event('resize')), 200);
@@ -224,13 +228,17 @@ function setupEventHandlers() {
     playOverlay.hidden = true;
   });
 
-  // Toolbar show on mouse move (desktop)
-  let toolbarTimeout;
-  clientScreen.addEventListener('mousemove', () => {
-    toolbar.classList.add('visible');
-    clearTimeout(toolbarTimeout);
-    toolbarTimeout = setTimeout(() => toolbar.classList.remove('visible'), 3000);
-  });
+  // Status bar update interval
+  let statusBarInterval = null;
+  function startStatusBar() {
+    initStatusBarGauge();
+    if (statusBar) statusBar.hidden = !!document.fullscreenElement;
+    statusBarInterval = setInterval(updateStatusBar, 1000);
+  }
+  function stopStatusBar() {
+    if (statusBarInterval) { clearInterval(statusBarInterval); statusBarInterval = null; }
+    if (statusBar) statusBar.hidden = true;
+  }
 
   // Session events
   session.addEventListener('connecting', () => {
@@ -242,6 +250,7 @@ function setupEventHandlers() {
   session.addEventListener('connected', () => {
     showScreen('client');
     canvas.focus();
+    startStatusBar();
   });
 
   session.addEventListener('firstframe', () => {
@@ -250,6 +259,7 @@ function setupEventHandlers() {
   });
 
   session.addEventListener('disconnected', (e) => {
+    stopStatusBar();
     const reason = e.detail?.reason;
     if (reason === 'user' || reason === 'exit') {
       // User clicked disconnect or SageTV exit — return to connect screen cleanly
@@ -595,6 +605,42 @@ function toggleFullscreen() {
       .call(document)
       .catch(() => {});
   }
+}
+
+// ── Status Bar ───────────────────────────────────────────
+
+const STATUS_BAR_DIVS = 15; // matches SageTV Placeshifter's 15-bar gauge
+const STATUS_BAR_MAX_BUFFER = 15; // max buffer seconds for full gauge (matches SageTV's maxBufferTime=15000ms)
+
+function initStatusBarGauge() {
+  if (!statusSignal) return;
+  statusSignal.innerHTML = '';
+  for (let i = 0; i < STATUS_BAR_DIVS; i++) {
+    const bar = document.createElement('span');
+    bar.className = 'bar';
+    statusSignal.appendChild(bar);
+  }
+}
+
+function updateStatusBar() {
+  const conn = session.connection;
+  if (!conn || !statusBitrate) return;
+
+  const kbps = conn.bandwidthKbps;
+  statusBitrate.textContent = kbps >= 1000
+    ? `${(kbps / 1000).toFixed(1)} Mbps`
+    : `${kbps} Kbps`;
+
+  // Fill bars based on buffer time (like SageTV's buffer gauge)
+  if (!statusSignal) return;
+  const bars = statusSignal.querySelectorAll('.bar');
+  const mp = session.mediaPlayer;
+  const bufferSec = mp ? mp.getBufferTime() : 0;
+  const fill = Math.min(1.0, bufferSec / STATUS_BAR_MAX_BUFFER);
+  const activeBars = Math.round(fill * STATUS_BAR_DIVS);
+  bars.forEach((bar, i) => {
+    bar.classList.toggle('active', i < activeBars);
+  });
 }
 
 // ── Navigation Drawer ────────────────────────────────────

@@ -184,6 +184,39 @@ export class MiniClientConnection extends EventTarget {
     // Media stats protocol
     this._detailedBufferStats = false;
     this._serverMuxTime = -1;
+
+    // Bandwidth tracking for status bar
+    this._bytesReceivedGfx = 0;
+    this._bytesReceivedMedia = 0;
+    this._bytesReceivedWindow = 0;     // bytes in current 1-second window
+    this._bandwidthKbps = 0;           // computed every second
+    this._bandwidthTimer = null;
+  }
+
+  /** Current estimated bandwidth in Kbps. */
+  get bandwidthKbps() { return this._bandwidthKbps; }
+
+  /** Total bytes received on GFX channel. */
+  get bytesReceivedGfx() { return this._bytesReceivedGfx; }
+
+  /** Total bytes received on Media channel. */
+  get bytesReceivedMedia() { return this._bytesReceivedMedia; }
+
+  _startBandwidthTracking() {
+    this._stopBandwidthTracking();
+    this._bytesReceivedWindow = 0;
+    this._bandwidthTimer = setInterval(() => {
+      this._bandwidthKbps = Math.round((this._bytesReceivedWindow * 8) / 1000);
+      this._bytesReceivedWindow = 0;
+    }, 1000);
+  }
+
+  _stopBandwidthTracking() {
+    if (this._bandwidthTimer) {
+      clearInterval(this._bandwidthTimer);
+      this._bandwidthTimer = null;
+    }
+    this._bandwidthKbps = 0;
   }
 
   // ── Connection Lifecycle ──────────────────────────────────
@@ -246,6 +279,7 @@ export class MiniClientConnection extends EventTarget {
 
     // Start keepalive pings
     this._startKeepalive();
+    this._startBandwidthTracking();
 
     // The server will begin sending GET_PROPERTY and SET_PROPERTY,
     // followed by DRAWING_CMD frames. Processing happens in _onGfxData.
@@ -336,6 +370,11 @@ export class MiniClientConnection extends EventTarget {
       return;
     }
     let bytes = new Uint8Array(data);
+
+    // Bandwidth tracking
+    const rawLen = bytes.byteLength;
+    this._bytesReceivedGfx += rawLen;
+    this._bytesReceivedWindow += rawLen;
 
     // If zlib is enabled, decompress the ENTIRE incoming stream
     // (Java wraps the socket with ZInputStream — all bytes are deflated)
@@ -1485,7 +1524,12 @@ export class MiniClientConnection extends EventTarget {
   // ── Media Stream Processing ──────────────────────────────
 
   _onMediaData(data) {
-    this.mediaBuffer.append(new Uint8Array(data));
+    const bytes = new Uint8Array(data);
+    const rawLen = bytes.byteLength;
+    this._bytesReceivedMedia += rawLen;
+    this._bytesReceivedWindow += rawLen;
+
+    this.mediaBuffer.append(bytes);
     this._processMediaBuffer();
   }
 
@@ -1959,6 +2003,7 @@ export class MiniClientConnection extends EventTarget {
       console.log(`[Connection] Clean disconnect (exit=${this._exitRequested}, code=${closeCode}) — skipping reconnect`);
       this.alive = false;
       this._stopKeepalive();
+      this._stopBandwidthTracking();
       this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'exit' } }));
       return;
     }
@@ -1967,6 +2012,7 @@ export class MiniClientConnection extends EventTarget {
     const elapsedStr = this._connectTime ? `${elapsed}ms after connect` : '?';
     console.warn(`[Connection] Disconnected: ${reason} (${elapsedStr}, cmds=${this._gfxCmdCount||0}, props=${this._propCount||0})`);
     this._stopKeepalive();
+    this._stopBandwidthTracking();
 
     // Track consecutive short-lived sessions to prevent infinite reconnect loops
     if (elapsed < 30000) {
@@ -2105,6 +2151,7 @@ export class MiniClientConnection extends EventTarget {
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
+      this._startBandwidthTracking();
       this.dispatchEvent(new CustomEvent('reconnected'));
       console.log('[Connection] Session resume successful — server will continue rendering');
     } catch (err) {
@@ -2199,6 +2246,7 @@ export class MiniClientConnection extends EventTarget {
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
+      this._startBandwidthTracking();
       this.dispatchEvent(new CustomEvent('reconnected'));
       console.log('[Connection] Full reconnect successful — server will negotiate properties');
 
@@ -2222,6 +2270,7 @@ export class MiniClientConnection extends EventTarget {
     this.alive = false;
     this.reconnectAllowed = false;
     this._stopKeepalive();
+    this._stopBandwidthTracking();
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;

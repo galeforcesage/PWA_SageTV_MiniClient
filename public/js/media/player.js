@@ -719,6 +719,23 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
+   * Return seconds of video buffered ahead of current playback position.
+   * This is the equivalent of SageTV Placeshifter's buffer gauge.
+   */
+  getBufferTime() {
+    try {
+      const buffered = this.video.buffered;
+      const currentTime = this.video.currentTime;
+      for (let i = 0; i < buffered.length; i++) {
+        if (currentTime >= buffered.start(i) && currentTime <= buffered.end(i)) {
+          return buffered.end(i) - currentTime;
+        }
+      }
+    } catch { /* no buffered ranges */ }
+    return 0;
+  }
+
+  /**
    * Return remaining buffer capacity for push mode.
    */
   getBufferLeft() {
