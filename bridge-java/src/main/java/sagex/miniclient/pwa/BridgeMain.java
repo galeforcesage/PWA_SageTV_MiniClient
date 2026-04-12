@@ -11,6 +11,7 @@ public class BridgeMain {
         int port = 8099;
         String webRoot = null;
         String ffmpegPath = "ffmpeg";
+        String hwAccel = "auto";
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -23,10 +24,13 @@ public class BridgeMain {
                 case "--ffmpeg":
                     if (i + 1 < args.length) ffmpegPath = args[++i];
                     break;
+                case "--hwaccel":
+                    if (i + 1 < args.length) hwAccel = args[++i];
+                    break;
             }
         }
 
-        BridgeServer server = new BridgeServer(port, webRoot, ffmpegPath);
+        BridgeServer server = new BridgeServer(port, webRoot, ffmpegPath, hwAccel);
         server.start();
 
         // Shutdown hook for clean exit

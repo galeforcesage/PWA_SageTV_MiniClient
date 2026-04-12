@@ -27,12 +27,14 @@ public class BridgeServer {
     private final int port;
     private final String webRoot;
     private final String ffmpegPath;
+    private final String hwAccel;
     private Server server;
 
-    public BridgeServer(int port, String webRoot, String ffmpegPath) {
+    public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel) {
         this.port = port;
         this.webRoot = webRoot;
         this.ffmpegPath = ffmpegPath;
+        this.hwAccel = hwAccel;
     }
 
     public void start() throws Exception {
@@ -58,7 +60,7 @@ public class BridgeServer {
         });
 
         // Transcode servlet
-        context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath)), "/transcode");
+        context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath, hwAccel)), "/transcode");
         context.addServlet(new ServletHolder("transcode-stop", new TranscodeStopServlet()), "/transcode/stop");
 
         // Static file serving for PWA

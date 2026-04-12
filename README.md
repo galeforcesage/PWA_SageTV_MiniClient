@@ -143,10 +143,82 @@ To test as a SageTV dev plugin (requires `devmode=true` in `Sage.properties`):
 
 ### Prerequisites on Server
 
-- Node.js 18+ (for the WebSocket bridge)
+- Java 11+ (bundled with SageTV)
 - ffmpeg (for media transcoding; usually already on SageTV servers)
 
-After plugin installation, the files are placed in `SageTV/pwa-miniclient/`. Run `start.sh` to launch the bridge.
+After plugin installation, open `http://{SageTV-IP}:8099` in your browser.
+
+## Hardware-Accelerated Transcoding
+
+The bridge uses ffmpeg to transcode media for browser playback. By default (`hwaccel=auto`), it probes for a GPU encoder at startup and falls back to software (libx264) if none is found.
+
+### Supported GPU Backends
+
+| Backend | GPU | OS | ffmpeg Encoder |
+|---------|-----|----|----------------|
+| `nvenc` | NVIDIA GeForce/Quadro | Linux, Windows | `h264_nvenc` |
+| `qsv` | Intel (integrated/Arc) | Linux, Windows | `h264_qsv` |
+| `vaapi` | AMD/Intel | Linux only | `h264_vaapi` |
+| `videotoolbox` | Apple Silicon/Intel | macOS | `h264_videotoolbox` |
+| `none` | — | All | `libx264` (software) |
+
+### Configuration
+
+In SageTV Plugin Manager, set **Hardware Acceleration** to one of:
+- `auto` — (default) probe GPU at startup, use best available, fallback to software
+- `nvenc` / `qsv` / `vaapi` / `videotoolbox` — force a specific backend
+- `none` — always use software encoding
+
+Or set directly in `Sage.properties`:
+```properties
+pwa_miniclient/hwaccel=auto
+```
+
+For standalone (non-plugin) mode:
+```bash
+java -jar pwa-miniclient-bridge.jar --hwaccel auto
+```
+
+### Docker: Enabling GPU Access
+
+Docker containers don't have GPU access by default. You must pass through the GPU device.
+
+**NVIDIA GPU (nvenc):**
+```bash
+docker run --gpus all ...
+# or: --device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm
+```
+
+**AMD/Intel GPU (vaapi):**
+```bash
+docker run --device /dev/dri:/dev/dri ...
+```
+
+For docker-compose, add to your SageTV service:
+```yaml
+services:
+  sagetv-server:
+    # ... existing config ...
+    devices:
+      - /dev/dri:/dev/dri          # AMD/Intel VAAPI
+    # For NVIDIA, use this instead:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+```
+
+After adding the device, restart the container and the plugin will auto-detect the GPU on next startup.
+
+**Verify it's working** — check the SageTV server log for:
+```
+[HwAccel] Auto-detected: vaapi — VA-API (AMD/Intel GPU)
+```
+or:
+```
+[HwAccel] No hardware acceleration available, using software encoding
+```
 
 ## License
 

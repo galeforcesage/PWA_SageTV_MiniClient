@@ -20,6 +20,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
     private static final String PROP_PORT = "pwa_miniclient/port";
     private static final String PROP_WEB_ROOT = "pwa_miniclient/web_root";
     private static final String PROP_FFMPEG_PATH = "pwa_miniclient/ffmpeg_path";
+    private static final String PROP_HWACCEL = "pwa_miniclient/hwaccel";
     private static final int DEFAULT_PORT = 8099;
 
     private final sage.SageTVPluginRegistry registry;
@@ -55,6 +56,14 @@ public class BridgePlugin implements sage.SageTVPlugin {
             // ignore
         }
 
+        String hwAccel = "auto";
+        try {
+            String val = sage.Sage.get(PROP_HWACCEL, "auto");
+            if (val != null && !val.isEmpty()) hwAccel = val;
+        } catch (Exception e) {
+            // ignore
+        }
+
         // Default web root to SageTV/pwa-miniclient/public
         if (webRoot == null || webRoot.isEmpty()) {
             java.io.File sageDir = new java.io.File(System.getProperty("user.dir", "."));
@@ -65,7 +74,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
         }
 
         try {
-            server = new BridgeServer(port, webRoot, ffmpegPath);
+            server = new BridgeServer(port, webRoot, ffmpegPath, hwAccel);
             server.start();
             log.info("PWA MiniClient plugin started on port {}", port);
         } catch (Exception e) {
@@ -94,7 +103,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public String[] getConfigSettings() {
-        return new String[]{PROP_PORT, PROP_WEB_ROOT, PROP_FFMPEG_PATH};
+        return new String[]{PROP_PORT, PROP_WEB_ROOT, PROP_FFMPEG_PATH, PROP_HWACCEL};
     }
 
     @Override
@@ -108,6 +117,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
         if (PROP_FFMPEG_PATH.equals(setting)) {
             return sage.Sage.get(PROP_FFMPEG_PATH, "");
         }
+        if (PROP_HWACCEL.equals(setting)) {
+            return sage.Sage.get(PROP_HWACCEL, "auto");
+        }
         return "";
     }
 
@@ -118,7 +130,8 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public int getConfigType(String setting) {
-        return CONFIG_TEXT; // text input for both
+        if (PROP_HWACCEL.equals(setting)) return CONFIG_CHOICE;
+        return CONFIG_TEXT;
     }
 
     @Override
@@ -130,6 +143,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
         if (PROP_FFMPEG_PATH.equals(setting)) {
             log.info("FFmpeg path changed to {} — restart plugin to apply", value);
         }
+        if (PROP_HWACCEL.equals(setting)) {
+            log.info("Hardware acceleration changed to {}", value);
+        }
     }
 
     @Override
@@ -139,6 +155,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
 
     @Override
     public String[] getConfigOptions(String setting) {
+        if (PROP_HWACCEL.equals(setting)) {
+            return new String[]{"auto", "nvenc", "qsv", "vaapi", "videotoolbox", "none"};
+        }
         return new String[0];
     }
 
@@ -153,6 +172,11 @@ public class BridgePlugin implements sage.SageTVPlugin {
         if (PROP_FFMPEG_PATH.equals(setting)) {
             return "Path to ffmpeg executable (leave blank to use 'ffmpeg' from system PATH)";
         }
+        if (PROP_HWACCEL.equals(setting)) {
+            return "Hardware acceleration for transcoding. 'auto' probes GPU at startup (nvenc/qsv/vaapi). "
+                    + "Or force: 'nvenc' (NVIDIA), 'qsv' (Intel QuickSync), 'vaapi' (AMD/Intel Linux), "
+                    + "'videotoolbox' (macOS), 'none' (software x264). Requires plugin restart.";
+        }
         return "";
     }
 
@@ -161,6 +185,7 @@ public class BridgePlugin implements sage.SageTVPlugin {
         if (PROP_PORT.equals(setting)) return "Bridge Port";
         if (PROP_WEB_ROOT.equals(setting)) return "Web Root Path";
         if (PROP_FFMPEG_PATH.equals(setting)) return "FFmpeg Path";
+        if (PROP_HWACCEL.equals(setting)) return "Hardware Acceleration";
         return setting;
     }
 

@@ -24,9 +24,19 @@ public class TranscodeServlet extends HttpServlet {
     private static final Logger log = LoggerFactory.getLogger(TranscodeServlet.class);
 
     private final String ffmpegPath;
+    private volatile HwAccel hwAccel;
 
-    public TranscodeServlet(String ffmpegPath) {
+    public TranscodeServlet(String ffmpegPath, String hwAccelPref) {
         this.ffmpegPath = ffmpegPath;
+        // Detect GPU on construction — runs a quick probe
+        this.hwAccel = HwAccel.detect(ffmpegPath, hwAccelPref);
+        log.info("[Transcode] Hardware acceleration: {} ({})", hwAccel.name, hwAccel.description);
+    }
+
+    /** Re-detect hardware acceleration (called when config changes). */
+    public void setHwAccel(String preference) {
+        this.hwAccel = HwAccel.detect(ffmpegPath, preference);
+        log.info("[Transcode] Hardware acceleration changed: {} ({})", hwAccel.name, hwAccel.description);
     }
 
     @Override
@@ -65,45 +75,11 @@ public class TranscodeServlet extends HttpServlet {
             return;
         }
 
-        log.info("[Transcode] Starting: file={} seek={}s session={} exists={} canRead={}",
-                filePath, seekSec, sessionId, file.exists(), file.canRead());
+        log.info("[Transcode] Starting: file={} seek={}s session={} hwaccel={} exists={} canRead={}",
+                filePath, seekSec, sessionId, hwAccel.name, file.exists(), file.canRead());
 
-        List<String> ffmpegArgs = new ArrayList<>();
-        ffmpegArgs.add(ffmpegPath);
-
-        if (seekSec > 0) {
-            ffmpegArgs.add("-ss");
-            ffmpegArgs.add(String.valueOf(seekSec));
-        }
-
-        ffmpegArgs.addAll(List.of(
-                "-probesize", "5000000",
-                "-analyzeduration", "5000000",
-                "-err_detect", "ignore_err",
-                "-ec", "deblock+guess_mvs",
-                "-v", "warning",
-                "-y",
-                "-threads", "4",
-                "-sn",
-                "-i", filePath,
-                "-f", "mp4",
-                "-vcodec", "libx264",
-                "-preset", "veryfast",
-                "-tune", "zerolatency",
-                "-b:v", "2000000",
-                "-maxrate", "2500000",
-                "-bufsize", "4000000",
-                "-r", "30",
-                "-s", "1280x720",
-                "-g", "60",
-                "-bf", "0",
-                "-acodec", "aac",
-                "-b:a", "128000",
-                "-ar", "48000",
-                "-ac", "2",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "pipe:1"
-        ));
+        List<String> ffmpegArgs = buildArgs(filePath, seekSec, hwAccel);
+        log.info("[Transcode] ffmpeg command: {}", String.join(" ", ffmpegArgs));
 
         ProcessBuilder pb = new ProcessBuilder(ffmpegArgs);
         pb.redirectErrorStream(false);
@@ -117,12 +93,30 @@ public class TranscodeServlet extends HttpServlet {
             return;
         }
 
+        // If hw accel failed and we detected one, retry with software
+        if (!ffmpeg.isAlive() && !"none".equals(hwAccel.name)) {
+            log.warn("[Transcode] {} failed (exit {}), falling back to software encoding",
+                    hwAccel.name, ffmpeg.exitValue());
+            ffmpegArgs = buildArgs(filePath, seekSec, HwAccel.software());
+            log.info("[Transcode] ffmpeg fallback command: {}", String.join(" ", ffmpegArgs));
+            pb = new ProcessBuilder(ffmpegArgs);
+            pb.redirectErrorStream(false);
+            try {
+                ffmpeg = pb.start();
+            } catch (IOException e2) {
+                log.error("[Transcode] ffmpeg fallback spawn error: {}", e2.getMessage());
+                resp.sendError(500, "ffmpeg error: " + e2.getMessage());
+                return;
+            }
+        }
+
         TranscodeManager.getInstance().register(sessionId, ffmpeg);
 
         // Log stderr in background
         final String sid = sessionId;
+        final Process ffmpegProc = ffmpeg;
         Thread stderrThread = new Thread(() -> {
-            try (InputStream stderr = ffmpeg.getErrorStream()) {
+            try (InputStream stderr = ffmpegProc.getErrorStream()) {
                 byte[] buf = new byte[4096];
                 int n;
                 StringBuilder sb = new StringBuilder();
@@ -199,5 +193,67 @@ public class TranscodeServlet extends HttpServlet {
         resp.setHeader("Access-Control-Allow-Origin", "*");
         resp.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
         resp.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    }
+
+    /**
+     * Build the ffmpeg argument list using the given HwAccel profile.
+     */
+    private List<String> buildArgs(String filePath, double seekSec, HwAccel accel) {
+        List<String> args = new ArrayList<>();
+        args.add(ffmpegPath);
+
+        // Hardware-specific input flags (hwaccel device, output format)
+        args.addAll(accel.inputFlags);
+
+        if (seekSec > 0) {
+            args.add("-ss");
+            args.add(String.valueOf(seekSec));
+        }
+
+        args.addAll(List.of(
+                "-probesize", "5000000",
+                "-analyzeduration", "5000000",
+                "-err_detect", "ignore_err",
+                "-ec", "deblock+guess_mvs",
+                "-v", "warning",
+                "-y",
+                "-threads", "4",
+                "-sn",
+                "-i", filePath,
+                "-f", "mp4"
+        ));
+
+        // Video encoder and its flags
+        args.addAll(List.of("-c:v", accel.videoEncoder));
+        args.addAll(accel.encoderFlags);
+
+        // Scaling: hardware filter or software -s flag
+        if (accel.scaleFilter != null) {
+            args.addAll(List.of("-vf", accel.scaleFilter));
+        } else {
+            args.addAll(List.of("-s", "1280x720"));
+        }
+
+        // Common video params
+        args.addAll(List.of(
+                "-b:v", "2000000",
+                "-maxrate", "2500000",
+                "-bufsize", "4000000",
+                "-r", "30",
+                "-g", "60",
+                "-bf", "0"
+        ));
+
+        // Audio + container
+        args.addAll(List.of(
+                "-acodec", "aac",
+                "-b:a", "128000",
+                "-ar", "48000",
+                "-ac", "2",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "pipe:1"
+        ));
+
+        return args;
     }
 }
