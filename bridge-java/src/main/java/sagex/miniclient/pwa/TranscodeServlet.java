@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -75,10 +76,13 @@ public class TranscodeServlet extends HttpServlet {
             return;
         }
 
-        log.info("[Transcode] Starting: file={} seek={}s session={} hwaccel={} exists={} canRead={}",
-                filePath, seekSec, sessionId, hwAccel.name, file.exists(), file.canRead());
+        // Detect live/growing files (recordings in progress)
+        boolean isLive = isFileGrowing(file);
 
-        List<String> ffmpegArgs = buildArgs(filePath, seekSec, hwAccel);
+        log.info("[Transcode] Starting: file={} seek={}s session={} hwaccel={} live={} exists={} canRead={}",
+                filePath, seekSec, sessionId, hwAccel.name, isLive, file.exists(), file.canRead());
+
+        List<String> ffmpegArgs = buildArgs(filePath, seekSec, hwAccel, isLive);
         log.info("[Transcode] ffmpeg command: {}", String.join(" ", ffmpegArgs));
 
         ProcessBuilder pb = new ProcessBuilder(ffmpegArgs);
@@ -97,7 +101,7 @@ public class TranscodeServlet extends HttpServlet {
         if (!ffmpeg.isAlive() && !"none".equals(hwAccel.name)) {
             log.warn("[Transcode] {} failed (exit {}), falling back to software encoding",
                     hwAccel.name, ffmpeg.exitValue());
-            ffmpegArgs = buildArgs(filePath, seekSec, HwAccel.software());
+            ffmpegArgs = buildArgs(filePath, seekSec, HwAccel.software(), isLive);
             log.info("[Transcode] ffmpeg fallback command: {}", String.join(" ", ffmpegArgs));
             pb = new ProcessBuilder(ffmpegArgs);
             pb.redirectErrorStream(false);
@@ -111,6 +115,12 @@ public class TranscodeServlet extends HttpServlet {
         }
 
         TranscodeManager.getInstance().register(sessionId, ffmpeg);
+
+        // For live files, start a feeder thread that pipes the growing file to ffmpeg stdin
+        Thread fileFeeder = null;
+        if (isLive) {
+            fileFeeder = startFileFeeder(file, ffmpeg);
+        }
 
         // Log stderr in background
         final String sid = sessionId;
@@ -171,6 +181,10 @@ public class TranscodeServlet extends HttpServlet {
             // Client disconnected — kill ffmpeg
             log.info("[Transcode] Client disconnected after {}KB, killing session {}", totalWritten / 1024, sessionId);
         } finally {
+            // Stop the file feeder thread if active
+            if (fileFeeder != null) {
+                fileFeeder.interrupt();
+            }
             // Only kill our own process — a newer request may have replaced us
             if (ffmpeg.isAlive()) {
                 ffmpeg.destroyForcibly();
@@ -197,17 +211,28 @@ public class TranscodeServlet extends HttpServlet {
 
     /**
      * Build the ffmpeg argument list using the given HwAccel profile.
+     * @param isLive true if the file is actively growing (recording in progress);
+     *               ffmpeg reads from pipe:0 instead of the file directly.
      */
-    private List<String> buildArgs(String filePath, double seekSec, HwAccel accel) {
+    private List<String> buildArgs(String filePath, double seekSec, HwAccel accel, boolean isLive) {
         List<String> args = new ArrayList<>();
         args.add(ffmpegPath);
 
         // Hardware-specific input flags (hwaccel device, output format)
         args.addAll(accel.inputFlags);
 
-        if (seekSec > 0) {
+        // For live pipe input, don't use -ss (feeder thread handles position)
+        if (!isLive && seekSec > 0) {
             args.add("-ss");
             args.add(String.valueOf(seekSec));
+        }
+
+        // For live pipe input, specify input format explicitly since ffmpeg can't seek to probe
+        if (isLive) {
+            String fmt = detectInputFormat(filePath);
+            if (fmt != null) {
+                args.addAll(List.of("-f", fmt));
+            }
         }
 
         args.addAll(List.of(
@@ -219,7 +244,7 @@ public class TranscodeServlet extends HttpServlet {
                 "-y",
                 "-threads", "4",
                 "-sn",
-                "-i", filePath,
+                "-i", isLive ? "pipe:0" : filePath,
                 "-f", "mp4"
         ));
 
@@ -255,5 +280,75 @@ public class TranscodeServlet extends HttpServlet {
         ));
 
         return args;
+    }
+
+    /**
+     * Check if a file is actively growing (being recorded).
+     * Checks size twice with a 500ms delay.
+     */
+    private boolean isFileGrowing(File file) {
+        long size1 = file.length();
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        long size2 = file.length();
+        boolean growing = size2 > size1;
+        if (growing) {
+            log.info("[Transcode] File is growing: {}B -> {}B (+{}B)", size1, size2, size2 - size1);
+        }
+        return growing;
+    }
+
+    /**
+     * Detect ffmpeg input format from file extension for pipe input.
+     */
+    private String detectInputFormat(String filePath) {
+        String lower = filePath.toLowerCase();
+        if (lower.endsWith(".ts")) return "mpegts";
+        if (lower.endsWith(".mpg") || lower.endsWith(".mpeg")) return "mpeg";
+        return null;
+    }
+
+    /**
+     * Start a thread that continuously reads a growing file and pipes data to ffmpeg stdin.
+     * This allows ffmpeg to transcode a file that is still being recorded (live TV).
+     * The thread exits when ffmpeg stops, the file stops growing for 30 seconds,
+     * or the thread is interrupted.
+     */
+    private Thread startFileFeeder(File file, Process ffmpeg) {
+        Thread t = new Thread(() -> {
+            long totalFed = 0;
+            try (RandomAccessFile raf = new RandomAccessFile(file, "r");
+                 OutputStream out = ffmpeg.getOutputStream()) {
+
+                byte[] buf = new byte[65536];
+                int staleCount = 0;
+                while (ffmpeg.isAlive() && staleCount < 150) { // 150 * 200ms = 30s timeout
+                    int n = raf.read(buf);
+                    if (n > 0) {
+                        out.write(buf, 0, n);
+                        out.flush();
+                        totalFed += n;
+                        staleCount = 0;
+                    } else {
+                        Thread.sleep(200);
+                        staleCount++;
+                    }
+                }
+                log.info("[Transcode] File feeder done: {}KB fed, stale={}, ffmpegAlive={}",
+                        totalFed / 1024, staleCount, ffmpeg.isAlive());
+            } catch (IOException e) {
+                log.debug("[Transcode] File feeder pipe closed: {} ({}KB fed)", e.getMessage(), totalFed / 1024);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.debug("[Transcode] File feeder interrupted ({}KB fed)", totalFed / 1024);
+            }
+        }, "file-feeder");
+        t.setDaemon(true);
+        t.start();
+        return t;
     }
 }

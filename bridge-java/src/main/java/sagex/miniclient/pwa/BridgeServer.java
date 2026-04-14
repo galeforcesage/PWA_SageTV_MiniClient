@@ -57,11 +57,16 @@ public class BridgeServer {
             wsContainer.addMapping("/gfx", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
             wsContainer.addMapping("/media", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
             wsContainer.addMapping("/reconnect", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
+            wsContainer.addMapping("/transcode/push-stream", (upgradeRequest, upgradeResponse) ->
+                    new PushTranscodeWebSocket(ffmpegPath));
         });
 
         // Transcode servlet
         context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath, hwAccel)), "/transcode");
         context.addServlet(new ServletHolder("transcode-stop", new TranscodeStopServlet()), "/transcode/stop");
+
+        // Server info API — probes ffmpeg capabilities for profile auto-detection
+        context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
 
         // Static file serving for PWA
         String resourceBase = resolveWebRoot();

@@ -36,6 +36,11 @@ export class MediaPlayer extends EventTarget {
     this._bridgeSessionId = 'pwa-' + Date.now();
     this._bridgeTimeOffsetMs = 0;  // offset added to video.currentTime for seek
 
+    // Bandwidth tracking (bytes received per 1-second window)
+    this._bwBytesWindow = 0;
+    this._bwKbps = 0;
+    this._bwTimer = null;
+
     // MSE for push mode
     this.mediaSource = null;
     this.sourceBuffer = null;
@@ -57,6 +62,9 @@ export class MediaPlayer extends EventTarget {
 
     // Video dimensions
     this._videoDimensions = { width: 0, height: 0 };
+
+    // Seeking indicator state
+    this.seeking = false;
 
     // Bind video events
     this._setupVideoEvents();
@@ -238,6 +246,7 @@ export class MediaPlayer extends EventTarget {
       const reader = response.body.getReader();
       let totalBytes = 0;
       let autoPlayed = false;
+      this._startBandwidthTracking();
 
       while (true) {
         const { done, value } = await reader.read();
@@ -257,12 +266,17 @@ export class MediaPlayer extends EventTarget {
         }
 
         totalBytes += value.length;
+        this._bwBytesWindow += value.length;
 
         // First chunk — log fMP4 header for debugging
         if (totalBytes === value.length) {
           const hdr = Array.from(value.subarray(0, Math.min(16, value.length)))
             .map(b => b.toString(16).padStart(2, '0')).join(' ');
           console.log(`[MediaPlayer] Bridge first chunk: ${value.length}B, header=[${hdr}]`);
+          if (this.seeking) {
+            this.seeking = false;
+            this.dispatchEvent(new CustomEvent('seeked'));
+          }
         }
 
         // Feed fMP4 directly to SourceBuffer
@@ -463,6 +477,17 @@ export class MediaPlayer extends EventTarget {
 
   stop() {
     this.video.pause();
+    this._stopBandwidthTracking();
+
+    // Clear seeking state
+    if (this.seeking) {
+      this.seeking = false;
+      this.dispatchEvent(new CustomEvent('seeked'));
+    }
+    if (this._seekDebounceTimer) {
+      clearTimeout(this._seekDebounceTimer);
+      this._seekDebounceTimer = null;
+    }
 
     // Stop bridge transcode
     if (this._bridgeAbortController) {
@@ -524,15 +549,66 @@ export class MediaPlayer extends EventTarget {
     if (!isFinite(timeSec) || timeSec < 0) return;
 
     if (this.bridgeMode && this._bridgeFilePath) {
-      // Restart bridge ffmpeg at new position
+      // Debounce rapid seeks — only restart the stream after user stops pressing FF
       console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s`);
+      this.seeking = true;
+      this.dispatchEvent(new CustomEvent('seeking'));
       this._bridgeTimeOffsetMs = timeMS;
       this._bridgeNeedTimeReset = true;
-      this.flush();
-      this._startBridgeStream(this._bridgeFilePath, timeSec);
+
+      // Immediately abort any in-flight stream so playback doesn't keep going at the old position
+      if (this._bridgeAbortController) {
+        this._bridgeAbortController.abort();
+        this._bridgeAbortController = null;
+      }
+
+      // Debounce: reset timer on each press, only fire after 300ms of no new seeks
+      if (this._seekDebounceTimer) clearTimeout(this._seekDebounceTimer);
+      this._seekDebounceTimer = setTimeout(() => {
+        this._seekDebounceTimer = null;
+        this._flushAndRestart(this._bridgeFilePath, timeSec);
+      }, 300);
     } else {
       this.video.currentTime = timeSec;
     }
+  }
+
+  /**
+   * Flush SourceBuffer and wait for removal to complete before restarting bridge stream.
+   */
+  async _flushAndRestart(filePath, seekSec) {
+    // Tag this restart so we can detect if a newer one supersedes us
+    const restartId = Symbol();
+    this._currentRestartId = restartId;
+
+    // Abort current fetch
+    if (this._bridgeAbortController) {
+      this._bridgeAbortController.abort();
+      this._bridgeAbortController = null;
+    }
+    this._pushQueue = [];
+
+    // Clear SourceBuffer and wait for it to finish
+    if (this.sourceBuffer && this.mediaSource && this.mediaSource.readyState === 'open') {
+      try {
+        const buffered = this.sourceBuffer.buffered;
+        if (buffered.length > 0) {
+          if (this.sourceBuffer.updating) {
+            await new Promise(r => this.sourceBuffer.addEventListener('updateend', r, { once: true }));
+          }
+          // Check if superseded while waiting
+          if (this._currentRestartId !== restartId) return;
+          this.sourceBuffer.remove(0, buffered.end(buffered.length - 1));
+          await new Promise(r => this.sourceBuffer.addEventListener('updateend', r, { once: true }));
+        }
+      } catch { /* ignore */ }
+    }
+
+    // If a newer seek came in while we were waiting, bail out
+    if (this._currentRestartId !== restartId) return;
+
+    // Now start the new stream
+    this._startBridgeStream(filePath, seekSec);
   }
 
   /**
@@ -716,6 +792,26 @@ export class MediaPlayer extends EventTarget {
         }
       } catch {/* ignore */}
     }
+  }
+
+  /** Bandwidth of the media stream in Kbps (updated every second). */
+  get bandwidthKbps() { return this._bwKbps; }
+
+  _startBandwidthTracking() {
+    this._stopBandwidthTracking();
+    this._bwBytesWindow = 0;
+    this._bwTimer = setInterval(() => {
+      this._bwKbps = Math.round((this._bwBytesWindow * 8) / 1000);
+      this._bwBytesWindow = 0;
+    }, 1000);
+  }
+
+  _stopBandwidthTracking() {
+    if (this._bwTimer) {
+      clearInterval(this._bwTimer);
+      this._bwTimer = null;
+    }
+    this._bwKbps = 0;
   }
 
   /**

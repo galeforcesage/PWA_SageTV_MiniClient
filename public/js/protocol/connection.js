@@ -185,6 +185,9 @@ export class MiniClientConnection extends EventTarget {
     this._detailedBufferStats = false;
     this._serverMuxTime = -1;
 
+    // Server profile detection (populated via /api/server-info)
+    this.serverProfile = null;   // { serverType, serverFfmpeg, bridgeFfmpeg }
+
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
     this._bytesReceivedMedia = 0;
@@ -227,6 +230,9 @@ export class MiniClientConnection extends EventTarget {
   async connect() {
     await initCompression();
     this._connectTime = Date.now();
+
+    // Fetch server capabilities from bridge before connecting
+    await this._fetchServerInfo();
 
     const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
     console.log(`[Connection] Connecting via ${this.bridgeUrl} to ${this.serverHost}:${this.serverPort}, MAC=${this.macAddress}`);
@@ -584,6 +590,55 @@ export class MiniClientConnection extends EventTarget {
     this._sendSetPropertyReply(retval || 0, encryptThisReply);
   }
 
+  // ── Server Profile Detection ──────────────────────────────
+
+  /**
+   * Fetch server info from the bridge's /api/server-info endpoint.
+   * Detects whether the SageTV server has modern SageTVffmpeg (6.x+)
+   * or the standard build (legacy ffmpeg), so we can adjust transcoding
+   * profiles accordingly.
+   */
+  async _fetchServerInfo() {
+    try {
+      // Convert ws://host:port → http://host:port
+      const httpUrl = this.bridgeUrl
+        .replace(/^ws:/, 'http:')
+        .replace(/^wss:/, 'https:');
+
+      const resp = await fetch(`${httpUrl}/api/server-info`, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!resp.ok) {
+        console.warn(`[Connection] Server info fetch failed: ${resp.status}`);
+        return;
+      }
+
+      this.serverProfile = await resp.json();
+      console.log(`[Connection] Server profile: ${this.serverProfile.serverType}`,
+        this.serverProfile.serverFfmpeg?.version || 'unknown ffmpeg');
+
+      // Check if server has modern SageTVffmpeg capabilities (HEVC, Opus, etc.)
+      if (this.serverProfile.serverFfmpeg?.encoders) {
+        const enc = this.serverProfile.serverFfmpeg.encoders;
+        this.serverProfile.hasHevc = enc.some(e => e.includes('x265') || e.includes('hevc'));
+        this.serverProfile.hasAv1 = enc.some(e => e.includes('aom') || e.includes('svtav1'));
+        this.serverProfile.hasOpus = enc.includes('libopus');
+        this.serverProfile.hasAac = enc.includes('aac') || enc.includes('libfdk_aac');
+      }
+    } catch (err) {
+      console.warn('[Connection] Could not fetch server info:', err.message);
+      // Non-fatal — we'll use defaults (standard profile)
+    }
+  }
+
+  /**
+   * Whether the SageTV server's ffmpeg supports a given encoder.
+   */
+  _serverHasEncoder(name) {
+    return this.serverProfile?.serverFfmpeg?.encoders?.includes(name) || false;
+  }
+
   /**
    * Resolve a property value for GET_PROPERTY.
    */
@@ -636,20 +691,20 @@ export class MiniClientConnection extends EventTarget {
       case 'STREAMING_PROTOCOLS':
         return ClientProperty.STREAMING_PROTOCOLS;
       case 'VIDEO_CODECS':
-        // Report native codec support so server uses pull mode (no transcoding)
-        // Bridge will handle transcoding with system ffmpeg
-        return 'MPEG2-Video';
+        // Report broad codec support so server always sends file path (pull/bridge mode).
+        // Bridge ffmpeg handles all actual decoding/transcoding to H.264 fMP4.
+        return 'MPEG2-VIDEO,MPEG2-VIDEO@HL,MPEG1-VIDEO,MPEG4-VIDEO,H.264,HEVC,VC1,WMV9,MJPEG,VP8,VP9';
       case 'AUDIO_CODECS':
-        return 'AC3';
+        return 'AC3,EAC3,AAC,AAC-HE,MP3,MP2,DTS,FLAC,PCM,VORBIS,OPUS';
       case 'PUSH_AV_CONTAINERS':
-        return '';  // No push — use pull mode
+        return 'MPEG2-TS';  // Accept push in MPEG-TS for live TV
       case 'PULL_AV_CONTAINERS':
-        return 'MPEG2-PS,MPEG2-TS';
+        return 'MPEG2-PS,MPEG2-TS,MPEG1-PS,MP4,MATROSKA,AVI,ASF';
       // Transcoding settings
       case 'FIXED_ENCODING_PREFERENCE':
-        return pref('fixed_encoding/preference', 'off');
+        return pref('fixed_encoding/preference', 'needed');
       case 'FIXED_ENCODING_FORMAT':
-        return pref('fixed_encoding/format', 'matroska');
+        return pref('fixed_encoding/format', 'mpegts');
       case 'FIXED_ENCODING_VIDEO_BITRATE_KBPS':
         return pref('fixed_encoding/video_bitrate_kbps', '4000');
       case 'FIXED_ENCODING_VIDEO_RESOLUTION':
@@ -657,7 +712,7 @@ export class MiniClientConnection extends EventTarget {
       case 'FIXED_ENCODING_FPS':
         return pref('fixed_encoding/video_fps', 'SOURCE');
       case 'FIXED_ENCODING_AUDIO_CODEC':
-        return pref('fixed_encoding/audio_codec', 'ac3');
+        return pref('fixed_encoding/audio_codec', 'aac');
       case 'FIXED_ENCODING_AUDIO_BITRATE_KBPS':
         return pref('fixed_encoding/audio_bitrate_kbps', '128');
       // Remuxing settings
@@ -691,11 +746,19 @@ export class MiniClientConnection extends EventTarget {
         return '9.0.0';
       case 'MEDIA_PLAYER_BUFFER_DELAY':
         return '0';
-      case 'FIXED_PUSH_MEDIA_FORMAT':
-        // Bridge handles transcoding — no server-side transcoding needed
-        return '';
+      case 'FIXED_PUSH_MEDIA_FORMAT': {
+        // Tell server to transcode push content for MSE playback.
+        // videocodec can be H.264 (all servers) or H.265 (modern SageTVffmpeg only)
+        const vcodec = pref('fixed_encoding/video_codec', 'H.264');
+        const vbr = parseInt(pref('fixed_encoding/video_bitrate_kbps', '4000')) * 1000;
+        const abr = parseInt(pref('fixed_encoding/audio_bitrate_kbps', '128')) * 1000;
+        const acodec = pref('fixed_encoding/audio_codec', 'aac');
+        const res = pref('fixed_encoding/video_resolution', 'SOURCE');
+        const fps = pref('fixed_encoding/video_fps', 'SOURCE');
+        return `container=mpegts;videocodec=${vcodec};videobitrate=${vbr};fps=${fps};resolution=${res};audiocodec=${acodec};audiobitrate=${abr};`;
+      }
       case 'FIXED_PUSH_REMUX_FORMAT':
-        return '';
+        return 'container=mpegts;videocodec=COPY;audiocodec=COPY;';
       case 'PUSH_BUFFER_SEEKING':
         return 'TRUE';
       case 'DETAILED_BUFFER_STATS':

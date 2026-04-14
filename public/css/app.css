@@ -730,8 +730,8 @@ html, body {
   color: #fff;
   background: rgba(0,0,0,0.8);
 }
-.float-btn-tl { top: 4px; left: 4px; }
-.float-btn-tr { top: 4px; right: 4px; }
+.float-btn-tl { top: 30px; left: 4px; }
+.float-btn-tr { top: 30px; right: 4px; }
 .float-btn-ml { top: 50%; left: 4px; transform: translateY(-50%); font-size: 20px; }
 
 .toolbar-title {
@@ -906,6 +906,25 @@ html, body {
 @media (hover: none) and (pointer: coarse) {
   /* Touch-only devices: show touch nav by default */
   #touch-nav { display: grid !important; }
+}
+
+/* ── Seeking Overlay ──────────────────────────────────── */
+
+.seeking-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0,0,0,0.75);
+  color: #fff;
+  padding: 14px 28px;
+  border-radius: var(--radius);
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 180;
+  pointer-events: none;
 }
 
 /* ── Reconnect Banner ────────────────────────────────── */

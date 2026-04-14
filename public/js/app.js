@@ -24,6 +24,7 @@ const statusBitrate = document.getElementById('status-bitrate');
 const statusSignal = document.getElementById('status-signal');
 const touchNav = document.getElementById('touch-nav');
 const playOverlay = document.getElementById('play-overlay');
+const seekingOverlay = document.getElementById('seeking-overlay');
 const reconnectBanner = document.getElementById('reconnect-banner');
 const reconnectText = document.getElementById('reconnect-text');
 
@@ -300,6 +301,12 @@ function setupEventHandlers() {
     session.mediaPlayer.addEventListener('playblocked', () => {
       playOverlay.hidden = false;
     });
+    session.mediaPlayer.addEventListener('seeking', () => {
+      seekingOverlay.hidden = false;
+    });
+    session.mediaPlayer.addEventListener('seeked', () => {
+      seekingOverlay.hidden = true;
+    });
   }
 
   // Window beforeunload
@@ -461,6 +468,7 @@ function openSettings() {
   document.getElementById('set-streaming-mode').value = g('streaming_mode', 'fixed');
 
   // Transcoding
+  document.getElementById('set-transcode-vcodec').value = g('fixed_encoding/video_codec', 'H.264');
   document.getElementById('set-transcode-pref').value = g('fixed_encoding/preference', 'needed');
   document.getElementById('set-transcode-format').value = g('fixed_encoding/format', 'matroska');
   document.getElementById('set-transcode-vbitrate').value = g('fixed_encoding/video_bitrate_kbps', '4000');
@@ -469,6 +477,29 @@ function openSettings() {
   document.getElementById('set-transcode-acodec').value = g('fixed_encoding/audio_codec', 'ac3');
   document.getElementById('set-transcode-abitrate').value = g('fixed_encoding/audio_bitrate_kbps', '128');
   document.getElementById('set-transcode-achannels').value = g('fixed_encoding/audio_channels', '');
+
+  // Update server profile display and show/hide codec options based on detected capabilities
+  const profile = session.connection?.serverProfile;
+  const profileEl = document.getElementById('set-server-profile');
+  if (profile && profile.serverFfmpeg) {
+    const ver = profile.serverFfmpeg.version || 'unknown';
+    const type = profile.serverType === 'modern'
+      ? `SageTVffmpeg ${ver} (HEVC capable)`
+      : `Legacy SageTVffmpeg (${ver})`;
+    profileEl.textContent = type;
+    profileEl.style.color = profile.serverType === 'modern' ? '#4caf50' : '#aaa';
+  } else {
+    profileEl.textContent = 'Not connected';
+    profileEl.style.color = '#aaa';
+  }
+  // Show/hide HEVC video codec option
+  document.querySelectorAll('.opt-hevc').forEach(el => {
+    el.style.display = profile?.hasHevc ? '' : 'none';
+  });
+  // Show/hide Opus audio option
+  document.querySelectorAll('.opt-opus').forEach(el => {
+    el.style.display = profile?.hasOpus ? '' : 'none';
+  });
 
   // Remuxing
   document.getElementById('set-remux-pref').value = g('fixed_remuxing/preference', 'needed');
@@ -528,6 +559,7 @@ function saveSettings() {
   s('streaming_mode', document.getElementById('set-streaming-mode').value);
 
   // Transcoding
+  s('fixed_encoding/video_codec', document.getElementById('set-transcode-vcodec').value);
   s('fixed_encoding/preference', document.getElementById('set-transcode-pref').value);
   s('fixed_encoding/format', document.getElementById('set-transcode-format').value);
   s('fixed_encoding/video_bitrate_kbps', document.getElementById('set-transcode-vbitrate').value);
@@ -626,7 +658,8 @@ function updateStatusBar() {
   const conn = session.connection;
   if (!conn || !statusBitrate) return;
 
-  const kbps = conn.bandwidthKbps;
+  const mp = session.mediaPlayer;
+  const kbps = mp ? mp.bandwidthKbps : 0;
   statusBitrate.textContent = kbps >= 1000
     ? `${(kbps / 1000).toFixed(1)} Mbps`
     : `${kbps} Kbps`;
@@ -634,13 +667,20 @@ function updateStatusBar() {
   // Fill bars based on buffer time (like SageTV's buffer gauge)
   if (!statusSignal) return;
   const bars = statusSignal.querySelectorAll('.bar');
-  const mp = session.mediaPlayer;
   const bufferSec = mp ? mp.getBufferTime() : 0;
   const fill = Math.min(1.0, bufferSec / STATUS_BAR_MAX_BUFFER);
   const activeBars = Math.round(fill * STATUS_BAR_DIVS);
   bars.forEach((bar, i) => {
     bar.classList.toggle('active', i < activeBars);
   });
+
+  // Keep play/pause button icon in sync with player state
+  const playPauseBtn = document.getElementById('btn-play-pause');
+  if (playPauseBtn && mp) {
+    const isPlaying = mp.state === 2; // PlayerState.PLAY
+    playPauseBtn.textContent = isPlaying ? '⏸' : '▶';
+    playPauseBtn.title = isPlaying ? 'Pause' : 'Play';
+  }
 }
 
 // ── Navigation Drawer ────────────────────────────────────
@@ -683,12 +723,24 @@ function initNavDrawer() {
   closeBtn.addEventListener('click', closeDrawer);
 
   // Wire drawer buttons to SageCommands
+  const playPauseBtn = document.getElementById('btn-play-pause');
   drawer.querySelectorAll('.nav-drawer-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const cmdId = parseInt(btn.dataset.cmd, 10);
-      if (!isNaN(cmdId)) {
+      if (btn === playPauseBtn) {
+        // Toggle play/pause based on current media state
+        const mp = session.mediaPlayer;
+        const isPlaying = mp && (mp.state === 2); // PlayerState.PLAY === 2
+        const cmdId = isPlaying ? 6 : 7; // 6=PAUSE, 7=PLAY
         session.sendCommand(cmdId);
+        // Update button icon
+        playPauseBtn.textContent = isPlaying ? '▶' : '⏸';
+        playPauseBtn.title = isPlaying ? 'Play' : 'Pause';
+      } else {
+        const cmdId = parseInt(btn.dataset.cmd, 10);
+        if (!isNaN(cmdId)) {
+          session.sendCommand(cmdId);
+        }
       }
     });
   });

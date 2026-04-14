@@ -143,13 +143,18 @@ export class CanvasRenderer {
       return;
     }
 
-    // Approximate 4-corner gradient using a diagonal linear gradient
-    // Canvas 2D doesn't support 4-corner gradients natively
-    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
-    grad.addColorStop(0, argbToRgba(argbTL));
-    grad.addColorStop(0.5, argbToRgba(argbTR)); // approximate
-    grad.addColorStop(1, argbToRgba(argbBR));
-    ctx.fillStyle = grad;
+    // Canvas 2D can't do true bilinear 4-corner interpolation like OpenGL.
+    // Average all 4 corner colors into a single solid fill — this avoids
+    // visible gradient artifacts on thin elements like progress bars.
+    const a = (((argbTL >>> 24) & 0xFF) + ((argbTR >>> 24) & 0xFF) +
+               ((argbBR >>> 24) & 0xFF) + ((argbBL >>> 24) & 0xFF)) >>> 2;
+    const r = (((argbTL >>> 16) & 0xFF) + ((argbTR >>> 16) & 0xFF) +
+               ((argbBR >>> 16) & 0xFF) + ((argbBL >>> 16) & 0xFF)) >>> 2;
+    const g = (((argbTL >>> 8) & 0xFF) + ((argbTR >>> 8) & 0xFF) +
+               ((argbBR >>> 8) & 0xFF) + ((argbBL >>> 8) & 0xFF)) >>> 2;
+    const b = ((argbTL & 0xFF) + (argbTR & 0xFF) +
+               (argbBR & 0xFF) + (argbBL & 0xFF)) >>> 2;
+    ctx.fillStyle = `rgba(${r},${g},${b},${(a / 255).toFixed(3)})`;
   }
 
   _setGradientStroke(ctx, x, y, w, h, argbTL, argbTR, argbBR, argbBL) {
@@ -483,7 +488,7 @@ export class CanvasRenderer {
 
     if (opaqueOverwrite) {
       // Equivalent to GL_ONE, GL_ZERO: source replaces destination completely
-      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalCompositeOperation = 'copy';
       ctx.globalAlpha = 1.0;
     } else {
       ctx.globalCompositeOperation = 'source-over';

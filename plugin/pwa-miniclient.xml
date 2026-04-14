@@ -23,8 +23,8 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
   ]]></Description>
   <Author>galeforcesage</Author>
   <CreationDate>2026.04.01</CreationDate>
-  <ModificationDate>2026.04.09</ModificationDate>
-  <Version>1.0.0</Version>
+  <ModificationDate>2026.04.12</ModificationDate>
+  <Version>1.0.0.1</Version>
   <Desktop>false</Desktop>
   <ServerOnly>true</ServerOnly>
   <ResourcePath>pwa-miniclient</ResourcePath>
@@ -44,29 +44,22 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
 
   <Package>
     <PackageType>JAR</PackageType>
-    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0/pwa-miniclient-jar-1.0.0.zip</Location>
-    <MD5>5ef1b3adff53a13850f1fa2baedcf9ff</MD5>
+    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.1/pwa-miniclient-jar-1.0.0.1.zip</Location>
+    <MD5>ad392468c1d5ad82d9e6bb99dd9fd4dc</MD5>
   </Package>
 
   <Package>
     <PackageType>System</PackageType>
-    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0/pwa-miniclient-web-1.0.0.zip</Location>
-    <MD5>221d39849ad2a7602f0a78f5c657b164</MD5>
+    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.1/pwa-miniclient-web-1.0.0.1.zip</Location>
+    <MD5>472506c9166b8f357c61c6ea91e5c396</MD5>
   </Package>
 
   <ReleaseNotes><![CDATA[
-Version 1.0.0 - Initial release
-  - Full SageTV MiniClient protocol support (handshake, properties, GFX commands)
-  - RSA key exchange + Blowfish encryption
-  - ZLIB streaming decompression
-  - Canvas 2D rendering with surface compositing and transforms
-  - Embedded Jetty 11 bridge server (WebSocket to TCP relay)
-  - Media playback via MSE with ffmpeg transcoding
-  - PWA manifest for install-to-home-screen
-  - Navigation drawer with volume controls
-  - Touch, keyboard, and IR input support
-  - Configurable port and web root via SageTV plugin settings
-  - Multi-server management with per-server bridge URL
+Version 1.0.0.1
+  - Fix bandwidth display: track actual media stream rate instead of WebSocket protocol data
+  - Status bar now shows sustained transcoding bitrate matching Placeshifter behavior
+  - GPU hardware acceleration support (nvenc/qsv/vaapi/videotoolbox/auto)
+  - Placeshifter-style blue status bar with 15-bar buffer gauge
   ]]></ReleaseNotes>
 
   <ImplementationClass>sagex.miniclient.pwa.BridgePlugin</ImplementationClass>

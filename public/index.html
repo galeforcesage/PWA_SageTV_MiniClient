@@ -154,15 +154,28 @@
           <details class="settings-group">
             <summary>Fixed Transcoding<br><small>Settings SageTV server uses to transcode content</small></summary>
             <div class="settings-item">
+              <div class="settings-item-text"><strong>Server Profile</strong><br><small>Auto-detected from bridge</small></div>
+              <div class="settings-value" id="set-server-profile" style="font-size:0.85em;color:#aaa;">Not connected</div>
+            </div>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Video Codec</strong></div>
+              <select id="set-transcode-vcodec" class="settings-select">
+                <option value="H.264">H.264 (default)</option>
+                <option value="H.265" class="opt-hevc" style="display:none">H.265 / HEVC</option>
+              </select>
+            </div>
+            <div class="settings-item">
               <div class="settings-item-text"><strong>Transcoding Preference</strong></div>
               <select id="set-transcode-pref" class="settings-select">
                 <option value="needed">When Needed</option>
                 <option value="always">Always</option>
+                <option value="off">Off</option>
               </select>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Container Format</strong></div>
               <select id="set-transcode-format" class="settings-select">
+                <option value="mpegts">MPEG-TS (default)</option>
                 <option value="matroska">Matroska (MKV)</option>
                 <option value="dvd">DVD (MPEG-PS)</option>
               </select>
@@ -172,7 +185,7 @@
               <select id="set-transcode-vbitrate" class="settings-select">
                 <option value="1000">1000</option>
                 <option value="2000">2000</option>
-                <option value="4000">4000</option>
+                <option value="4000">4000 (default)</option>
                 <option value="6000">6000</option>
                 <option value="8000">8000</option>
               </select>
@@ -180,7 +193,7 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Video Resolution</strong></div>
               <select id="set-transcode-vres" class="settings-select">
-                <option value="SOURCE">Use Source</option>
+                <option value="SOURCE">Use Source (default)</option>
                 <option value="480">480p</option>
                 <option value="720">720p</option>
                 <option value="1080">1080p</option>
@@ -189,7 +202,7 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Framerate</strong></div>
               <select id="set-transcode-fps" class="settings-select">
-                <option value="SOURCE">Use Source</option>
+                <option value="SOURCE">Use Source (default)</option>
                 <option value="24">24 fps</option>
                 <option value="30">30 fps</option>
                 <option value="60">60 fps</option>
@@ -198,16 +211,17 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Audio Codec</strong></div>
               <select id="set-transcode-acodec" class="settings-select">
+                <option value="aac">AAC (default)</option>
                 <option value="ac3">AC3</option>
-                <option value="aac">AAC</option>
                 <option value="mp3">MP3</option>
+                <option value="opus" class="opt-opus" style="display:none">Opus</option>
               </select>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Audio Bitrate (kbps)</strong></div>
               <select id="set-transcode-abitrate" class="settings-select">
                 <option value="64">64</option>
-                <option value="128">128</option>
+                <option value="128">128 (default)</option>
                 <option value="192">192</option>
                 <option value="256">256</option>
               </select>
@@ -215,7 +229,7 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Audio Channels</strong></div>
               <select id="set-transcode-achannels" class="settings-select">
-                <option value="">Default</option>
+                <option value="">Auto (default)</option>
                 <option value="2">Stereo</option>
                 <option value="6">5.1</option>
               </select>
@@ -309,7 +323,7 @@
             <summary>About</summary>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Version</strong></div>
-              <span class="settings-value">PWA 1.0</span>
+              <span class="settings-value">PWA 1.0.0.1</span>
             </div>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Client ID</strong></div>
@@ -398,8 +412,7 @@
         <div class="nav-drawer-row">
           <button data-cmd="62" class="nav-drawer-btn" title="Skip Back">⏮</button>
           <button data-cmd="9" class="nav-drawer-btn" title="Rewind">⏪</button>
-          <button data-cmd="6" class="nav-drawer-btn" title="Pause">⏸</button>
-          <button data-cmd="7" class="nav-drawer-btn" title="Play">▶</button>
+          <button id="btn-play-pause" data-cmd="7" class="nav-drawer-btn" title="Play/Pause">▶</button>
           <button data-cmd="8" class="nav-drawer-btn" title="Fast Forward">⏩</button>
           <button data-cmd="61" class="nav-drawer-btn" title="Skip Forward">⏭</button>
         </div>
@@ -426,6 +439,11 @@
     <!-- Play button overlay (for autoplay-blocked media) -->
     <div id="play-overlay" class="play-overlay" hidden>
       <button id="btn-play" class="btn-play" aria-label="Play">▶</button>
+    </div>
+
+    <!-- Seeking spinner overlay -->
+    <div id="seeking-overlay" class="seeking-overlay" hidden>
+      <span class="spinner"></span> <span>Seeking...</span>
     </div>
 
     <!-- Reconnecting banner -->
