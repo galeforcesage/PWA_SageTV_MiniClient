@@ -126,8 +126,9 @@ public class BridgePlugin implements sage.SageTVPlugin {
             sage.Sage.get("pwa_miniclient/port", "8099");
             log.info("Requirement OK: SageTV API accessible");
         } catch (Exception e) {
-            log.error("Requirement FAILED: Cannot access SageTV API (sage.Sage): {}", e.getMessage());
-            ok = false;
+            log.warn("SageTV API not accessible (sage.Sage): {} — "
+                    + "plugin will start but Configuration Wizard skip and plugin settings will not work. "
+                    + "Strongly recommended: ensure the SageTV API plugin is installed.", e.getMessage());
         }
 
         // 3. Web root directory
