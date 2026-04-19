@@ -23,76 +23,87 @@ import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
+/**
+ * Flat ring buffer — avoids chunk list overhead and O(n) shifts.
+ * Grows by doubling when full. All operations are O(1) amortized.
+ */
 class ReceiveBuffer {
   constructor() {
-    this.chunks = [];
+    this._buf = new Uint8Array(256 * 1024); // 256KB initial
+    this._head = 0;
+    this._tail = 0;
     this.totalLength = 0;
   }
 
   append(data) {
     const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
-    this.chunks.push(chunk);
+    const need = this.totalLength + chunk.length;
+    if (need > this._buf.length) this._grow(need);
+    // Write in one or two segments (wrap-around)
+    const space = this._buf.length - this._tail;
+    if (chunk.length <= space) {
+      this._buf.set(chunk, this._tail);
+    } else {
+      this._buf.set(chunk.subarray(0, space), this._tail);
+      this._buf.set(chunk.subarray(space), 0);
+    }
+    this._tail = (this._tail + chunk.length) % this._buf.length;
     this.totalLength += chunk.length;
   }
 
-  /** Peek at available byte count */
-  get length() {
-    return this.totalLength;
-  }
+  get length() { return this.totalLength; }
 
-  /**
-   * Consume exactly `n` bytes from the front.
-   * @param {number} n
-   * @returns {Uint8Array|null} null if insufficient data
-   */
   consume(n) {
     if (this.totalLength < n) return null;
-
     const result = new Uint8Array(n);
-    let offset = 0;
-    while (offset < n) {
-      const chunk = this.chunks[0];
-      const needed = n - offset;
-      if (chunk.length <= needed) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-        this.chunks.shift();
-      } else {
-        result.set(chunk.subarray(0, needed), offset);
-        this.chunks[0] = chunk.subarray(needed);
-        offset += needed;
-      }
+    const space = this._buf.length - this._head;
+    if (n <= space) {
+      result.set(this._buf.subarray(this._head, this._head + n));
+    } else {
+      result.set(this._buf.subarray(this._head, this._buf.length));
+      result.set(this._buf.subarray(0, n - space), space);
     }
+    this._head = (this._head + n) % this._buf.length;
     this.totalLength -= n;
     return result;
   }
 
-  /** Peek at bytes without consuming */
   peek(n) {
     if (this.totalLength < n) return null;
     const result = new Uint8Array(n);
-    let offset = 0;
-    let chunkIdx = 0;
-    let chunkOffset = 0;
-    while (offset < n) {
-      const chunk = this.chunks[chunkIdx];
-      const available = chunk.length - chunkOffset;
-      const needed = n - offset;
-      const take = Math.min(available, needed);
-      result.set(chunk.subarray(chunkOffset, chunkOffset + take), offset);
-      offset += take;
-      chunkOffset += take;
-      if (chunkOffset >= chunk.length) {
-        chunkIdx++;
-        chunkOffset = 0;
-      }
+    const space = this._buf.length - this._head;
+    if (n <= space) {
+      result.set(this._buf.subarray(this._head, this._head + n));
+    } else {
+      result.set(this._buf.subarray(this._head, this._buf.length));
+      result.set(this._buf.subarray(0, n - space), space);
     }
     return result;
   }
 
   clear() {
-    this.chunks = [];
+    this._head = 0;
+    this._tail = 0;
     this.totalLength = 0;
+  }
+
+  _grow(minSize) {
+    let newSize = this._buf.length;
+    while (newSize < minSize) newSize *= 2;
+    const newBuf = new Uint8Array(newSize);
+    // Linearize existing data
+    if (this.totalLength > 0) {
+      if (this._head < this._tail) {
+        newBuf.set(this._buf.subarray(this._head, this._tail));
+      } else {
+        const first = this._buf.length - this._head;
+        newBuf.set(this._buf.subarray(this._head, this._buf.length));
+        newBuf.set(this._buf.subarray(0, this._tail), first);
+      }
+    }
+    this._buf = newBuf;
+    this._head = 0;
+    this._tail = this.totalLength;
   }
 }
 
@@ -194,6 +205,11 @@ export class MiniClientConnection extends EventTarget {
     this._bytesReceivedWindow = 0;     // bytes in current 1-second window
     this._bandwidthKbps = 0;           // computed every second
     this._bandwidthTimer = null;
+
+    // MessageChannel for yielding without timer throttle (iOS Safari clamps setTimeout)
+    this._yieldChannel = new MessageChannel();
+    this._yieldChannel.port1.onmessage = () => this._processGfxBuffer();
+    this._processingScheduled = false; // guard against redundant processGfxBuffer calls
   }
 
   /** Current estimated bandwidth in Kbps. */
@@ -398,7 +414,16 @@ export class MiniClientConnection extends EventTarget {
     }
 
     this.gfxBuffer.append(bytes);
-    this._processGfxBuffer();
+    // Avoid calling _processGfxBuffer from every onmessage.
+    // Schedule a single call via microtask so hundreds of queued
+    // onmessage events just append data without re-entering the loop.
+    if (!this._processingScheduled) {
+      this._processingScheduled = true;
+      queueMicrotask(() => {
+        this._processingScheduled = false;
+        this._processGfxBuffer();
+      });
+    }
   }
 
   /**
@@ -424,6 +449,7 @@ export class MiniClientConnection extends EventTarget {
     }
 
     try {
+      let cmdCount = 0;
       while (this.gfxBuffer.length >= 4) {
         // Peek at header
         const header = this.gfxBuffer.peek(4);
@@ -476,6 +502,16 @@ export class MiniClientConnection extends EventTarget {
           } else {
             console.warn(`[Connection] ZLIB transition: ${compressedTail.length} leftover bytes inflated to 0`);
           }
+        }
+
+        // Yield periodically so WebSocket outgoing writes (replies) can
+        // actually flush. Without this, hundreds of LOADIMAGELINE commands
+        // pile up synchronously and block reply delivery, causing the server
+        // to timeout waiting for LOADIMAGE acknowledgements.
+        // MessageChannel avoids iOS Safari's setTimeout 4ms+ throttle.
+        if (++cmdCount >= 500 && this.gfxBuffer.length >= 4) {
+          this._yieldChannel.port2.postMessage(null);
+          return;
         }
       }
     } catch (err) {
@@ -659,6 +695,12 @@ export class MiniClientConnection extends EventTarget {
         return ClientProperty.GFX_COLORKEY;
       case 'GFX_SCALING':
         return ClientProperty.GFX_SCALING;
+      case 'GFX_BITMAP_FORMAT':
+        // Include RAW32 so server uses fast raw ARGB line-by-line transfer.
+        // Our buffered loadImageLine (single putImageData at end) makes raw
+        // fast enough. Compressed-only (PNG without RAW32) forces server to
+        // re-encode every image to PNG which is far slower.
+        return 'RAW32,PNG';
       case 'GFX_DRAWMODE':
         return ClientProperty.GFX_DRAWMODE;
       case 'GFX_HIRES_SURFACES':
@@ -740,8 +782,13 @@ export class MiniClientConnection extends EventTarget {
         console.log('[Connection] No cached auth available');
         return '';
       }
-      case 'DISPLAY_OVERSCAN':
-        return '0;0;1.0;1.0';
+      case 'DISPLAY_OVERSCAN': {
+        const oX = pref('overscan/offset_x', '0');
+        const oY = pref('overscan/offset_y', '0');
+        const oW = pref('overscan/width', '1.0');
+        const oH = pref('overscan/height', '0.95');
+        return `${oX};${oY};${oW};${oH}`;
+      }
       case 'FIRMWARE_VERSION':
         return '9.0.0';
       case 'MEDIA_PLAYER_BUFFER_DELAY':

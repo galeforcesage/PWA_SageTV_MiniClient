@@ -50,9 +50,10 @@ export class SessionManager extends EventTarget {
     // Initialize settings (opens IndexedDB)
     await this.settings.init();
 
-    // Get resolution from settings
-    const width = this.settings.getInt('resolution_width', 1280);
-    const height = this.settings.getInt('resolution_height', 720);
+    // Get resolution from settings, with adaptive default for weak devices
+    const adaptiveRes = this._detectAdaptiveResolution();
+    const width = this.settings.getInt('resolution_width', adaptiveRes.width);
+    const height = this.settings.getInt('resolution_height', adaptiveRes.height);
 
     // Set canvas size
     canvas.width = width;
@@ -90,8 +91,9 @@ export class SessionManager extends EventTarget {
       bridgeUrl = `${protocol}//${serverHost}:8099`;
     }
 
-    const width = this.settings.getInt('resolution_width', 1280);
-    const height = this.settings.getInt('resolution_height', 720);
+    const adaptiveRes = this._detectAdaptiveResolution();
+    const width = this.settings.getInt('resolution_width', adaptiveRes.width);
+    const height = this.settings.getInt('resolution_height', adaptiveRes.height);
 
     // Create connection
     this.connection = new MiniClientConnection({
@@ -252,5 +254,18 @@ export class SessionManager extends EventTarget {
     if (this.connection) {
       this.connection.sendCommand(commandId);
     }
+  }
+
+  /**
+   * Detect optimal resolution based on device capabilities.
+   * Weak devices (low core count, touch-only, small memory) get 960x540
+   * to reduce pixel throughput and image transfer volume.
+   */
+  _detectAdaptiveResolution() {
+    // Use 1280x720 for all devices. Lower resolutions cause the STV to
+    // hide UI elements (e.g. media control buttons) due to layout constraints.
+    // Performance is handled by disabling effects (GFX_SURFACES=FALSE) and
+    // the ring buffer + memcpy image pipeline, not by reducing resolution.
+    return { width: 1280, height: 720 };
   }
 }

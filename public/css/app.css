@@ -904,8 +904,8 @@ html, body {
 }
 
 @media (hover: none) and (pointer: coarse) {
-  /* Touch-only devices: show touch nav by default */
-  #touch-nav { display: grid !important; }
+  /* Touch-only devices: touch nav hidden by default (server UI handles navigation) */
+  /* Users can toggle it from the nav drawer if needed */
 }
 
 /* ── Seeking Overlay ──────────────────────────────────── */

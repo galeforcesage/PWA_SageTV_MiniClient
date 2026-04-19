@@ -329,71 +329,103 @@ export class CanvasRenderer {
    * Allocate an image slot.
    */
   loadImage(handle, width, height) {
-    // Create an ImageData buffer for line-by-line loading
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    this.images.set(handle, { canvas, ctx, width, height, loaded: false });
+    // Create a raw buffer for line-by-line accumulation.
+    // Actual Canvas + putImageData is deferred until the image is first used
+    // (drawTexture/xfmImage). This avoids expensive per-line putImageData
+    // calls and lets the event loop flush WebSocket replies between commands.
+    const rawBuffer = new Uint8Array(width * height * 4); // RGBA straight
+    this.images.set(handle, {
+      canvas: null, ctx: null, width, height, loaded: false,
+      _rawBuffer: rawBuffer,
+      _linesReceived: 0,
+      _finalized: false
+    });
     this._currentCachePixels += width * height;
   }
 
   /**
    * Load a single line of image data (raw ARGB pixels).
-   * Server sends big-endian ARGB. With PREMULTIPLY mode, RGB values are
-   * pre-multiplied by alpha. Canvas putImageData expects straight (non-premultiplied)
-   * RGBA, so we must un-premultiply: R = R_pm * 255 / A, etc.
+   * Copies data into a backing buffer immediately — no Canvas work.
+   * Raw bytes are stored as-is (zero conversion) — the ARGB→RGBA swap
+   * happens in bulk during _finalizeImage() using Uint32Array.
    */
   loadImageLine(handle, line, len, data) {
     const img = this.images.get(handle);
-    if (!img) return;
+    if (!img || !img._rawBuffer) return;
 
-    const pixelCount = Math.floor(len / 4);
-    const imageData = img.ctx.createImageData(pixelCount, 1);
-    const pixels = imageData.data;
+    // Pure memcpy — no per-pixel conversion. TypedArray.set() is native C++.
+    const dstOffset = line * img.width * 4;
+    img._rawBuffer.set(data.subarray(0, img.width * 4), dstOffset);
 
-    // Convert premultiplied ARGB → straight RGBA
-    for (let i = 0; i < pixelCount; i++) {
-      const srcOff = i * 4;
-      const dstOff = i * 4;
-      const a = data[srcOff];     // A (premultiplied alpha)
-      const rPm = data[srcOff + 1]; // R (premultiplied)
-      const gPm = data[srcOff + 2]; // G (premultiplied)
-      const bPm = data[srcOff + 3]; // B (premultiplied)
-      if (a === 0) {
-        pixels[dstOff] = 0;
-        pixels[dstOff + 1] = 0;
-        pixels[dstOff + 2] = 0;
-        pixels[dstOff + 3] = 0;
-      } else if (a === 255) {
-        pixels[dstOff] = rPm;
-        pixels[dstOff + 1] = gPm;
-        pixels[dstOff + 2] = bPm;
-        pixels[dstOff + 3] = 255;
+    img._linesReceived++;
+    img.loaded = true;
+
+    // Auto-finalize when all lines received
+    if (img._linesReceived >= img.height) {
+      this._finalizeImage(handle);
+    }
+  }
+
+  /**
+   * Finalize a buffered image: bulk ARGB→RGBA conversion + single putImageData.
+   * Called automatically when all lines are received, or lazily before first use.
+   *
+   * Uses Uint32Array for the conversion — one read+write per pixel instead of
+   * 4-8 byte operations. On little-endian (all modern devices):
+   *   Source bytes [A,R,G,B] → LE uint32: 0xBGRA
+   *   Dest   bytes [R,G,B,A] → LE uint32: 0xABGR
+   * Opaque: dest = ((src >>> 8) & 0x00FFFFFF) | 0xFF000000  (two ops!)
+   */
+  _finalizeImage(handle) {
+    const img = this.images.get(handle);
+    if (!img || img._finalized || !img._rawBuffer) return;
+
+    const buf = img._rawBuffer;
+    const totalPixels = img.width * img.height;
+    const u32 = new Uint32Array(buf.buffer, buf.byteOffset, totalPixels);
+
+    for (let i = 0; i < totalPixels; i++) {
+      const px = u32[i];
+      if (px === 0) continue; // fully transparent
+      const a = px & 0xFF;    // alpha is LSB on LE
+      if (a === 255) {
+        // Fully opaque (most UI pixels): rotate BGRA → ABGR
+        u32[i] = ((px >>> 8) & 0x00FFFFFF) | 0xFF000000;
+      } else if (a === 0) {
+        u32[i] = 0;
       } else {
-        // Un-premultiply: straight = premultiplied * 255 / alpha
-        pixels[dstOff] = Math.min(255, (rPm * 255 / a) | 0);
-        pixels[dstOff + 1] = Math.min(255, (gPm * 255 / a) | 0);
-        pixels[dstOff + 2] = Math.min(255, (bPm * 255 / a) | 0);
-        pixels[dstOff + 3] = a;
+        // Semi-transparent — un-premultiply + swap (rare)
+        const invA = 255 / a;
+        const r = Math.min(255, (((px >>> 8) & 0xFF) * invA) | 0);
+        const g = Math.min(255, (((px >>> 16) & 0xFF) * invA) | 0);
+        const b = Math.min(255, ((px >>> 24) * invA) | 0);
+        u32[i] = r | (g << 8) | (b << 16) | (a << 24);
       }
     }
 
-    img.ctx.putImageData(imageData, 0, line);
-    img.loaded = true;
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    const imageData = new ImageData(
+      new Uint8ClampedArray(buf.buffer, buf.byteOffset, totalPixels * 4),
+      img.width, img.height
+    );
+    ctx.putImageData(imageData, 0, 0);
 
-    // One-shot diagnostic: dump first non-zero pixel from line 0 and a mid-line
-    if (!img._diagnosed && (line === 0 || line === Math.floor(img.height / 2))) {
-      if (line > 0) img._diagnosed = true; // diagnose after mid-line
-      let sample = 'all-zero';
-      for (let i = 0; i < pixelCount && i < 400; i++) {
-        const a = data[i * 4], r = data[i * 4 + 1], g = data[i * 4 + 2], b = data[i * 4 + 3];
-        if (a !== 0 || r !== 0 || g !== 0 || b !== 0) {
-          sample = `px${i}:ARGB(${a},${r},${g},${b})`;
-          break;
-        }
-      }
-      console.log(`[Renderer] Image h${handle} line${line}: ${sample} (${img.width}x${img.height})`);
+    img.canvas = canvas;
+    img.ctx = ctx;
+    img._finalized = true;
+    img._rawBuffer = null; // Free the raw buffer
+  }
+
+  /**
+   * Ensure an image is finalized before use (lazy finalization).
+   */
+  _ensureFinalized(handle) {
+    const img = this.images.get(handle);
+    if (img && !img._finalized && img._rawBuffer) {
+      this._finalizeImage(handle);
     }
   }
 
@@ -465,6 +497,7 @@ export class CanvasRenderer {
    */
   drawTexture(x, y, width, height, handle, srcx, srcy, srcw, srch, blend) {
     const ctx = this.activeCtx;
+    this._ensureFinalized(handle);
     const img = this.images.get(handle) || this.surfaces.get(handle);
     if (!img) return;
 
@@ -569,6 +602,7 @@ export class CanvasRenderer {
    * Transform an image (resize + optional corner mask).
    */
   xfmImage(srcHandle, destHandle, destWidth, destHeight, maskCornerArc) {
+    this._ensureFinalized(srcHandle);
     const srcImg = this.images.get(srcHandle);
     if (!srcImg) return;
 
