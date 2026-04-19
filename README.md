@@ -10,78 +10,123 @@ An HTML5/PWA implementation of the SageTV MiniClient protocol, enabling browser-
 - **Canvas 2D rendering** — Surfaces, transforms, textured drawing, font streaming
 - **Input support** — Keyboard, mouse, touch gestures, gamepad, soft keyboard for mobile
 - **PWA** — Installable, works offline (service worker), responsive design
+- **Authentication** — Optional HTTP Basic Auth for securing access
+- **Hardware-accelerated transcoding** — GPU encoding via NVENC, QSV, VAAPI, or VideoToolbox
 
 ## Architecture
 
 ```
-Browser (PWA)          WebSocket Bridge (Node.js)         SageTV Server
+Browser (PWA)          Bridge (Jetty, Java)              SageTV Server
 ┌─────────────┐       ┌──────────────────────┐          ┌─────────────┐
-│  Canvas 2D  │──ws──▶│  ws-bridge.js :8099  │──tcp──▶  │  :31099     │
-│  Input Mgr  │       │  (binary relay)      │          │  MiniUI     │
-│  Media      │       └──────────────────────┘          └─────────────┘
-└─────────────┘
+│  Canvas 2D  │──ws──▶│  BridgeServer :8099  │──tcp──▶  │  :31099     │
+│  Input Mgr  │       │  (WebSocket relay)   │          │  MiniUI     │
+│  Media      │       │  (Transcode)         │          │             │
+└─────────────┘       └──────────────────────┘          └─────────────┘
 ```
 
-## Quick Start
+The Java bridge runs as a SageTV plugin (shadow JAR in `JARs/`). It embeds Jetty 11 for HTTP serving, WebSocket relay, and ffmpeg-based transcoding — all within the SageTV process.
+
+> **Note:** An earlier Node.js bridge implementation (`bridge/ws-bridge.js`) is preserved in the repository for historical reference. It is no longer maintained — use the Java bridge for all deployments.
+
+## Quick Start (SageTV Plugin)
 
 ### Prerequisites
-- Node.js 18+
-- A running SageTV server
+- SageTV 9.x server with Java 11+
+- ffmpeg on `PATH` (for media transcoding)
 
-### Install & Run
+### Install
+
+1. Build the plugin: `cd bridge-java && ./gradlew shadowJar`
+2. Copy `build/libs/pwa-miniclient-bridge.jar` to `SageTV/JARs/`
+3. Extract PWA static files to `SageTV/pwa-miniclient/public/`
+4. Register the plugin in `Sage.properties`:
+   ```properties
+   sagetv_root_plugin_list/pwa-miniclient=pwa-miniclient
+   ```
+5. Restart SageTV
+6. Open `http://{SageTV-IP}:8099` in your browser
+
+### Plugin Configuration
+
+Configure via the SageTV Plugin Manager UI, or directly in `Sage.properties`:
+
+```properties
+pwa_miniclient/port=8099
+pwa_miniclient/web_root=                     # blank = auto-detect
+pwa_miniclient/ffmpeg_path=                  # blank = 'ffmpeg' on PATH
+pwa_miniclient/hwaccel=auto                  # auto|nvenc|qsv|vaapi|videotoolbox|none
+pwa_miniclient/username=                     # blank = no auth
+pwa_miniclient/password=                     # set both to enable Basic Auth
+```
+
+### Authentication
+
+Set a username and password to require HTTP Basic Auth for all PWA endpoints:
+
+1. Open the SageTV Plugin Manager → PWA MiniClient → Settings
+2. Set **Username** and **Password**
+3. Restart the plugin
+
+When both are set, browsers will prompt for credentials before loading the PWA. Leave either blank to disable authentication (open access).
+
+## Quick Start (Standalone)
+
+The bridge can also run outside SageTV for development:
 
 ```bash
-git clone https://github.com/galeforcesage/PWA_SageTV_Miniclient.git
-cd PWA_SageTV_Miniclient
-npm install
-npm run dev -- --sage-host YOUR_SAGETV_IP
+cd bridge-java
+./gradlew shadowJar
+java -jar build/libs/pwa-miniclient-bridge.jar \
+  --port 8099 \
+  --web-root ../public \
+  --username admin \
+  --password changeme
 ```
 
-Open `http://localhost:8099/` in your browser.
-
-### CLI Options
-
-```
---serve-static     Serve PWA files (default in dev mode)
---port 8099        Bridge port
---sage-host IP     Default SageTV server IP
---sage-port 31099  Default SageTV server port
-```
+Open `http://localhost:8099/` and connect to your SageTV server.
 
 ## Project Structure
 
 ```
-├── bridge/
-│   └── ws-bridge.js          # WebSocket-to-TCP bridge
-├── public/
-│   ├── index.html             # PWA shell
-│   ├── manifest.json          # PWA manifest
-│   ├── sw.js                  # Service worker
-│   ├── css/
-│   │   └── app.css            # UI styles
+├── bridge-java/                   # Java bridge (primary)
+│   ├── build.gradle
+│   └── src/main/java/sagex/miniclient/pwa/
+│       ├── BridgePlugin.java      # SageTV plugin entry point
+│       ├── BridgeServer.java      # Jetty HTTP/WS server + auth
+│       ├── BridgeWebSocket.java   # WebSocket-to-TCP relay
+│       ├── BridgeMain.java        # Standalone entry point
+│       ├── TranscodeServlet.java  # FFmpeg transcode endpoint
+│       ├── ServerInfoServlet.java # GPU capability probe API
+│       └── HwAccel.java           # Hardware acceleration detection
+├── bridge/                        # Node.js bridge (legacy, preserved for reference)
+│   └── ws-bridge.js
+├── public/                        # PWA static files
+│   ├── index.html
+│   ├── manifest.json
+│   ├── sw.js
+│   ├── css/app.css
 │   └── js/
-│       ├── app.js             # App entry point
-│       ├── protocol/
-│       │   ├── connection.js  # SageTV protocol engine
-│       │   ├── constants.js   # Protocol constants
-│       │   ├── crypto.js      # RSA + Blowfish encryption
-│       │   ├── compression.js # ZLIB streaming inflate
+│       ├── app.js
+│       ├── protocol/              # SageTV protocol engine
+│       │   ├── connection.js
+│       │   ├── constants.js
+│       │   ├── crypto.js
+│       │   ├── compression.js
 │       │   └── binary-utils.js
-│       ├── ui/
-│       │   └── renderer.js    # Canvas 2D renderer
-│       ├── input/
-│       │   └── input-manager.js # Keyboard/mouse/touch/gamepad
-│       ├── media/
-│       │   └── player.js      # HTML5 media player
-│       ├── session/
-│       │   └── session-manager.js
-│       ├── settings/
-│       │   └── settings-manager.js
-│       └── lib/
-│           ├── forge.min.js   # node-forge (RSA)
-│           ├── pako.esm.js    # pako (zlib)
+│       ├── ui/renderer.js         # Canvas 2D renderer
+│       ├── input/input-manager.js # Keyboard/mouse/touch/gamepad
+│       ├── media/player.js        # HTML5 media player
+│       ├── session/session-manager.js
+│       ├── settings/settings-manager.js
+│       └── lib/                   # Vendored libraries
+│           ├── forge.min.js       # node-forge (RSA)
+│           ├── pako.esm.js        # pako (zlib)
 │           └── blowfish-tables.js
-└── package.json
+├── plugin/
+│   ├── pwa-miniclient.xml         # SageTV plugin manifest
+│   └── screenshot.png
+├── package.json                   # Node.js deps (legacy bridge only)
+└── build-plugin.sh                # Plugin release packaging
 ```
 
 ## Protocol Support
@@ -110,44 +155,6 @@ Open `http://localhost:8099/` in your browser.
 
 ![PWA MiniClient Server Selection](plugin/screenshot.png)
 
-## SageTV Plugin
-
-This project is structured as a standard [SageTV V9 plugin](https://github.com/OpenSageTV/sagetv-plugin-repo) for easy installation via the SageTV Plugin Manager.
-
-### Building the Plugin Package
-
-```bash
-./build-plugin.sh          # uses version from package.json
-./build-plugin.sh 1.0.0    # or specify a version
-```
-
-This creates `pwa-miniclient-X.Y.Z.zip` and prints the MD5 hash.
-
-### Publishing to SageTV Plugin Repo
-
-1. Create a [GitHub Release](https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases) tagged `vX.Y.Z`
-2. Upload the zip to the release
-3. Update `plugin/pwa-miniclient.xml` with the version, MD5, and download URL
-4. Fork [sagetv-plugin-repo](https://github.com/OpenSageTV/sagetv-plugin-repo)
-5. Copy `plugin/pwa-miniclient.xml` into the `plugins/` directory
-6. Submit a Pull Request
-
-### Local Dev Plugin Testing
-
-To test as a SageTV dev plugin (requires `devmode=true` in `Sage.properties`):
-
-1. Build the zip: `./build-plugin.sh`
-2. Copy `pwa-miniclient-X.Y.Z.zip` to `SageTV/SageTVPluginsDev.d/`
-3. Copy `plugin/pwa-miniclient.xml` to `SageTV/SageTVPluginsDev.d/`
-4. SageTV will auto-detect and list it in the Plugin Manager
-
-### Prerequisites on Server
-
-- Java 11+ (bundled with SageTV)
-- ffmpeg (for media transcoding; usually already on SageTV servers)
-
-After plugin installation, open `http://{SageTV-IP}:8099` in your browser.
-
 ## Hardware-Accelerated Transcoding
 
 The bridge uses ffmpeg to transcode media for browser playback. By default (`hwaccel=auto`), it probes for a GPU encoder at startup and falls back to software (libx264) if none is found.
@@ -162,23 +169,6 @@ The bridge uses ffmpeg to transcode media for browser playback. By default (`hwa
 | `videotoolbox` | Apple Silicon/Intel | macOS | `h264_videotoolbox` |
 | `none` | — | All | `libx264` (software) |
 
-### Configuration
-
-In SageTV Plugin Manager, set **Hardware Acceleration** to one of:
-- `auto` — (default) probe GPU at startup, use best available, fallback to software
-- `nvenc` / `qsv` / `vaapi` / `videotoolbox` — force a specific backend
-- `none` — always use software encoding
-
-Or set directly in `Sage.properties`:
-```properties
-pwa_miniclient/hwaccel=auto
-```
-
-For standalone (non-plugin) mode:
-```bash
-java -jar pwa-miniclient-bridge.jar --hwaccel auto
-```
-
 ### Docker: Enabling GPU Access
 
 Docker containers don't have GPU access by default. You must pass through the GPU device.
@@ -186,7 +176,6 @@ Docker containers don't have GPU access by default. You must pass through the GP
 **NVIDIA GPU (nvenc):**
 ```bash
 docker run --gpus all ...
-# or: --device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm
 ```
 
 **AMD/Intel GPU (vaapi):**
@@ -198,27 +187,24 @@ For docker-compose, add to your SageTV service:
 ```yaml
 services:
   sagetv-server:
-    # ... existing config ...
     devices:
       - /dev/dri:/dev/dri          # AMD/Intel VAAPI
-    # For NVIDIA, use this instead:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - capabilities: [gpu]
 ```
 
-After adding the device, restart the container and the plugin will auto-detect the GPU on next startup.
-
-**Verify it's working** — check the SageTV server log for:
+Check the SageTV server log to verify detection:
 ```
 [HwAccel] Auto-detected: vaapi — VA-API (AMD/Intel GPU)
 ```
-or:
-```
-[HwAccel] No hardware acceleration available, using software encoding
-```
+
+## SageTV Plugin Repo Publishing
+
+1. Build release ZIPs: `cd bridge-java && ./gradlew pluginRelease`
+2. Create a [GitHub Release](https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases) tagged `vX.Y.Z`
+3. Upload both ZIPs to the release
+4. Update `plugin/pwa-miniclient.xml` with the new version, MD5 hashes, and download URLs
+5. Fork [sagetv-plugin-repo](https://github.com/OpenSageTV/sagetv-plugin-repo)
+6. Copy `plugin/pwa-miniclient.xml` into the `plugins/` directory
+7. Submit a Pull Request
 
 ## License
 

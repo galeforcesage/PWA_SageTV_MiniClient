@@ -2,9 +2,16 @@ package sagex.miniclient.pwa;
 
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.security.ConstraintMapping;
+import org.eclipse.jetty.security.ConstraintSecurityHandler;
+import org.eclipse.jetty.security.HashLoginService;
+import org.eclipse.jetty.security.UserStore;
+import org.eclipse.jetty.security.authentication.BasicAuthenticator;
 import org.eclipse.jetty.servlet.DefaultServlet;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.util.security.Constraint;
+import org.eclipse.jetty.util.security.Password;
 import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,13 +35,18 @@ public class BridgeServer {
     private final String webRoot;
     private final String ffmpegPath;
     private final String hwAccel;
+    private final String username;
+    private final String password;
     private Server server;
 
-    public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel) {
+    public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel,
+                        String username, String password) {
         this.port = port;
         this.webRoot = webRoot;
         this.ffmpegPath = ffmpegPath;
         this.hwAccel = hwAccel;
+        this.username = username;
+        this.password = password;
     }
 
     public void start() throws Exception {
@@ -47,6 +59,35 @@ public class BridgeServer {
 
         ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
         context.setContextPath("/");
+
+        // Basic authentication — if username and password are both configured
+        if (username != null && !username.isEmpty() && password != null && !password.isEmpty()) {
+            ConstraintSecurityHandler security = new ConstraintSecurityHandler();
+
+            // Define a "user" role constraint on all paths
+            Constraint constraint = new Constraint();
+            constraint.setName("auth");
+            constraint.setAuthenticate(true);
+            constraint.setRoles(new String[]{"user"});
+
+            ConstraintMapping mapping = new ConstraintMapping();
+            mapping.setPathSpec("/*");
+            mapping.setConstraint(constraint);
+            security.addConstraintMapping(mapping);
+
+            // In-memory user store with the configured credentials
+            HashLoginService loginService = new HashLoginService("PWA MiniClient");
+            UserStore userStore = new UserStore();
+            userStore.addUser(username, new Password(password), new String[]{"user"});
+            loginService.setUserStore(userStore);
+
+            security.setLoginService(loginService);
+            security.setAuthenticator(new BasicAuthenticator());
+
+            context.setSecurityHandler(security);
+            log.info("Basic authentication enabled");
+        }
+
         server.setHandler(context);
 
         // WebSocket endpoints at /gfx and /media

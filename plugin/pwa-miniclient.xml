@@ -15,6 +15,8 @@ Features:
   - Full SageTV UI rendered in-browser via HTML5 Canvas
   - Media playback with transcoding support (requires ffmpeg)
   - PWA install-to-home-screen for native app experience
+  - Optional HTTP Basic Auth (username/password) for securing access
+  - Startup requirement checks (Jetty, API, port, web root)
   - Configurable bridge port and web root path
   - Navigation drawer with volume controls
   - Touch and keyboard input support
@@ -23,8 +25,8 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
   ]]></Description>
   <Author>galeforcesage</Author>
   <CreationDate>2026.04.01</CreationDate>
-  <ModificationDate>2026.04.12</ModificationDate>
-  <Version>1.0.0.1</Version>
+  <ModificationDate>2026.04.18</ModificationDate>
+  <Version>1.0.0.2</Version>
   <Desktop>false</Desktop>
   <ServerOnly>true</ServerOnly>
   <ResourcePath>pwa-miniclient</ResourcePath>
@@ -55,6 +57,11 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
   </Package>
 
   <ReleaseNotes><![CDATA[
+Version 1.0.0.2
+  - HTTP Basic Auth support (configurable username/password in plugin settings)
+  - Startup requirement checks (Jetty classpath, SageTV API, port, web root)
+  - Auto-skip Configuration Wizard for PWA clients (MCFullyConfigured)
+
 Version 1.0.0.1
   - Fix bandwidth display: track actual media stream rate instead of WebSocket protocol data
   - Status bar now shows sustained transcoding bitrate matching Placeshifter behavior
