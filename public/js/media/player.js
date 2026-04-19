@@ -83,6 +83,9 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.video.addEventListener('pause', () => {
+      // In bridge mode, play/pause is controlled by STV protocol commands (MEDIACMD_PLAY/PAUSE).
+      // Browser pause events fire during MediaSource teardown/recreation on seek and must be ignored.
+      if (this.bridgeMode) return;
       if (this.state === PlayerState.PLAY) {
         this.state = PlayerState.PAUSE;
       }
@@ -94,6 +97,11 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.video.addEventListener('error', (e) => {
+      // In bridge mode, errors during MediaSource recreation on seek are expected and harmless.
+      if (this.bridgeMode) {
+        console.debug('[MediaPlayer] Ignoring video error during bridge mode:', this.video.error?.message);
+        return;
+      }
       console.error('[MediaPlayer] Video error:', this.video.error);
       this.state = PlayerState.STOPPED;
     });
@@ -291,9 +299,11 @@ export class MediaPlayer extends EventTarget {
           }
         }
 
-        // Auto-play after enough data
-        if (!autoPlayed && totalBytes > 128 * 1024 && this.state === PlayerState.LOADED) {
+        // Auto-play after enough data (initial load or after seek)
+        if (!autoPlayed && totalBytes > 128 * 1024 &&
+            (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
           console.log(`[MediaPlayer] Bridge auto-playing after ${(totalBytes / 1024).toFixed(0)}KB`);
+          this._wasPlayingBeforeSeek = false;
           this.play();
           autoPlayed = true;
         }
@@ -552,6 +562,7 @@ export class MediaPlayer extends EventTarget {
       // Debounce rapid seeks — only restart the stream after user stops pressing FF
       console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s`);
       this.seeking = true;
+      this._wasPlayingBeforeSeek = (this.state === PlayerState.PLAY);
       this.dispatchEvent(new CustomEvent('seeking'));
       this._bridgeTimeOffsetMs = timeMS;
       this._bridgeNeedTimeReset = true;
@@ -575,6 +586,7 @@ export class MediaPlayer extends EventTarget {
 
   /**
    * Flush SourceBuffer and wait for removal to complete before restarting bridge stream.
+   * Tears down and recreates MediaSource + SourceBuffer to ensure a clean init segment state.
    */
   async _flushAndRestart(filePath, seekSec) {
     // Tag this restart so we can detect if a newer one supersedes us
@@ -588,24 +600,62 @@ export class MediaPlayer extends EventTarget {
     }
     this._pushQueue = [];
 
-    // Clear SourceBuffer and wait for it to finish
-    if (this.sourceBuffer && this.mediaSource && this.mediaSource.readyState === 'open') {
+    // Tear down existing MediaSource completely — a fresh ffmpeg process produces
+    // a new moov init segment that can conflict with the old SourceBuffer state.
+    if (this.sourceBuffer) {
       try {
-        const buffered = this.sourceBuffer.buffered;
-        if (buffered.length > 0) {
-          if (this.sourceBuffer.updating) {
-            await new Promise(r => this.sourceBuffer.addEventListener('updateend', r, { once: true }));
-          }
-          // Check if superseded while waiting
-          if (this._currentRestartId !== restartId) return;
-          this.sourceBuffer.remove(0, buffered.end(buffered.length - 1));
+        if (this.sourceBuffer.updating) {
           await new Promise(r => this.sourceBuffer.addEventListener('updateend', r, { once: true }));
         }
       } catch { /* ignore */ }
+      this.sourceBuffer = null;
+    }
+    if (this.mediaSource) {
+      try {
+        if (this.mediaSource.readyState === 'open') {
+          this.mediaSource.endOfStream();
+        }
+      } catch { /* ignore */ }
+      this.mediaSource = null;
     }
 
-    // If a newer seek came in while we were waiting, bail out
+    // If a newer seek came in while we were tearing down, bail out
     if (this._currentRestartId !== restartId) return;
+
+    // Recreate MediaSource + SourceBuffer from scratch
+    const MSClass = window.ManagedMediaSource || window.MediaSource;
+    this.mediaSource = new MSClass();
+    if (window.ManagedMediaSource) {
+      this.video.disableRemotePlayback = true;
+      this.video.srcObject = this.mediaSource;
+    } else {
+      this.video.src = URL.createObjectURL(this.mediaSource);
+    }
+
+    await new Promise((resolve) => {
+      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
+    });
+
+    // Check again after async wait
+    if (this._currentRestartId !== restartId) return;
+
+    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+    if (!MSClass.isTypeSupported(mimeType)) {
+      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
+      if (MSClass.isTypeSupported(videoOnly)) {
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
+      } else {
+        console.error('[MediaPlayer] No supported fMP4 MIME type after seek');
+        return;
+      }
+    } else {
+      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
+    }
+    this.sourceBuffer.mode = 'segments';
+    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+    this.sourceBuffer.addEventListener('error', (e) => {
+      console.error('[MediaPlayer] SourceBuffer error:', e);
+    });
 
     // Now start the new stream
     this._startBridgeStream(filePath, seekSec);
