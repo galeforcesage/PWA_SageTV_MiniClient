@@ -300,6 +300,10 @@ export class InputManager {
     const mods = domModsToJava(event);
     const button = event.button === 0 ? 1 : event.button === 2 ? 3 : 2;
     console.log(`[Input] Click: client(${event.clientX},${event.clientY}) → server(${x},${y}), scale(${this.scaleX.toFixed(3)},${this.scaleY.toFixed(3)}), rect=${JSON.stringify(this.target.getBoundingClientRect())}`);
+    // Send MOUSE_MOVED first so the STV updates focus/hover to the target
+    // position before the click. Without this, list items don't get
+    // selected because the STV's hit-test uses the last known cursor pos.
+    this.connection.sendMouseEvent(EventType.MOUSE_MOVED, x, y, 0, 0, 0);
     this.connection.sendMouseEvent(EventType.MOUSE_PRESSED, x, y, mods, button, 1);
   }
 

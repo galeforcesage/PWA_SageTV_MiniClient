@@ -638,6 +638,8 @@ html, body {
   transition: background 0.15s;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(255,160,40,0.3);
 }
 
 .nav-drawer-btn:hover {

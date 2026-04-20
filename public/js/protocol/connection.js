@@ -437,15 +437,13 @@ export class MiniClientConnection extends EventTarget {
    *   - type 16 = DRAWING_CMD (GFX batch)
    */
   _processGfxBuffer() {
-    // If an async image decode is in progress, wait for it before
-    // processing more messages. This matches Java's synchronous decode:
-    // XFMIMAGE must see the fully decoded source, not a placeholder.
+    // If an async image decode is in progress, clear the reference.
+    // We no longer block processing — the decode runs in the background
+    // and the image will be ready when drawTexture/xfmImage needs it.
+    // Blocking here caused the server's EventThread to hang waiting for
+    // replies (FLIPBUFFER, LOADIMAGE) that were stuck behind the decode.
     if (this._pendingImageDecode) {
-      this._pendingImageDecode.then(() => {
-        this._pendingImageDecode = null;
-        this._processGfxBuffer();
-      });
-      return;
+      this._pendingImageDecode = null;
     }
 
     try {
@@ -477,14 +475,11 @@ export class MiniClientConnection extends EventTarget {
 
         this._handleServerMessage(msgType, payload);
 
-        // If an image decode was started by this message, pause processing
-        // until the decode finishes (so XFMIMAGE sees the real image)
+        // If an image decode was started by this message, just clear it.
+        // The decode runs async in the background — we don't block here
+        // because doing so stalls replies and causes EventThread hangs.
         if (this._pendingImageDecode) {
-          this._pendingImageDecode.then(() => {
-            this._pendingImageDecode = null;
-            this._processGfxBuffer();
-          });
-          return;
+          this._pendingImageDecode = null;
         }
 
         // If ZLIB was just enabled, any remaining bytes in gfxBuffer are
@@ -509,7 +504,8 @@ export class MiniClientConnection extends EventTarget {
         // pile up synchronously and block reply delivery, causing the server
         // to timeout waiting for LOADIMAGE acknowledgements.
         // MessageChannel avoids iOS Safari's setTimeout 4ms+ throttle.
-        if (++cmdCount >= 500 && this.gfxBuffer.length >= 4) {
+        // Yield every 50 commands (was 500) to ensure replies flush quickly.
+        if (++cmdCount >= 50 && this.gfxBuffer.length >= 4) {
           this._yieldChannel.port2.postMessage(null);
           return;
         }

@@ -189,9 +189,15 @@ function setupEventHandlers() {
     settingsDialog.hidden = true;
   });
 
-  // Disconnect
+  // Power button — sends POWER command to STV (shows standby/exit menu)
   const btnDisconnect = document.getElementById('btn-disconnect');
-  if (btnDisconnect) btnDisconnect.addEventListener('click', handleDisconnect);
+  if (btnDisconnect) btnDisconnect.addEventListener('click', () => {
+    if (session.connected) {
+      session.connection.sendCommand(19); // SageCommand.POWER (id=19)
+    } else {
+      handleDisconnect();
+    }
+  });
 
   // Fullscreen
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);
@@ -723,22 +729,25 @@ function initNavDrawer() {
   closeBtn.addEventListener('click', closeDrawer);
 
   // Wire drawer buttons to SageCommands
+  // Use pointerup instead of click for instant touch response (no 300ms delay)
   const playPauseBtn = document.getElementById('btn-play-pause');
   drawer.querySelectorAll('.nav-drawer-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('pointerup', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       if (btn === playPauseBtn) {
         // Toggle play/pause based on current media state
         const mp = session.mediaPlayer;
         const isPlaying = mp && (mp.state === 2); // PlayerState.PLAY === 2
         const cmdId = isPlaying ? 6 : 7; // 6=PAUSE, 7=PLAY
-        session.sendCommand(cmdId);
+        if (session.connected) session.sendCommand(cmdId);
         // Update button icon
         playPauseBtn.textContent = isPlaying ? '▶' : '⏸';
         playPauseBtn.title = isPlaying ? 'Play' : 'Pause';
       } else {
         const cmdId = parseInt(btn.dataset.cmd, 10);
-        if (!isNaN(cmdId)) {
+        if (!isNaN(cmdId) && session.connected) {
+          console.log(`[Drawer] Sending command ${cmdId}`);
           session.sendCommand(cmdId);
         }
       }
