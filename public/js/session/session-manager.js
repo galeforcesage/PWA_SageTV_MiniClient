@@ -65,6 +65,12 @@ export class SessionManager extends EventTarget {
     // Create media player
     this.mediaPlayer = new MediaPlayer(videoElement, container);
 
+    // Forward codec errors to session listeners for UI display
+    this.mediaPlayer.addEventListener('codecerror', (e) => {
+      console.error('[Session] Codec error:', e.detail.message);
+      this.dispatchEvent(new CustomEvent('codecerror', { detail: e.detail }));
+    });
+
     console.log('[Session] Initialized');
   }
 

@@ -53,6 +53,11 @@ export class MediaPlayer extends EventTarget {
     this._transmuxer = null;
     this._initSegmentSent = false;
 
+    // Push mode codec detection
+    this._pushCodecChecked = false;  // true after PMT parsed
+    this._pushStallBytes = 0;        // bytes pushed without mux.js output
+    this._pushOutputBytes = 0;       // bytes mux.js produced
+
     // hls.js instance for HLS streams
     this._hls = null;
 
@@ -435,9 +440,11 @@ export class MediaPlayer extends EventTarget {
         initSegment.set(segment.data, segment.initSegment.byteLength);
         this._pushQueue.push(initSegment);
         this._initSegmentSent = true;
+        this._pushOutputBytes += initSegment.byteLength;
         console.log(`[MediaPlayer] Init segment: ${segment.initSegment.byteLength}B + data: ${segment.data.byteLength}B`);
       } else {
         this._pushQueue.push(new Uint8Array(segment.data));
+        this._pushOutputBytes += segment.data.byteLength;
       }
     });
 
@@ -447,6 +454,126 @@ export class MediaPlayer extends EventTarget {
 
     this.state = PlayerState.LOADED;
     console.log('[MediaPlayer] Push mode ready with mux.js transmuxer (H.264 path)');
+  }
+
+  // ── MPEG-TS Codec Detection ───────────────────────────────
+
+  /**
+   * MPEG-TS stream_type constants from ISO 13818-1.
+   * mux.js only supports H.264 video + AAC/MP3 audio.
+   * Anything else will silently fail — detect early and warn.
+   */
+  static STREAM_TYPES = {
+    // Video
+    0x1B: 'H.264',      // AVC — supported by mux.js
+    0x24: 'HEVC',        // HEVC/H.265 — NOT supported by mux.js
+    0x02: 'MPEG2-Video', // NOT supported by mux.js
+    0x01: 'MPEG1-Video', // NOT supported by mux.js
+    0x10: 'MPEG4-Video', // NOT supported by mux.js
+    // Audio
+    0x0F: 'AAC',         // ISO 14496-3 — supported
+    0x11: 'AAC-LATM',    // supported
+    0x03: 'MP3',         // MPEG1 Audio Layer 3 — supported by mux.js
+    0x04: 'MP3',         // MPEG2 Audio Layer 3 — supported by mux.js
+    0x81: 'AC3',         // Dolby AC-3 — NOT decoded by browser
+    0x87: 'EAC3',        // Dolby E-AC-3 — NOT decoded by browser
+    0x06: 'PES-Private', // Private data (may contain AC3/DTS via descriptor)
+    0x82: 'DTS',         // NOT decoded by browser
+    0x86: 'DTS',         // NOT decoded by browser
+  };
+
+  static MUXJS_SUPPORTED_VIDEO = new Set([0x1B]);           // H.264 only
+  static MUXJS_SUPPORTED_AUDIO = new Set([0x0F, 0x11, 0x03, 0x04]); // AAC, MP3
+
+  /**
+   * Parse MPEG-TS PAT + PMT from push data to detect stream codecs.
+   * Returns {video: string|null, audio: string|null, supported: boolean}
+   * or null if PMT not found in this chunk.
+   */
+  _detectPushCodecs(data) {
+    // MPEG-TS packets are 188 bytes, sync byte 0x47
+    if (data.length < 188 || data[0] !== 0x47) return null;
+
+    let pmtPid = -1;
+    const result = { video: null, audio: null, videoType: -1, audioType: -1, supported: true };
+
+    // Scan for PAT (PID 0) then PMT
+    for (let offset = 0; offset + 188 <= data.length; offset += 188) {
+      if (data[offset] !== 0x47) continue; // sync byte
+
+      const pid = ((data[offset + 1] & 0x1F) << 8) | data[offset + 2];
+      const payloadStart = (data[offset + 1] & 0x40) !== 0;
+      const hasAdaptation = (data[offset + 3] & 0x20) !== 0;
+      const hasPayload = (data[offset + 3] & 0x10) !== 0;
+      if (!hasPayload) continue;
+
+      let payloadOffset = offset + 4;
+      if (hasAdaptation) {
+        payloadOffset += 1 + data[offset + 4]; // skip adaptation field
+      }
+      if (payloadStart) {
+        payloadOffset += data[payloadOffset] + 1; // pointer field
+      }
+      if (payloadOffset >= offset + 188) continue;
+
+      // PAT: PID 0 → extract PMT PID
+      if (pid === 0 && pmtPid < 0) {
+        const tableId = data[payloadOffset];
+        if (tableId !== 0x00) continue;
+        const sectionLen = ((data[payloadOffset + 1] & 0x0F) << 8) | data[payloadOffset + 2];
+        const progStart = payloadOffset + 8; // skip table header
+        const progEnd = payloadOffset + 3 + sectionLen - 4; // exclude CRC
+        if (progEnd > offset + 188) continue;
+        for (let p = progStart; p + 3 < progEnd; p += 4) {
+          const progNum = (data[p] << 8) | data[p + 1];
+          if (progNum !== 0) { // skip NIT
+            pmtPid = ((data[p + 2] & 0x1F) << 8) | data[p + 3];
+            break;
+          }
+        }
+      }
+
+      // PMT: extract stream types
+      if (pid === pmtPid && pmtPid > 0) {
+        const tableId = data[payloadOffset];
+        if (tableId !== 0x02) continue;
+        const sectionLen = ((data[payloadOffset + 1] & 0x0F) << 8) | data[payloadOffset + 2];
+        const progInfoLen = ((data[payloadOffset + 10] & 0x0F) << 8) | data[payloadOffset + 11];
+        let streamOffset = payloadOffset + 12 + progInfoLen;
+        const sectionEnd = payloadOffset + 3 + sectionLen - 4;
+        if (sectionEnd > offset + 188) continue;
+
+        while (streamOffset + 4 < sectionEnd) {
+          const streamType = data[streamOffset];
+          const esInfoLen = ((data[streamOffset + 3] & 0x0F) << 8) | data[streamOffset + 4];
+          const typeName = MediaPlayer.STREAM_TYPES[streamType] || `unknown(0x${streamType.toString(16)})`;
+
+          // Classify as video or audio
+          if (streamType === 0x1B || streamType === 0x24 || streamType === 0x02 ||
+              streamType === 0x01 || streamType === 0x10) {
+            result.video = typeName;
+            result.videoType = streamType;
+          } else if (streamType === 0x0F || streamType === 0x11 || streamType === 0x03 ||
+                     streamType === 0x04 || streamType === 0x81 || streamType === 0x87 ||
+                     streamType === 0x82 || streamType === 0x86 || streamType === 0x06) {
+            result.audio = typeName;
+            result.audioType = streamType;
+          }
+          streamOffset += 5 + esInfoLen;
+        }
+
+        // Check support
+        if (result.videoType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_VIDEO.has(result.videoType)) {
+          result.supported = false;
+        }
+        if (result.audioType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_AUDIO.has(result.audioType)) {
+          result.supported = false;
+        }
+
+        return result;
+      }
+    }
+    return null; // PMT not found in this chunk
   }
 
   /**
@@ -523,6 +650,10 @@ export class MediaPlayer extends EventTarget {
       this._transmuxer = null;
     }
     this._initSegmentSent = false;
+    this._pushCodecChecked = false;
+    this._pushStallBytes = 0;
+    this._pushOutputBytes = 0;
+    this._pushStallWarned = false;
 
     if (this.mediaSource) {
       try {
@@ -720,10 +851,63 @@ export class MediaPlayer extends EventTarget {
       console.log(`[MediaPlayer] First push: ${data.length}B, header=[${hdr}]`);
     }
 
+    // ── Codec detection on early push data ──
+    if (!this._pushCodecChecked) {
+      const codecs = this._detectPushCodecs(data);
+      if (codecs) {
+        this._pushCodecChecked = true;
+        console.log(`[MediaPlayer] Push stream codecs: video=${codecs.video} (0x${codecs.videoType.toString(16)}), audio=${codecs.audio} (0x${codecs.audioType.toString(16)}), supported=${codecs.supported}`);
+
+        if (!codecs.supported) {
+          const problems = [];
+          if (codecs.videoType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_VIDEO.has(codecs.videoType)) {
+            problems.push(`video codec ${codecs.video} not supported by browser transmuxer (only H.264)`);
+          }
+          if (codecs.audioType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_AUDIO.has(codecs.audioType)) {
+            problems.push(`audio codec ${codecs.audio} not decoded by browser (only AAC/MP3)`);
+          }
+          console.error(`[MediaPlayer] PUSH CODEC MISMATCH: ${problems.join('; ')}. ` +
+            `Server should be transcoding to H.264+AAC but sent raw stream. ` +
+            `Check FIXED_PUSH_MEDIA_FORMAT and server FFmpeg availability.`);
+
+          // Dispatch event so UI can show a visible warning
+          this.dispatchEvent(new CustomEvent('codecerror', {
+            detail: {
+              video: codecs.video, audio: codecs.audio,
+              message: `Unsupported push codec: ${problems.join('; ')}`,
+            }
+          }));
+        }
+      }
+    }
+
+    // ── Stall detection: mux.js produces no output ──
+    const prevOutput = this._pushOutputBytes;
+    this._pushStallBytes += data.length;
+
     if (!this._transmuxer || !this.mediaSource || this.mediaSource.readyState !== 'open') return;
 
     this._transmuxer.push(data);
     this._transmuxer.flush();
+
+    // Check if mux.js produced any output from this push
+    if (this._pushOutputBytes === prevOutput) {
+      // No output produced — mux.js couldn't parse this data
+      if (this._pushStallBytes > 512 * 1024 && this._pushOutputBytes === 0) {
+        // 512KB pushed with zero output — confirmed stall
+        if (!this._pushStallWarned) {
+          this._pushStallWarned = true;
+          console.error(`[MediaPlayer] PUSH STALL: ${(this._pushStallBytes / 1024).toFixed(0)}KB received, 0B output from transmuxer. ` +
+            `Stream likely contains unsupported codecs (HEVC, MPEG2, AC3). ` +
+            `Server FFmpeg may not be transcoding to H.264+AAC.`);
+          this.dispatchEvent(new CustomEvent('codecerror', {
+            detail: { message: 'No playable video: server push stream not in H.264+AAC format' }
+          }));
+        }
+      }
+    } else {
+      this._pushStallBytes = 0; // Reset stall counter on successful output
+    }
 
     // Auto-play after receiving enough data
     if (this._totalPushed > 256 * 1024 && this.state === PlayerState.LOADED) {
@@ -824,8 +1008,10 @@ export class MediaPlayer extends EventTarget {
           initSegment.set(segment.data, segment.initSegment.byteLength);
           this._pushQueue.push(initSegment);
           this._initSegmentSent = true;
+          this._pushOutputBytes += initSegment.byteLength;
         } else {
           this._pushQueue.push(new Uint8Array(segment.data));
+          this._pushOutputBytes += segment.data.byteLength;
         }
       });
       this._transmuxer.on('done', () => {

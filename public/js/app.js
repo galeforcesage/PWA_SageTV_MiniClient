@@ -302,6 +302,28 @@ function setupEventHandlers() {
     connectError.hidden = false;
   });
 
+  // Push mode codec mismatch warning
+  session.addEventListener('codecerror', (e) => {
+    const msg = e.detail.message || 'Unsupported media codec in push stream';
+    console.warn('[App] Codec error:', msg);
+    // Show a temporary on-screen warning
+    let toast = document.getElementById('codec-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'codec-toast';
+      toast.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
+        'background:rgba(200,40,40,0.92);color:#fff;padding:10px 20px;border-radius:8px;' +
+        'font-size:14px;z-index:9999;max-width:80vw;text-align:center;pointer-events:none;' +
+        'box-shadow:0 4px 12px rgba(0,0,0,0.4);';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = `⚠ ${msg}`;
+    toast.hidden = false;
+    // Auto-hide after 10 seconds
+    clearTimeout(toast._hideTimer);
+    toast._hideTimer = setTimeout(() => { toast.hidden = true; }, 10000);
+  });
+
   // Media player autoplay blocked
   if (session.mediaPlayer) {
     session.mediaPlayer.addEventListener('playblocked', () => {
