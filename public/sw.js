@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-7.0.1';
+const CACHE_NAME = 'sagetv-miniclient-7.0.8';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
@@ -25,6 +25,7 @@ const STATIC_ASSETS = [
   '/js/media/player.js',
   '/js/input/input-manager.js',
   '/js/session/session-manager.js',
+  '/js/session/download-manager.js',
   '/js/settings/settings-manager.js',
   '/manifest.json',
 ];

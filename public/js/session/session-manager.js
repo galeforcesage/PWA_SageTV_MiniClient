@@ -14,6 +14,7 @@
 import { MiniClientConnection } from '../protocol/connection.js';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { MediaPlayer } from '../media/player.js';
+import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';
 import { SettingsManager } from '../settings/settings-manager.js';
 
@@ -24,6 +25,7 @@ export class SessionManager extends EventTarget {
     this.connection = null;
     this.renderer = null;
     this.mediaPlayer = null;
+    this.downloadManager = new DownloadManager();
     this.inputManager = null;
 
     // Session state
@@ -85,7 +87,7 @@ export class SessionManager extends EventTarget {
       this.disconnect();
     }
 
-    // If serverHost contains a port (e.g. "1.2.3.4:8099"), strip it
+    // If serverHost contains a port (e.g. "example-host:8099"), strip it
     if (serverHost && serverHost.includes(':')) {
       const parts = serverHost.split(':');
       serverHost = parts[0];
@@ -163,6 +165,13 @@ export class SessionManager extends EventTarget {
     // Handle resolution change from server rendering detection
     this.connection.addEventListener('resolutionchange', () => {
       this._onResize();
+    });
+
+    this.connection.addEventListener('downloadrequest', (e) => {
+      const detail = e.detail || {};
+
+      // Bubble up for optional UI status handling.
+      this.dispatchEvent(new CustomEvent('downloadrequest', { detail }));
     });
 
     // Handle video bounds from renderer
@@ -260,6 +269,24 @@ export class SessionManager extends EventTarget {
     if (this.connection) {
       this.connection.sendCommand(commandId);
     }
+  }
+
+  /**
+   * Trigger a browser-native download from a server transfer response.
+   * @param {object} sessionAck - Server transfer session data.
+   */
+  async downloadFromSessionAck(sessionAck) {
+    return this.downloadManager.downloadFromSessionAck(sessionAck);
+  }
+
+  /**
+   * Trigger a browser-native download from a manifest URL.
+   * @param {string} manifestUrl
+   * @param {string} [downloadUrl]
+   * @param {string} [suggestedName]
+   */
+  async downloadFromManifest(manifestUrl, downloadUrl, suggestedName) {
+    return this.downloadManager.downloadFromManifest(manifestUrl, downloadUrl, suggestedName);
   }
 
   /**

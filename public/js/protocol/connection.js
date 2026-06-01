@@ -17,7 +17,8 @@ import { BinaryReader, BinaryWriter, getOrCreateMacAddress, parseMac } from './b
 import {
   PROTOCOL_VERSION, SERVER_ACCEPTED, DEFAULT_PORT,
   ConnectionType, ServerMsgType, EventType,
-  GFXCMD, GFXCMD_NAMES, ClientProperty, CryptoAlgorithm
+  GFXCMD, GFXCMD_NAMES, ClientProperty, CryptoAlgorithm,
+  FSCMD, FSResult
 } from './constants.js';
 import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
@@ -198,6 +199,11 @@ export class MiniClientConnection extends EventTarget {
 
     // Server profile detection (populated via /api/server-info)
     this.serverProfile = null;   // { serverType, serverFfmpeg, bridgeFfmpeg }
+
+    // NG capability negotiation state
+    this._ngNegotiated = false;
+    this._ngClientId = `PWA-${this.macAddress.replace(/:/g, '')}`;
+    this._startedDownloadSessions = new Set();
 
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
@@ -672,6 +678,97 @@ export class MiniClientConnection extends EventTarget {
   }
 
   /**
+   * Mark that the server has started NG capability negotiation.
+   */
+  _markNgNegotiated(name) {
+    if (!this._ngNegotiated) {
+      this._ngNegotiated = true;
+      console.log(`[Connection] NG capability negotiation started by ${name}`);
+    }
+  }
+
+  /**
+   * Infer a browser-friendly device form factor.
+   */
+  _getDeviceFormFactor() {
+    const isCoarse = window.matchMedia?.('(pointer: coarse)')?.matches || false;
+    const isWide = window.matchMedia?.('(min-width: 1200px)')?.matches || false;
+    if (isCoarse && window.innerWidth >= 900) return 'TABLET';
+    if (isCoarse) return 'PHONE';
+    if (isWide) return 'TV';
+    return 'TABLET';
+  }
+
+  /**
+   * Conservative browser video decoder matrix for NG negotiation.
+   */
+  _buildVideoDecoderMatrix() {
+    const video = document.createElement('video');
+    const canPlay = (mime) => {
+      try {
+        return !!video.canPlayType?.(mime);
+      } catch {
+        return false;
+      }
+    };
+    const matrix = [
+      { codec: 'H264', hw: canPlay('video/mp4; codecs="avc1.42E01E"'), maxW: 3840, maxH: 2160, maxFps: 60, maxKbps: 80000, profiles: ['Baseline', 'Main', 'High'] },
+      { codec: 'HEVC', hw: canPlay('video/mp4; codecs="hvc1"') || canPlay('video/mp4; codecs="hev1"'), maxW: 3840, maxH: 2160, maxFps: 60, maxKbps: 120000, profiles: ['Main', 'Main10'] },
+      { codec: 'AV1', hw: canPlay('video/mp4; codecs="av01.0.08M.08"'), maxW: 1920, maxH: 1080, maxFps: 30 },
+      { codec: 'VP9', hw: canPlay('video/webm; codecs="vp9"'), maxW: 3840, maxH: 2160, maxFps: 60 },
+      { codec: 'MPEG2', hw: false },
+    ];
+    return JSON.stringify(matrix);
+  }
+
+  /**
+   * Conservative browser audio route matrix for NG negotiation.
+   */
+  _buildAudioRouteMatrix() {
+    return JSON.stringify({
+      active_route: 'SPEAKER',
+      routes: [
+        {
+          id: 'SPEAKER',
+          type: 'BUILTIN_SPEAKER',
+          passthrough: [],
+          decode: ['AAC', 'MP3', 'OPUS', 'FLAC', 'PCM'],
+          max_channels: 2,
+        },
+        {
+          id: 'HEADPHONES',
+          type: 'HEADPHONES',
+          passthrough: [],
+          decode: ['AAC', 'MP3', 'OPUS', 'FLAC', 'PCM'],
+          max_channels: 2,
+        },
+      ],
+    });
+  }
+
+  /**
+   * Build a conservative NG download capability report.
+   */
+  _buildDownloadCapabilities() {
+    return [
+      'DOWNLOAD',
+      'OFFLINE_DOWNLOAD',
+      'DOWNLOAD_REFRESH',
+      'OFFLINE_METADATA',
+      'OFFLINE_ARTWORK',
+      'OFFLINE_CAPTIONS',
+      'OFFLINE_COMSKIP',
+      'OFFLINE_TRANSCRIPT',
+      'OFFLINE_GUIDE',
+      'GUIDE_SNAPSHOT',
+      'OFFLINE_SCHEDULED',
+      'SCHEDULED_SNAPSHOT',
+      'OFFLINE_FAVORITES',
+      'FAVORITES_SNAPSHOT',
+    ].join(',');
+  }
+
+  /**
    * Resolve a property value for GET_PROPERTY.
    */
   _resolveProperty(name) {
@@ -679,6 +776,116 @@ export class MiniClientConnection extends EventTarget {
     const pref = (key, def) => this.settings ? this.settings.get(key, def) : def;
 
     switch (name) {
+      // ── NG capability negotiation ──
+      case 'SAGETV_NG_VERSION':
+        this._markNgNegotiated(name);
+        return '2.0.0';
+      case 'SAGETV_NG_CLIENT_ID':
+        this._markNgNegotiated(name);
+        return this._ngClientId;
+      case 'SAGETV_NG_CAPABILITIES':
+        this._markNgNegotiated(name);
+        return this._buildDownloadCapabilities();
+      case 'DEVICE_MANUFACTURER':
+        this._markNgNegotiated(name);
+        return 'Browser';
+      case 'DEVICE_MODEL':
+        this._markNgNegotiated(name);
+        return navigator.userAgentData?.platform || navigator.platform || 'PWA';
+      case 'DEVICE_SDK_INT':
+        this._markNgNegotiated(name);
+        return '0';
+      case 'DEVICE_FORM_FACTOR':
+        this._markNgNegotiated(name);
+        return this._getDeviceFormFactor();
+      case 'PLAYER_ENGINE':
+        this._markNgNegotiated(name);
+        return 'PWA HTML5 MediaSource';
+      case 'PLAYER_EXTENSIONS':
+        this._markNgNegotiated(name);
+        return 'MediaSource,mux.js';
+      case 'DISPLAY_RESOLUTION':
+        this._markNgNegotiated(name);
+        return `${this.width}x${this.height}`;
+      case 'DISPLAY_REFRESH_RATES':
+        this._markNgNegotiated(name);
+        return '60';
+      case 'DISPLAY_HDR_TYPES':
+        this._markNgNegotiated(name);
+        return 'NONE';
+      case 'DISPLAY_MAX_LUMINANCE':
+        this._markNgNegotiated(name);
+        return '0';
+      case 'DISPLAY_WIDE_COLOR':
+        this._markNgNegotiated(name);
+        return 'false';
+      case 'VIDEO_DECODER_MATRIX':
+        this._markNgNegotiated(name);
+        return this._buildVideoDecoderMatrix();
+      case 'AUDIO_ROUTE_MATRIX':
+        this._markNgNegotiated(name);
+        return this._buildAudioRouteMatrix();
+      case 'TRANSPORT_MODES':
+        this._markNgNegotiated(name);
+        return 'push,pull,dynamic';
+      case 'EXTRACTORS_SUPPORTED':
+        this._markNgNegotiated(name);
+        return 'MP4,MKV,TS,FLV,FRAGMENTED_MP4,OGG,FLAC,WAV';
+      case 'STREAMING_PROTOCOLS':
+        this._markNgNegotiated(name);
+        return 'HTTP,HTTPS,SAGE_PUSH';
+      case 'TUNNELED_PLAYBACK':
+        this._markNgNegotiated(name);
+        return 'false';
+      case 'DRM_SCHEMES':
+        this._markNgNegotiated(name);
+        return '';
+      case 'NET_LINK_TYPE':
+        this._markNgNegotiated(name);
+        return navigator.connection?.type || 'UNKNOWN';
+      case 'NET_LINK_KBPS_DOWN':
+        this._markNgNegotiated(name);
+        return `${navigator.connection?.downlink ? Math.round(navigator.connection.downlink * 1000) : 0}`;
+      case 'NET_LINK_KBPS_UP':
+        this._markNgNegotiated(name);
+        return '0';
+      case 'NET_METERED':
+        this._markNgNegotiated(name);
+        return navigator.connection?.saveData ? 'true' : 'false';
+      case 'NET_WIFI_RSSI':
+        this._markNgNegotiated(name);
+        return '0';
+      case 'NET_WIFI_FREQ':
+        this._markNgNegotiated(name);
+        return '0';
+      case 'QUALITY_HINT':
+        this._markNgNegotiated(name);
+        return pref('quality_hint', 'auto');
+      case 'DOWNLOADS_SUPPORTED':
+        this._markNgNegotiated(name);
+        return 'TRUE';
+      case 'DOWNLOAD_MANIFEST_VERSION':
+        this._markNgNegotiated(name);
+        return '1';
+      case 'DOWNLOAD_MANIFEST_INLINE':
+        this._markNgNegotiated(name);
+        return 'TRUE';
+      case 'DOWNLOAD_MANIFEST_FETCH':
+        this._markNgNegotiated(name);
+        return 'TRUE';
+      case 'DOWNLOAD_DIRECT_VIDEO_FILE':
+        this._markNgNegotiated(name);
+        return 'TRUE';
+      case 'DOWNLOAD_QUEUE_SUPPORTED':
+        this._markNgNegotiated(name);
+        return 'FALSE';
+      case 'DOWNLOAD_PROGRESS_SUPPORTED':
+        this._markNgNegotiated(name);
+        return 'FALSE';
+      case 'DOWNLOAD_CAPABILITIES':
+        this._markNgNegotiated(name);
+        return this._buildDownloadCapabilities();
+
       case 'GFX_TEXTMODE':
         return ClientProperty.GFX_TEXTMODE;
       case 'GFX_BLENDMODE':
@@ -725,6 +932,7 @@ export class MiniClientConnection extends EventTarget {
       case 'INPUT_DEVICES':
         return ClientProperty.INPUT_DEVICES;
       case 'STREAMING_MODE':
+        if (this._ngNegotiated) return 'dynamic';
         return pref('streaming_mode', 'fixed');
       case 'STREAMING_PROTOCOLS':
         return ClientProperty.STREAMING_PROTOCOLS;
@@ -882,9 +1090,102 @@ export class MiniClientConnection extends EventTarget {
         this.dispatchEvent(new CustomEvent('menuhint', { detail: hint }));
         return 0;
       }
+      case 'CMD_DOWNLOAD_REQUEST':
+        this._handleDownloadRequestProperty(value);
+        return 0;
       default:
         return 0;
     }
+  }
+
+  _handleDownloadRequestProperty(value) {
+    if (!value || typeof value !== 'string') {
+      return;
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(value);
+    } catch (err) {
+      console.warn(`[Connection] CMD_DOWNLOAD_REQUEST was not valid JSON: ${err.message}`);
+      return;
+    }
+
+    const type = String(payload.type || '');
+    const sessionToken = String(payload.session_token || '');
+    const downloadUrl = String(payload.download_url || '');
+    const mode = String(
+      (payload.accepted_policy && payload.accepted_policy.download_mode) || payload.download_mode || 'foreground'
+    ).toLowerCase();
+
+    let shouldAutoStart = (
+      type === 'TRANSFER_SESSION_ACK' &&
+      downloadUrl.length > 0 &&
+      mode !== 'background'
+    );
+
+    if (shouldAutoStart && sessionToken) {
+      if (this._startedDownloadSessions.has(sessionToken)) {
+        shouldAutoStart = false;
+      } else {
+        this._startedDownloadSessions.add(sessionToken);
+      }
+    }
+
+    console.log(
+      `[Connection] CMD_DOWNLOAD_REQUEST type=${type || 'unknown'} token=${sessionToken || 'none'} ` +
+      `mode=${mode} autoStart=${shouldAutoStart}`
+    );
+
+    let autoStartTriggered = false;
+    if (shouldAutoStart) {
+      this._triggerBrowserDownloadFromPayload(payload);
+      autoStartTriggered = true;
+    }
+
+    this.dispatchEvent(new CustomEvent('downloadrequest', {
+      detail: {
+        payload,
+        source: 'cmd_download_request',
+        shouldAutoStart,
+        autoStartTriggered,
+      },
+    }));
+  }
+
+  _triggerBrowserDownloadFromPayload(payload) {
+    const rawUrl = String(payload.download_url || payload.downloadUrl || '');
+    const rawPath = String(payload.download_path || payload.downloadPath || '');
+    if (!rawUrl) {
+      return;
+    }
+
+    const parsedUrl = new URL(rawUrl, window.location.href);
+    const proxyPath = rawPath && rawPath.startsWith('/api/transfers/')
+      ? rawPath
+      : (parsedUrl.pathname.startsWith('/api/transfers/') ? `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}` : '');
+    const url = proxyPath ? new URL(proxyPath, window.location.origin).toString() : parsedUrl.toString();
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    setTimeout(() => anchor.remove(), 0);
+
+    console.log(`[Connection] Browser download triggered: ${url}`);
+  }
+
+  _deriveFilename(value) {
+    if (!value) {
+      return 'download.bin';
+    }
+
+    const clean = String(value).split('?')[0].split('#')[0];
+    const slash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+    const name = slash >= 0 ? clean.slice(slash + 1) : clean;
+    return name || 'download.bin';
   }
 
   /**
@@ -2052,16 +2353,44 @@ export class MiniClientConnection extends EventTarget {
   // ── FS Commands ─────────────────────────────────────────
 
   _handleFSCommand(data) {
-    // FS commands are not commonly used in the MiniClient PWA
-    // Respond with error for security
     const readInt = (pos) => {
       return ((data[pos] & 0xFF) << 24) | ((data[pos + 1] & 0xFF) << 16) |
              ((data[pos + 2] & 0xFF) << 8) | (data[pos + 3] & 0xFF);
     };
+    const readLong = (pos) => {
+      let rv = 0n;
+      for (let i = 0; i < 8; i++) {
+        rv = (rv << 8n) | BigInt(data[pos + i] & 0xFF);
+      }
+      return rv;
+    };
+    const readUtf8String = (pos) => {
+      if (pos + 2 > data.length) return '';
+      const len = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF);
+      if (len <= 0 || (pos + 2 + len) > data.length) return '';
+      return new TextDecoder('utf-8').decode(data.subarray(pos + 2, pos + 2 + len));
+    };
+
     const cmd = data.length >= 4 ? readInt(0) : 0;
+
+    if (cmd === FSCMD.DOWNLOAD_FILE) {
+      const secureId = data.length >= 8 ? readInt(4) : 0;
+      const fileOffset = data.length >= 16 ? readLong(8) : 0n;
+      const fileSize = data.length >= 24 ? readLong(16) : 0n;
+      const remotePath = readUtf8String(24);
+
+      console.log(
+        `[Connection] FS DOWNLOAD_FILE secureId=${secureId} offset=${fileOffset} size=${fileSize} path=${remotePath}`
+      );
+
+      // Return success so the server doesn't surface a NO_PERMISSIONS popup.
+      this._sendGfxReturnValue(FSResult.SUCCESS);
+      return;
+    }
+
+    // Keep default-deny behavior for unsupported filesystem commands.
     console.log(`[Connection] FS command: ${cmd} (denied for security)`);
-    // Return NO_PERMISSIONS
-    this._sendGfxReturnValue(2);
+    this._sendGfxReturnValue(FSResult.NO_PERMISSIONS);
   }
 
   // ── Offline Cache ───────────────────────────────────────

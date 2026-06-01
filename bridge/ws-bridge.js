@@ -5,7 +5,7 @@
  * Supports two channels per client: GFX (UI) and Media (playback).
  *
  * Usage:
- *   node ws-bridge.js [--serve-static] [--port 8099] [--sage-host 192.168.1.x] [--sage-port 31099]
+ *   node ws-bridge.js [--serve-static] [--port 8099] [--sage-host <hostname>] [--sage-port 31099]
  */
 
 import { WebSocketServer, WebSocket } from 'ws';

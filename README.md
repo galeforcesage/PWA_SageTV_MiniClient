@@ -44,7 +44,7 @@ The Java bridge runs as a SageTV plugin (shadow JAR in `JARs/`). It embeds Jetty
    sagetv_root_plugin_list/pwa-miniclient=pwa-miniclient
    ```
 5. Restart SageTV
-6. Open `http://{SageTV-IP}:8099` in your browser
+6. Open `https://{SageTV-IP}:8099` in your browser (accept the local self-signed certificate the first time)
 
 ### Plugin Configuration
 
@@ -79,11 +79,11 @@ cd bridge-java
 java -jar build/libs/pwa-miniclient-bridge.jar \
   --port 8099 \
   --web-root ../public \
-  --username admin \
-  --password changeme
+  --username <username> \
+  --password <password>
 ```
 
-Open `http://localhost:8099/` and connect to your SageTV server.
+Open `https://localhost:8099/` and connect to your SageTV server.
 
 ## Project Structure
 
