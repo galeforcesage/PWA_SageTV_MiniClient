@@ -302,11 +302,7 @@ function setupEventHandlers() {
     connectError.hidden = false;
   });
 
-  // Push mode codec mismatch warning
-  session.addEventListener('codecerror', (e) => {
-    const msg = e.detail.message || 'Unsupported media codec in push stream';
-    console.warn('[App] Codec error:', msg);
-    // Show a temporary on-screen warning
+  const showWarningToast = (message, timeoutMs = 10000) => {
     let toast = document.getElementById('codec-toast');
     if (!toast) {
       toast = document.createElement('div');
@@ -317,11 +313,28 @@ function setupEventHandlers() {
         'box-shadow:0 4px 12px rgba(0,0,0,0.4);';
       document.body.appendChild(toast);
     }
-    toast.textContent = `⚠ ${msg}`;
+    toast.textContent = `⚠ ${message}`;
     toast.hidden = false;
-    // Auto-hide after 10 seconds
     clearTimeout(toast._hideTimer);
-    toast._hideTimer = setTimeout(() => { toast.hidden = true; }, 10000);
+    toast._hideTimer = setTimeout(() => { toast.hidden = true; }, timeoutMs);
+  };
+
+  // Push mode codec mismatch warning
+  session.addEventListener('codecerror', (e) => {
+    const msg = e.detail.message || 'Unsupported media codec in push stream';
+    console.warn('[App] Codec error:', msg);
+    showWarningToast(msg, 10000);
+  });
+
+  session.addEventListener('playbackfailure', (e) => {
+    const reason = e.detail?.reason || 'Playback failed';
+    console.warn('[App] Playback failure:', reason, e.detail || {});
+    showWarningToast(`Playback fallback engaged (${reason})`, 7000);
+  });
+
+  session.addEventListener('capabilityupdate', (e) => {
+    const reason = e.detail?.reason || 'runtime-observation';
+    console.log('[App] Capability update:', reason, e.detail?.patch || e.detail || {});
   });
 
   // Media player autoplay blocked

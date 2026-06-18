@@ -131,6 +131,7 @@ export class MiniClientConnection extends EventTarget {
     this._originalWidth = this.width;
     this._originalHeight = this.height;
     this.settings = options.settings || null;
+    this.platformDetector = options.platformDetector || null;
 
     // Load cached auth from settings if available (survives fresh connections)
     this._cachedAuthBlock = (this.settings
@@ -204,6 +205,11 @@ export class MiniClientConnection extends EventTarget {
     this._ngNegotiated = false;
     this._ngClientId = `PWA-${this.macAddress.replace(/:/g, '')}`;
     this._startedDownloadSessions = new Set();
+    this._runtimeCapabilityOverrides = {};
+    this._lastCapabilityUpdate = null;
+    this._lastPlaybackFailure = null;
+    this._capabilityFeedbackSeq = 0;
+    this._feedbackEndpointSupported = true;
 
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
@@ -750,22 +756,143 @@ export class MiniClientConnection extends EventTarget {
    * Build a conservative NG download capability report.
    */
   _buildDownloadCapabilities() {
-    return [
-      'DOWNLOAD',
-      'OFFLINE_DOWNLOAD',
-      'DOWNLOAD_REFRESH',
-      'OFFLINE_METADATA',
-      'OFFLINE_ARTWORK',
-      'OFFLINE_CAPTIONS',
-      'OFFLINE_COMSKIP',
-      'OFFLINE_TRANSCRIPT',
-      'OFFLINE_GUIDE',
-      'GUIDE_SNAPSHOT',
-      'OFFLINE_SCHEDULED',
-      'SCHEDULED_SNAPSHOT',
-      'OFFLINE_FAVORITES',
-      'FAVORITES_SNAPSHOT',
-    ].join(',');
+    const caps = this.platformDetector?.getNgDownloadCapabilities?.() || [];
+    return caps.join(',');
+  }
+
+  _isDownloadSupported() {
+    return !(this.platformDetector?.isTizen?.());
+  }
+
+  _getClientCapabilitiesPayload() {
+    const caps = this.platformDetector?.getCapabilities?.() || {};
+    const merged = {
+      ...caps,
+      display: { ...(caps.display || {}) },
+      input: { ...(caps.input || {}) },
+      playbackHints: { ...(caps.playbackHints || {}) },
+      device: { ...(caps.device || {}) },
+      network: { ...(caps.network || {}) },
+    };
+
+    this._applyRuntimeCapabilityOverrides(merged);
+
+    if (this._lastCapabilityUpdate || this._lastPlaybackFailure) {
+      merged.runtimeFeedback = {
+        seq: this._capabilityFeedbackSeq,
+        lastCapabilityUpdate: this._lastCapabilityUpdate,
+        lastPlaybackFailure: this._lastPlaybackFailure,
+      };
+    }
+
+    try {
+      return JSON.stringify(merged);
+    } catch {
+      return '{}';
+    }
+  }
+
+  _applyRuntimeCapabilityOverrides(target) {
+    const ovr = this._runtimeCapabilityOverrides || {};
+    if (ovr.display) Object.assign(target.display, ovr.display);
+    if (ovr.input) Object.assign(target.input, ovr.input);
+    if (ovr.playbackHints) Object.assign(target.playbackHints, ovr.playbackHints);
+    if (ovr.device) Object.assign(target.device, ovr.device);
+    if (ovr.network) Object.assign(target.network, ovr.network);
+
+    for (const [key, value] of Object.entries(ovr)) {
+      if (['display', 'input', 'playbackHints', 'device', 'network'].includes(key)) {
+        continue;
+      }
+      target[key] = value;
+    }
+  }
+
+  _mergeRuntimeCapabilityPatch(patch) {
+    if (!patch || typeof patch !== 'object') {
+      return;
+    }
+
+    const sections = ['display', 'input', 'playbackHints', 'device', 'network'];
+    for (const section of sections) {
+      if (patch[section] && typeof patch[section] === 'object') {
+        this._runtimeCapabilityOverrides[section] = {
+          ...(this._runtimeCapabilityOverrides[section] || {}),
+          ...patch[section],
+        };
+      }
+    }
+
+    for (const [key, value] of Object.entries(patch)) {
+      if (sections.includes(key)) {
+        continue;
+      }
+      this._runtimeCapabilityOverrides[key] = value;
+    }
+  }
+
+  async reportCapabilityUpdate(update) {
+    const payload = update || {};
+    const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : payload;
+    this._mergeRuntimeCapabilityPatch(patch);
+    this._lastCapabilityUpdate = {
+      seq: ++this._capabilityFeedbackSeq,
+      reason: payload.reason || 'runtime-observation',
+      timestamp: payload.timestamp || Date.now(),
+      patch,
+    };
+
+    this.dispatchEvent(new CustomEvent('capabilityupdate', { detail: this._lastCapabilityUpdate }));
+    await this._postCapabilityFeedback('CAPABILITY_UPDATE', this._lastCapabilityUpdate);
+  }
+
+  async reportPlaybackFailure(failure) {
+    const payload = failure || {};
+    this._lastPlaybackFailure = {
+      seq: ++this._capabilityFeedbackSeq,
+      timestamp: payload.timestamp || Date.now(),
+      ...payload,
+    };
+
+    this.dispatchEvent(new CustomEvent('playbackfailure', { detail: this._lastPlaybackFailure }));
+    await this._postCapabilityFeedback('PLAYBACK_FAILURE', this._lastPlaybackFailure);
+  }
+
+  async _postCapabilityFeedback(type, payload) {
+    if (!this._feedbackEndpointSupported) {
+      return;
+    }
+
+    try {
+      const httpUrl = this.bridgeUrl
+        .replace(/^ws:/, 'http:')
+        .replace(/^wss:/, 'https:');
+      const response = await fetch(`${httpUrl}/api/client-feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        keepalive: true,
+        body: JSON.stringify({
+          type,
+          clientId: this._ngClientId,
+          serverHost: this.serverHost,
+          serverPort: this.serverPort,
+          payload,
+        }),
+      });
+
+      if (!response.ok) {
+        if (response.status === 404 || response.status === 405) {
+          this._feedbackEndpointSupported = false;
+          console.log('[Connection] Bridge capability feedback endpoint not available; telemetry remains local');
+          return;
+        }
+        console.warn(`[Connection] Capability feedback POST failed: ${response.status}`);
+      }
+    } catch (err) {
+      console.debug('[Connection] Capability feedback POST skipped:', err?.message || err);
+    }
   }
 
   /**
@@ -786,9 +913,15 @@ export class MiniClientConnection extends EventTarget {
       case 'SAGETV_NG_CAPABILITIES':
         this._markNgNegotiated(name);
         return this._buildDownloadCapabilities();
+      case 'CLIENT_CAPABILITIES':
+        this._markNgNegotiated(name);
+        return this._getClientCapabilitiesPayload();
+      case 'CLIENT_PLATFORM':
+        this._markNgNegotiated(name);
+        return this.platformDetector?.isTizen?.() ? 'tizen' : 'browser';
       case 'DEVICE_MANUFACTURER':
         this._markNgNegotiated(name);
-        return 'Browser';
+        return this.platformDetector?.isTizen?.() ? 'Samsung' : 'Browser';
       case 'DEVICE_MODEL':
         this._markNgNegotiated(name);
         return navigator.userAgentData?.platform || navigator.platform || 'PWA';
@@ -863,19 +996,19 @@ export class MiniClientConnection extends EventTarget {
         return pref('quality_hint', 'auto');
       case 'DOWNLOADS_SUPPORTED':
         this._markNgNegotiated(name);
-        return 'TRUE';
+        return this._isDownloadSupported() ? 'TRUE' : 'FALSE';
       case 'DOWNLOAD_MANIFEST_VERSION':
         this._markNgNegotiated(name);
-        return '1';
+        return this._isDownloadSupported() ? '1' : '0';
       case 'DOWNLOAD_MANIFEST_INLINE':
         this._markNgNegotiated(name);
-        return 'TRUE';
+        return this._isDownloadSupported() ? 'TRUE' : 'FALSE';
       case 'DOWNLOAD_MANIFEST_FETCH':
         this._markNgNegotiated(name);
-        return 'TRUE';
+        return this._isDownloadSupported() ? 'TRUE' : 'FALSE';
       case 'DOWNLOAD_DIRECT_VIDEO_FILE':
         this._markNgNegotiated(name);
-        return 'TRUE';
+        return this._isDownloadSupported() ? 'TRUE' : 'FALSE';
       case 'DOWNLOAD_QUEUE_SUPPORTED':
         this._markNgNegotiated(name);
         return 'FALSE';

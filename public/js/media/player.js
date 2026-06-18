@@ -71,6 +71,10 @@ export class MediaPlayer extends EventTarget {
     // Seeking indicator state
     this.seeking = false;
 
+    // Runtime telemetry state
+    this._telemetrySequence = 0;
+    this._reportedFailureKeys = new Set();
+
     // Bind video events
     this._setupVideoEvents();
   }
@@ -109,6 +113,11 @@ export class MediaPlayer extends EventTarget {
       }
       console.error('[MediaPlayer] Video error:', this.video.error);
       this.state = PlayerState.STOPPED;
+      this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
+        mode: this.bridgeMode ? 'bridge' : (this.pushMode ? 'push' : 'pull'),
+        code: this.video.error?.code || null,
+        message: this.video.error?.message || 'HTMLVideoElement error',
+      });
     });
 
     this.video.addEventListener('waiting', () => {
@@ -190,6 +199,14 @@ export class MediaPlayer extends EventTarget {
     if (!MSClass) {
       console.error('[MediaPlayer] MediaSource API not available');
       this.state = PlayerState.STOPPED;
+      this._emitCapabilityUpdate({
+        playbackHints: {
+          canUseMediaSource: false,
+        },
+      }, 'bridge_media_source_unavailable');
+      this._emitPlaybackFailure('MEDIA_SOURCE_UNAVAILABLE', {
+        mode: 'bridge',
+      });
       return;
     }
 
@@ -214,6 +231,15 @@ export class MediaPlayer extends EventTarget {
       } else {
         console.error('[MediaPlayer] No supported fMP4 MIME type');
         this.state = PlayerState.STOPPED;
+        this._emitCapabilityUpdate({
+          playbackHints: {
+            canPlayBridgeFmp4: false,
+          },
+        }, 'bridge_fmp4_unsupported');
+        this._emitPlaybackFailure('UNSUPPORTED_BRIDGE_FORMAT', {
+          mode: 'bridge',
+          mimeType,
+        });
         return;
       }
     } else {
@@ -253,6 +279,11 @@ export class MediaPlayer extends EventTarget {
       if (!response.ok) {
         console.error(`[MediaPlayer] Bridge transcode failed: ${response.status} ${response.statusText}`);
         this.state = PlayerState.STOPPED;
+        this._emitPlaybackFailure('BRIDGE_TRANSCODE_FAILED', {
+          mode: 'bridge',
+          status: response.status,
+          statusText: response.statusText,
+        });
         return;
       }
 
@@ -323,6 +354,10 @@ export class MediaPlayer extends EventTarget {
         console.log('[MediaPlayer] Bridge stream aborted (seek or stop)');
       } else {
         console.error('[MediaPlayer] Bridge stream error:', err);
+        this._emitPlaybackFailure('BRIDGE_STREAM_ERROR', {
+          mode: 'bridge',
+          message: err.message || String(err),
+        });
       }
     }
   }
@@ -359,6 +394,11 @@ export class MediaPlayer extends EventTarget {
           } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
             this._hls.recoverMediaError();
           }
+          this._emitPlaybackFailure('HLS_FATAL_ERROR', {
+            mode: 'pull-hls',
+            type: data.type || 'unknown',
+            details: data.details || '',
+          });
         }
       });
     } else if (this.video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -367,6 +407,14 @@ export class MediaPlayer extends EventTarget {
       this.video.load();
     } else {
       console.error('[MediaPlayer] No HLS support available');
+      this._emitCapabilityUpdate({
+        playbackHints: {
+          canPlayHLS: false,
+        },
+      }, 'hls_not_supported');
+      this._emitPlaybackFailure('HLS_NOT_SUPPORTED', {
+        mode: 'pull-hls',
+      });
     }
   }
 
@@ -383,6 +431,14 @@ export class MediaPlayer extends EventTarget {
     if (!window.muxjs) {
       console.error('[MediaPlayer] mux.js not available');
       this.state = PlayerState.STOPPED;
+      this._emitCapabilityUpdate({
+        playbackHints: {
+          canTransmuxTsPush: false,
+        },
+      }, 'muxjs_unavailable');
+      this._emitPlaybackFailure('PUSH_TRANSMUXER_UNAVAILABLE', {
+        mode: 'push',
+      });
       return;
     }
 
@@ -391,6 +447,15 @@ export class MediaPlayer extends EventTarget {
     if (!MSClass) {
       console.error('[MediaPlayer] MediaSource API not available');
       this.state = PlayerState.STOPPED;
+      this._emitCapabilityUpdate({
+        playbackHints: {
+          canUseMediaSource: false,
+          canTransmuxTsPush: false,
+        },
+      }, 'push_media_source_unavailable');
+      this._emitPlaybackFailure('MEDIA_SOURCE_UNAVAILABLE', {
+        mode: 'push',
+      });
       return;
     }
 
@@ -416,6 +481,15 @@ export class MediaPlayer extends EventTarget {
       } else {
         console.error('[MediaPlayer] No supported fMP4 MIME type');
         this.state = PlayerState.STOPPED;
+        this._emitCapabilityUpdate({
+          playbackHints: {
+            canTransmuxTsPush: false,
+          },
+        }, 'push_fmp4_unsupported');
+        this._emitPlaybackFailure('UNSUPPORTED_PUSH_FORMAT', {
+          mode: 'push',
+          mimeType,
+        });
         return;
       }
     } else {
@@ -877,6 +951,17 @@ export class MediaPlayer extends EventTarget {
               message: `Unsupported push codec: ${problems.join('; ')}`,
             }
           }));
+          this._emitCapabilityUpdate({
+            playbackHints: {
+              canTransmuxTsPush: false,
+            },
+          }, 'push_codec_mismatch');
+          this._emitPlaybackFailure('PUSH_CODEC_MISMATCH', {
+            mode: 'push',
+            video: codecs.video,
+            audio: codecs.audio,
+            message: problems.join('; '),
+          });
         }
       }
     }
@@ -903,6 +988,15 @@ export class MediaPlayer extends EventTarget {
           this.dispatchEvent(new CustomEvent('codecerror', {
             detail: { message: 'No playable video: server push stream not in H.264+AAC format' }
           }));
+          this._emitCapabilityUpdate({
+            playbackHints: {
+              canTransmuxTsPush: false,
+            },
+          }, 'push_transmux_stall');
+          this._emitPlaybackFailure('PUSH_TRANSMUX_STALL', {
+            mode: 'push',
+            bytesReceived: this._pushStallBytes,
+          });
         }
       }
     } else {
@@ -960,10 +1054,46 @@ export class MediaPlayer extends EventTarget {
         if (!this._appendErrorLogged) {
           console.error('[MediaPlayer] appendBuffer error (suppressing further):', e.message);
           this._appendErrorLogged = true;
+          this._emitPlaybackFailure('SOURCEBUFFER_APPEND_ERROR', {
+            mode: this.pushMode ? 'push' : (this.bridgeMode ? 'bridge' : 'pull'),
+            name: e.name || 'Error',
+            message: e.message || 'appendBuffer failed',
+          });
         }
         this._pushQueue = [];
       }
     }
+  }
+
+  _emitCapabilityUpdate(patch, reason) {
+    if (!patch || typeof patch !== 'object') {
+      return;
+    }
+    this.dispatchEvent(new CustomEvent('capabilityupdate', {
+      detail: {
+        reason: reason || 'runtime-observation',
+        sequence: ++this._telemetrySequence,
+        patch,
+        timestamp: Date.now(),
+      },
+    }));
+  }
+
+  _emitPlaybackFailure(reason, details = {}) {
+    const key = `${reason}|${details.mode || ''}|${details.code || ''}|${details.type || ''}`;
+    if (this._reportedFailureKeys.has(key)) {
+      return;
+    }
+    this._reportedFailureKeys.add(key);
+
+    this.dispatchEvent(new CustomEvent('playbackfailure', {
+      detail: {
+        reason,
+        sequence: ++this._telemetrySequence,
+        timestamp: Date.now(),
+        ...details,
+      },
+    }));
   }
 
   /**

@@ -26,6 +26,9 @@ dependencies {
     // Logging
     implementation 'org.slf4j:slf4j-api:2.0.16'
     implementation 'org.slf4j:slf4j-simple:2.0.16'
+
+    // JSON parsing/persistence for capability feedback profiles
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.4'
 }
 
 shadowJar {

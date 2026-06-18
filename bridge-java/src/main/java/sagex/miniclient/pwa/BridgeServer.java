@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.time.Duration;
@@ -117,6 +118,11 @@ public class BridgeServer {
 
         // Server info API — probes ffmpeg capabilities for profile auto-detection
         context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
+
+        // Runtime client capability feedback and persisted profile refinement.
+        Path feedbackStorePath = Path.of("pwa-miniclient", "data", "client-capability-profiles.json");
+        ClientCapabilityProfileStore profileStore = new ClientCapabilityProfileStore(feedbackStorePath);
+        context.addServlet(new ServletHolder("client-feedback", new ClientFeedbackServlet(profileStore)), "/api/client-feedback");
 
         // Secure proxy for Sage transfer download endpoints.
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");

@@ -17,6 +17,7 @@ import { MediaPlayer } from '../media/player.js';
 import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';
 import { SettingsManager } from '../settings/settings-manager.js';
+import { PlatformDetector } from '../platform/platform-detector.js';
 
 export class SessionManager extends EventTarget {
   constructor() {
@@ -27,6 +28,8 @@ export class SessionManager extends EventTarget {
     this.mediaPlayer = null;
     this.downloadManager = new DownloadManager();
     this.inputManager = null;
+    this.platformDetector = new PlatformDetector();
+    this.platformCapabilities = null;
 
     // Session state
     this.connected = false;
@@ -52,6 +55,10 @@ export class SessionManager extends EventTarget {
     // Initialize settings (opens IndexedDB)
     await this.settings.init();
 
+    // Collect runtime capability hints once per app lifecycle.
+    this.platformCapabilities = await this.platformDetector.init();
+    this.dispatchEvent(new CustomEvent('platformcaps', { detail: this.platformCapabilities }));
+
     // Get resolution from settings, with adaptive default for weak devices
     const adaptiveRes = this._detectAdaptiveResolution();
     const width = this.settings.getInt('resolution_width', adaptiveRes.width);
@@ -71,6 +78,26 @@ export class SessionManager extends EventTarget {
     this.mediaPlayer.addEventListener('codecerror', (e) => {
       console.error('[Session] Codec error:', e.detail.message);
       this.dispatchEvent(new CustomEvent('codecerror', { detail: e.detail }));
+    });
+
+    this.mediaPlayer.addEventListener('capabilityupdate', (e) => {
+      const detail = e.detail || {};
+      this.dispatchEvent(new CustomEvent('capabilityupdate', { detail }));
+      if (this.connection?.reportCapabilityUpdate) {
+        this.connection.reportCapabilityUpdate(detail).catch((err) => {
+          console.warn('[Session] reportCapabilityUpdate failed:', err?.message || err);
+        });
+      }
+    });
+
+    this.mediaPlayer.addEventListener('playbackfailure', (e) => {
+      const detail = e.detail || {};
+      this.dispatchEvent(new CustomEvent('playbackfailure', { detail }));
+      if (this.connection?.reportPlaybackFailure) {
+        this.connection.reportPlaybackFailure(detail).catch((err) => {
+          console.warn('[Session] reportPlaybackFailure failed:', err?.message || err);
+        });
+      }
     });
 
     console.log('[Session] Initialized');
@@ -113,6 +140,7 @@ export class SessionManager extends EventTarget {
       width,
       height,
       settings: this.settings,
+      platformDetector: this.platformDetector,
     });
 
     // Wire up events
@@ -151,7 +179,9 @@ export class SessionManager extends EventTarget {
     });
 
     // Create and start input manager
-    this.inputManager = new InputManager(this.container, this.connection);
+    this.inputManager = new InputManager(this.container, this.connection, {
+      platformDetector: this.platformDetector,
+    });
     this.inputManager.updateScale(
       this.canvas.clientWidth, this.canvas.clientHeight,
       width, height
@@ -260,6 +290,10 @@ export class SessionManager extends EventTarget {
    */
   getSavedServers() {
     return this.settings.getSavedServers();
+  }
+
+  getPlatformCapabilities() {
+    return this.platformCapabilities || this.platformDetector.getCapabilities();
   }
 
   /**

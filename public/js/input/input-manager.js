@@ -11,6 +11,7 @@
  */
 
 import { SageCommand, EventType } from '../protocol/constants.js';
+import { TizenInputAdapter } from './tizen-input-adapter.js';
 
 // ── Keyboard → SageCommand mapping ─────────────────────────
 // Only non-typeable keys that should trigger direct SageTV actions.
@@ -126,9 +127,10 @@ export class InputManager {
    * @param {HTMLElement} target - Element to listen on (usually the canvas container)
    * @param {MiniClientConnection} connection - Protocol connection for sending events
    */
-  constructor(target, connection) {
+  constructor(target, connection, options = {}) {
     this.target = target;
     this.connection = connection;
+    this.platformDetector = options.platformDetector || null;
     // The canvas element for accurate coordinate mapping
     this._canvas = target.querySelector('canvas') || target;
 
@@ -152,6 +154,7 @@ export class InputManager {
     // Hidden text input for soft keyboard on mobile/iPad
     this._textInput = document.getElementById('sage-text-input');
     this._hasTextInput = false;
+    this._tizenAdapter = new TizenInputAdapter(this.platformDetector);
   }
 
   /**
@@ -236,19 +239,23 @@ export class InputManager {
   // ── Keyboard ──────────────────────────────────────────────
 
   _onKeyDown(event) {
+    const tizenNorm = this._tizenAdapter.normalize(event);
+    const effectiveKey = tizenNorm?.key || event.key;
+    const effectiveCode = tizenNorm?.code || event.code;
+
     // Let browser handle its own shortcuts
     if (event.key === 'F12' || event.key === 'F5') return;
     if ((event.ctrlKey || event.metaKey) &&
         'rRlLiIjJtTwWnN'.includes(event.key)) return;
 
-    const keyChar = event.key.length === 1 ? event.key.charCodeAt(0) : 0;
+    const keyChar = effectiveKey.length === 1 ? effectiveKey.charCodeAt(0) : 0;
 
     // ── 1. Printable characters → raw keystroke (typing) ──
     // This includes letters, numbers, space, and all symbols.
     // The SageTV TextComponent processes these for text input.
     if (keyChar && !event.ctrlKey && !event.altKey && !event.metaKey) {
       event.preventDefault();
-      const javaKeyCode = DOM_TO_JAVA_KEYCODE[event.code] || 0;
+      const javaKeyCode = DOM_TO_JAVA_KEYCODE[effectiveCode] || 0;
       const mods = domModsToJava(event);
       this.connection.sendKeystroke(javaKeyCode, keyChar, mods);
       return;
@@ -259,9 +266,9 @@ export class InputManager {
     // TextComponent can handle them (delete char, move fields).
     // When no text field is focused, the STVi key table maps them
     // to navigation (Backspace → Back, etc.).
-    if (event.key === 'Backspace' || event.key === 'Delete' || event.key === 'Tab') {
+    if (effectiveKey === 'Backspace' || effectiveKey === 'Delete' || effectiveKey === 'Tab') {
       event.preventDefault();
-      const javaKeyCode = DOM_TO_JAVA_KEYCODE[event.code] || 0;
+      const javaKeyCode = DOM_TO_JAVA_KEYCODE[effectiveCode] || 0;
       const mods = domModsToJava(event);
       this.connection.sendKeystroke(javaKeyCode, 0, mods);
       return;
@@ -270,17 +277,17 @@ export class InputManager {
     // ── 3. Navigation/control keys → SageCommand ──
     // Arrows, Enter, Escape, F-keys, media keys: send as SageCommand
     // for reliable navigation. Block repeats to prevent flooding.
-    const cmd = KEY_TO_COMMAND[event.key] || KEY_TO_COMMAND[event.code];
+    const cmd = KEY_TO_COMMAND[effectiveKey] || KEY_TO_COMMAND[effectiveCode];
     if (cmd) {
       event.preventDefault();
-      if (this._heldKeys.has(event.code)) return;
-      this._heldKeys.add(event.code);
+      if (this._heldKeys.has(effectiveCode)) return;
+      this._heldKeys.add(effectiveCode);
       this.connection.sendCommand(cmd.id);
       return;
     }
 
     // ── 4. Ctrl/Alt combos → raw keystroke ──
-    const javaKeyCode = DOM_TO_JAVA_KEYCODE[event.code] || 0;
+    const javaKeyCode = DOM_TO_JAVA_KEYCODE[effectiveCode] || 0;
     const mods = domModsToJava(event);
     if (javaKeyCode || keyChar) {
       event.preventDefault();
