@@ -184,7 +184,7 @@ public class PushTranscodeWebSocket implements WebSocketListener {
         // Hardware-specific input flags
         args.addAll(accel.inputFlags);
 
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-probesize", "500000",
                 "-analyzeduration", "500000",
                 "-fflags", "+nobuffer+flush_packets",
@@ -201,18 +201,18 @@ public class PushTranscodeWebSocket implements WebSocketListener {
         ));
 
         // Video encoder
-        args.addAll(List.of("-c:v", accel.videoEncoder));
+        args.addAll(java.util.Arrays.asList("-c:v", accel.videoEncoder));
         args.addAll(accel.encoderFlags);
 
         // Scaling
         if (accel.scaleFilter != null) {
-            args.addAll(List.of("-vf", accel.scaleFilter));
+            args.addAll(java.util.Arrays.asList("-vf", accel.scaleFilter));
         } else {
-            args.addAll(List.of("-s", "1280x720"));
+            args.addAll(java.util.Arrays.asList("-s", "1280x720"));
         }
 
         // Video params — lower latency for live
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-b:v", "2000000",
                 "-maxrate", "2500000",
                 "-bufsize", "1000000",
@@ -222,7 +222,7 @@ public class PushTranscodeWebSocket implements WebSocketListener {
         ));
 
         // Audio + fragmented MP4 output
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-acodec", "aac",
                 "-b:a", "128000",
                 "-ar", "48000",

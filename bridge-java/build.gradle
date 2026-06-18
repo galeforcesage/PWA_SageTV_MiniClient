@@ -7,8 +7,8 @@ group = 'sagex.miniclient.pwa'
 version = '1.0.0.1'
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
 }
 
 repositories {
@@ -17,18 +17,19 @@ repositories {
 
 dependencies {
     // Embedded Jetty (HTTP server + WebSocket + Security)
-    implementation 'org.eclipse.jetty:jetty-server:11.0.24'
-    implementation 'org.eclipse.jetty:jetty-servlet:11.0.24'
-    implementation 'org.eclipse.jetty:jetty-security:11.0.24'
-    implementation 'org.eclipse.jetty.websocket:websocket-jetty-server:11.0.24'
-    implementation 'org.eclipse.jetty.websocket:websocket-jetty-api:11.0.24'
+    implementation 'org.eclipse.jetty:jetty-server:9.4.56.v20240826'
+    implementation 'org.eclipse.jetty:jetty-servlet:9.4.56.v20240826'
+    implementation 'org.eclipse.jetty:jetty-security:9.4.56.v20240826'
+    implementation 'org.eclipse.jetty.websocket:websocket-server:9.4.56.v20240826'
+    implementation 'org.eclipse.jetty.websocket:websocket-servlet:9.4.56.v20240826'
+    implementation 'org.eclipse.jetty.websocket:websocket-api:9.4.56.v20240826'
 
     // Logging
     implementation 'org.slf4j:slf4j-api:2.0.16'
     implementation 'org.slf4j:slf4j-simple:2.0.16'
 
-    // JSON parsing/persistence for capability feedback profiles
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.4'
+    // JSON parsing/persistence for capability feedback profiles (Java 8 + Shadow ASM compatible)
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.13.5'
 }
 
 shadowJar {

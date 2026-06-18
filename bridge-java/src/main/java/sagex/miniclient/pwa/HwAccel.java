@@ -52,45 +52,45 @@ public class HwAccel {
     /** Software-only fallback — always available. */
     static HwAccel software() {
         return new HwAccel("none", "Software (libx264)",
-                List.of(),
+                Collections.emptyList(),
                 "libx264",
-                List.of("-preset", "veryfast", "-tune", "zerolatency"),
+                Arrays.asList("-preset", "veryfast", "-tune", "zerolatency"),
                 null);
     }
 
     static HwAccel vaapi() {
         return new HwAccel("vaapi", "VA-API (AMD/Intel GPU)",
-                List.of("-hwaccel", "vaapi",
+            Arrays.asList("-hwaccel", "vaapi",
                         "-hwaccel_device", "/dev/dri/renderD128",
                         "-hwaccel_output_format", "vaapi"),
                 "h264_vaapi",
-                List.of(),
+            Collections.emptyList(),
                 "scale_vaapi=w=1280:h=720");
     }
 
     static HwAccel nvenc() {
         return new HwAccel("nvenc", "NVIDIA NVENC",
-                List.of("-hwaccel", "cuda",
+            Arrays.asList("-hwaccel", "cuda",
                         "-hwaccel_output_format", "cuda"),
                 "h264_nvenc",
-                List.of("-preset", "p4", "-tune", "ll"),
+            Arrays.asList("-preset", "p4", "-tune", "ll"),
                 "scale_cuda=w=1280:h=720");
     }
 
     static HwAccel qsv() {
         return new HwAccel("qsv", "Intel QuickSync",
-                List.of("-hwaccel", "qsv",
+            Arrays.asList("-hwaccel", "qsv",
                         "-hwaccel_output_format", "qsv"),
                 "h264_qsv",
-                List.of("-preset", "veryfast"),
+            Arrays.asList("-preset", "veryfast"),
                 "scale_qsv=w=1280:h=720");
     }
 
     static HwAccel videoToolbox() {
         return new HwAccel("videotoolbox", "macOS VideoToolbox",
-                List.of("-hwaccel", "videotoolbox"),
+                Arrays.asList("-hwaccel", "videotoolbox"),
                 "h264_videotoolbox",
-                List.of("-realtime", "1"),
+                Arrays.asList("-realtime", "1"),
                 null);
     }
 
@@ -174,16 +174,16 @@ public class HwAccel {
             List<String> cmd = new ArrayList<>();
             cmd.add(ffmpegPath);
             cmd.addAll(accel.inputFlags);
-            cmd.addAll(List.of(
+            cmd.addAll(Arrays.asList(
                     "-f", "lavfi", "-i", "color=black:s=64x64:d=0.04:r=25",
                     "-frames:v", "1",
                     "-c:v", accel.videoEncoder
             ));
             cmd.addAll(accel.encoderFlags);
             if (accel.scaleFilter != null) {
-                cmd.addAll(List.of("-vf", accel.scaleFilter));
+                cmd.addAll(Arrays.asList("-vf", accel.scaleFilter));
             }
-            cmd.addAll(List.of("-f", "null", "-"));
+            cmd.addAll(Arrays.asList("-f", "null", "-"));
 
             log.debug("[HwAccel] Probing {}: {}", accel.name, String.join(" ", cmd));
 

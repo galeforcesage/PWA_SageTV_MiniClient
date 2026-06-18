@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,7 +33,7 @@ public class ClientCapabilityProfileStore {
 
     public ClientCapabilityProfileStore(Path storePath) {
         this.storePath = storePath;
-        this.tempPath = Path.of(storePath.toString() + ".tmp");
+        this.tempPath = Paths.get(storePath.toString() + ".tmp");
         this.mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
         load();
     }
@@ -54,7 +55,7 @@ public class ClientCapabilityProfileStore {
         });
 
         profile.updatedAtEpochMs = now;
-        if (req.serverHost != null && !req.serverHost.isBlank()) {
+        if (req.serverHost != null && !req.serverHost.trim().isEmpty()) {
             profile.serverHost = req.serverHost;
         }
         if (req.serverPort > 0) {
@@ -67,7 +68,7 @@ public class ClientCapabilityProfileStore {
             applyPlaybackFailure(profile, req.payload);
         } else {
             profile.lastEventType = req.type;
-            profile.lastEventPayload = req.payload == null ? Map.of() : req.payload;
+            profile.lastEventPayload = req.payload == null ? new LinkedHashMap<String, Object>() : req.payload;
             profile.observations.put("lastUnhandledEventType", safe(req.type));
         }
 
@@ -86,7 +87,7 @@ public class ClientCapabilityProfileStore {
 
     private void applyCapabilityUpdate(ClientCapabilityProfile profile, Map<String, Object> payload) {
         profile.lastEventType = "CAPABILITY_UPDATE";
-        profile.lastEventPayload = payload == null ? Map.of() : payload;
+        profile.lastEventPayload = payload == null ? new LinkedHashMap<String, Object>() : payload;
 
         Map<String, Object> patch = extractPatch(payload);
         deepMerge(profile.capabilityHints, patch);
@@ -100,7 +101,7 @@ public class ClientCapabilityProfileStore {
 
     private void applyPlaybackFailure(ClientCapabilityProfile profile, Map<String, Object> payload) {
         profile.lastEventType = "PLAYBACK_FAILURE";
-        profile.lastEventPayload = payload == null ? Map.of() : payload;
+        profile.lastEventPayload = payload == null ? new LinkedHashMap<String, Object>() : payload;
 
         profile.playbackFailureCount++;
         String reason = payload == null ? "UNKNOWN" : String.valueOf(payload.getOrDefault("reason", "UNKNOWN"));
@@ -191,8 +192,8 @@ public class ClientCapabilityProfileStore {
     }
 
     private String sanitizeClientId(String clientId, String host, int port) {
-        if (clientId != null && !clientId.isBlank()) return clientId.trim();
-        String safeHost = (host == null || host.isBlank()) ? "unknown-host" : host.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (clientId != null && !clientId.trim().isEmpty()) return clientId.trim();
+        String safeHost = (host == null || host.trim().isEmpty()) ? "unknown-host" : host.replaceAll("[^A-Za-z0-9._-]", "_");
         int safePort = port > 0 ? port : 0;
         return "unknown-" + safeHost + "-" + safePort;
     }
@@ -209,7 +210,7 @@ public class ClientCapabilityProfileStore {
             byte[] bytes = Files.readAllBytes(storePath);
             List<ClientCapabilityProfile> loaded = mapper.readValue(bytes, new TypeReference<List<ClientCapabilityProfile>>() {});
             for (ClientCapabilityProfile profile : loaded) {
-                if (profile != null && profile.clientId != null && !profile.clientId.isBlank()) {
+                if (profile != null && profile.clientId != null && !profile.clientId.trim().isEmpty()) {
                     profile.ensureDefaults();
                     profiles.put(profile.clientId, profile);
                 }

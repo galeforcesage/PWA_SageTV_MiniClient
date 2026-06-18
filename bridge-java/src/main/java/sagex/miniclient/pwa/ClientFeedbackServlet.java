@@ -2,9 +2,9 @@ package sagex.miniclient.pwa;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.servlet.http.HttpServlet;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,18 +42,18 @@ public class ClientFeedbackServlet extends HttpServlet {
             payload = mapper.readValue(req.getInputStream(), ClientFeedbackRequest.class);
         } catch (Exception e) {
             resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-            writeJson(resp, Map.of(
-                    "ok", false,
+            writeJson(resp, mapOf(
+                    "ok", Boolean.FALSE,
                     "error", "invalid_json",
                     "message", e.getMessage()
             ));
             return;
         }
 
-        if (payload == null || payload.type == null || payload.type.isBlank()) {
+        if (payload == null || payload.type == null || payload.type.trim().isEmpty()) {
             resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-            writeJson(resp, Map.of(
-                    "ok", false,
+            writeJson(resp, mapOf(
+                    "ok", Boolean.FALSE,
                     "error", "missing_type"
             ));
             return;
@@ -72,8 +72,8 @@ public class ClientFeedbackServlet extends HttpServlet {
                 profile.pushFailureCount,
                 profile.refinement.get("retryPolicy"));
 
-        writeJson(resp, Map.of(
-                "ok", true,
+        writeJson(resp, mapOf(
+            "ok", Boolean.TRUE,
                 "clientId", profile.clientId,
                 "updatedAtEpochMs", profile.updatedAtEpochMs,
                 "playbackFailureCount", profile.playbackFailureCount,
@@ -88,11 +88,11 @@ public class ClientFeedbackServlet extends HttpServlet {
         resp.setCharacterEncoding("UTF-8");
 
         String clientId = req.getParameter("clientId");
-        if (clientId != null && !clientId.isBlank()) {
+        if (clientId != null && !clientId.trim().isEmpty()) {
             ClientCapabilityProfileStore.ClientCapabilityProfile profile = profileStore.getProfile(clientId);
             if (profile == null) {
                 resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
-                writeJson(resp, Map.of("ok", false, "error", "not_found", "clientId", clientId));
+                writeJson(resp, mapOf("ok", Boolean.FALSE, "error", "not_found", "clientId", clientId));
                 return;
             }
             writeJson(resp, profile);
@@ -100,11 +100,19 @@ public class ClientFeedbackServlet extends HttpServlet {
         }
 
         List<ClientCapabilityProfileStore.ClientCapabilityProfile> profiles = profileStore.listProfiles();
-        writeJson(resp, Map.of("ok", true, "count", profiles.size(), "profiles", profiles));
+        writeJson(resp, mapOf("ok", Boolean.TRUE, "count", profiles.size(), "profiles", profiles));
     }
 
     private void writeJson(HttpServletResponse resp, Object body) throws IOException {
         mapper.writerWithDefaultPrettyPrinter().writeValue(resp.getWriter(), body);
+    }
+
+    private Map<String, Object> mapOf(Object... entries) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < entries.length; i += 2) {
+            map.put(String.valueOf(entries[i]), entries[i + 1]);
+        }
+        return map;
     }
 
     public static class ClientFeedbackRequest {

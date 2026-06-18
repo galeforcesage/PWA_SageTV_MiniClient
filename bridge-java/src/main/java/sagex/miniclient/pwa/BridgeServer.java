@@ -17,16 +17,15 @@ import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.security.Constraint;
 import org.eclipse.jetty.util.security.Password;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
-import java.time.Duration;
 
 /**
  * PWA MiniClient Bridge Server.
@@ -101,16 +100,14 @@ public class BridgeServer {
         server.setHandler(context);
 
         // WebSocket endpoints at /gfx and /media
-        JettyWebSocketServletContainerInitializer.configure(context, (servletContext, wsContainer) -> {
-            wsContainer.setMaxBinaryMessageSize(65536);
-            wsContainer.setMaxTextMessageSize(65536);
-            wsContainer.setIdleTimeout(Duration.ofMinutes(30));
-            wsContainer.addMapping("/gfx", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
-            wsContainer.addMapping("/media", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
-            wsContainer.addMapping("/reconnect", (upgradeRequest, upgradeResponse) -> new BridgeWebSocket());
-            wsContainer.addMapping("/transcode/push-stream", (upgradeRequest, upgradeResponse) ->
-                    new PushTranscodeWebSocket(ffmpegPath));
-        });
+        context.addServlet(new ServletHolder("ws-gfx",
+            new DelegatingWebSocketServlet(BridgeWebSocket::new)), "/gfx");
+        context.addServlet(new ServletHolder("ws-media",
+            new DelegatingWebSocketServlet(BridgeWebSocket::new)), "/media");
+        context.addServlet(new ServletHolder("ws-reconnect",
+            new DelegatingWebSocketServlet(BridgeWebSocket::new)), "/reconnect");
+        context.addServlet(new ServletHolder("ws-push-transcode",
+            new DelegatingWebSocketServlet(() -> new PushTranscodeWebSocket(ffmpegPath))), "/transcode/push-stream");
 
         // Transcode servlet
         context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath, hwAccel)), "/transcode");
@@ -120,7 +117,7 @@ public class BridgeServer {
         context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
 
         // Runtime client capability feedback and persisted profile refinement.
-        Path feedbackStorePath = Path.of("pwa-miniclient", "data", "client-capability-profiles.json");
+        Path feedbackStorePath = Paths.get("pwa-miniclient", "data", "client-capability-profiles.json");
         ClientCapabilityProfileStore profileStore = new ClientCapabilityProfileStore(feedbackStorePath);
         context.addServlet(new ServletHolder("client-feedback", new ClientFeedbackServlet(profileStore)), "/api/client-feedback");
 
@@ -263,7 +260,13 @@ public class BridgeServer {
         Process process = pb.start();
         String output;
         try (java.io.InputStream in = process.getInputStream()) {
-            output = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                out.write(buffer, 0, n);
+            }
+            output = out.toString("UTF-8");
         }
         int exitCode = process.waitFor();
         if (exitCode != 0) {

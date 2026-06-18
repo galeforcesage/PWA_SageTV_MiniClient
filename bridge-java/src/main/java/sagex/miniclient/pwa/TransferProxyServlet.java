@@ -1,8 +1,8 @@
 package sagex.miniclient.pwa;
 
-import jakarta.servlet.http.HttpServlet;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +25,7 @@ public class TransferProxyServlet extends HttpServlet {
     private final int backendPort;
 
     public TransferProxyServlet(String backendHost, int backendPort) {
-        this.backendHost = (backendHost == null || backendHost.isBlank()) ? "127.0.0.1" : backendHost;
+        this.backendHost = (backendHost == null || backendHost.trim().isEmpty()) ? "127.0.0.1" : backendHost;
         this.backendPort = backendPort <= 0 ? 31099 : backendPort;
     }
 

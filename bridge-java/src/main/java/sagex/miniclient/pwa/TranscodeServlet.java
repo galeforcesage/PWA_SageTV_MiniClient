@@ -1,9 +1,8 @@
 package sagex.miniclient.pwa;
 
-import jakarta.servlet.AsyncContext;
-import jakarta.servlet.http.HttpServlet;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -231,11 +230,11 @@ public class TranscodeServlet extends HttpServlet {
         if (isLive) {
             String fmt = detectInputFormat(filePath);
             if (fmt != null) {
-                args.addAll(List.of("-f", fmt));
+                args.addAll(java.util.Arrays.asList("-f", fmt));
             }
         }
 
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-probesize", "5000000",
                 "-analyzeduration", "5000000",
                 "-err_detect", "ignore_err",
@@ -249,18 +248,18 @@ public class TranscodeServlet extends HttpServlet {
         ));
 
         // Video encoder and its flags
-        args.addAll(List.of("-c:v", accel.videoEncoder));
+        args.addAll(java.util.Arrays.asList("-c:v", accel.videoEncoder));
         args.addAll(accel.encoderFlags);
 
         // Scaling: hardware filter or software -s flag
         if (accel.scaleFilter != null) {
-            args.addAll(List.of("-vf", accel.scaleFilter));
+            args.addAll(java.util.Arrays.asList("-vf", accel.scaleFilter));
         } else {
-            args.addAll(List.of("-s", "1280x720"));
+            args.addAll(java.util.Arrays.asList("-s", "1280x720"));
         }
 
         // Common video params
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-b:v", "2000000",
                 "-maxrate", "2500000",
                 "-bufsize", "4000000",
@@ -270,7 +269,7 @@ public class TranscodeServlet extends HttpServlet {
         ));
 
         // Audio + container
-        args.addAll(List.of(
+        args.addAll(java.util.Arrays.asList(
                 "-acodec", "aac",
                 "-b:a", "128000",
                 "-ar", "48000",

@@ -1,8 +1,8 @@
 package sagex.miniclient.pwa;
 
-import jakarta.servlet.http.HttpServlet;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -95,7 +95,7 @@ public class ServerInfoServlet extends HttpServlet {
      */
     private FfmpegInfo probeServerFfmpeg() {
         for (String path : SERVER_FFMPEG_PATHS) {
-            if (Files.isExecutable(Path.of(path))) {
+            if (Files.isExecutable(Paths.get(path))) {
                 FfmpegInfo info = probeFfmpeg(path);
                 if (info != null) return info;
             }
