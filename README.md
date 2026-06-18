@@ -85,6 +85,12 @@ java -jar build/libs/pwa-miniclient-bridge.jar \
 
 Open `https://localhost:8099/` and connect to your SageTV server.
 
+## Samsung TV Install
+
+For full Samsung Tizen install/sideload instructions (Developer Mode, `.wgt` packaging, install, and launch), see:
+
+- `deploy/tizen/README.md`
+
 ## Project Structure
 
 ```
