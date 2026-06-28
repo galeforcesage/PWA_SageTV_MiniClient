@@ -515,6 +515,8 @@ async function handleConnect(host, port) {
   if (!host) return;
   connectError.hidden = true;
 
+  session.mediaPlayer?.primePlayback?.().catch?.(() => {});
+
   // Find bridge URL from the per-server config
   const servers = session.getSavedServers();
   const srv = servers.find(s => s.host === host && s.port === port);

@@ -195,11 +195,9 @@ export class MediaPlayer extends EventTarget {
 
     try {
       this.video.muted = true;
-      if (this.video.srcObject || this.video.currentSrc || this.video.src) {
-        const playPromise = this.video.play();
-        if (playPromise) {
-          await playPromise;
-        }
+      const playPromise = this.video.play();
+      if (playPromise) {
+        await playPromise;
         this.video.pause();
       }
       this._playbackPrimed = true;
@@ -920,6 +918,17 @@ export class MediaPlayer extends EventTarget {
 
     // Recreate MediaSource + SourceBuffer from scratch
     const MSClass = this._getMediaSourceClass();
+    if (!MSClass) {
+      this._emitCapabilityUpdate({
+        playbackHints: {
+          canUseMediaSource: false,
+        },
+      }, 'bridge_seek_media_source_unavailable');
+      this._emitPlaybackFailure('MEDIA_SOURCE_UNAVAILABLE', {
+        mode: 'bridge',
+      });
+      return;
+    }
     await this._openMediaSource(MSClass);
 
     // Check again after async wait
