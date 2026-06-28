@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-7.0.9';
+const CACHE_NAME = 'sagetv-miniclient-7.1.0';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
@@ -15,6 +15,9 @@ const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/css/app.css',
+  '/icons/apple-touch-icon.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
   '/js/app.js',
   '/js/protocol/binary-utils.js',
   '/js/protocol/connection.js',
@@ -23,6 +26,8 @@ const STATIC_ASSETS = [
   '/js/protocol/compression.js',
   '/js/ui/renderer.js',
   '/js/media/player.js',
+  '/js/lib/hls.min.js',
+  '/js/lib/mux.min.js',
   '/js/input/input-manager.js',
   '/js/input/tizen-input-adapter.js',
   '/js/platform/platform-detector.js',

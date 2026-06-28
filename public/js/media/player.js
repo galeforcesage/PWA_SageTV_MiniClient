@@ -20,10 +20,11 @@ export class MediaPlayer extends EventTarget {
    * @param {HTMLVideoElement} videoElement
    * @param {HTMLElement} container - Container for positioning
    */
-  constructor(videoElement, container) {
+  constructor(videoElement, container, options = {}) {
     super();
     this.video = videoElement;
     this.container = container;
+    this.platformDetector = options.platformDetector || null;
 
     // Player state
     this.state = PlayerState.NO_STATE;
@@ -70,6 +71,11 @@ export class MediaPlayer extends EventTarget {
 
     // Seeking indicator state
     this.seeking = false;
+    this._managedMediaSource = false;
+    this._managedStreamingActive = true;
+    this._managedStartStreamingHandler = null;
+    this._managedEndStreamingHandler = null;
+    this._playbackPrimed = false;
 
     // Runtime telemetry state
     this._telemetrySequence = 0;
@@ -123,6 +129,83 @@ export class MediaPlayer extends EventTarget {
     this.video.addEventListener('waiting', () => {
       this.dispatchEvent(new CustomEvent('buffering'));
     });
+  }
+
+  _isIOS() {
+    return this.platformDetector?.isIOS?.() === true;
+  }
+
+  _getMediaSourceClass() {
+    return window.MediaSource || window.ManagedMediaSource || null;
+  }
+
+  _isManagedMediaSourceClass(MSClass) {
+    return !!window.ManagedMediaSource && MSClass === window.ManagedMediaSource;
+  }
+
+  async _openMediaSource(MSClass) {
+    this._detachManagedMediaSourceLifecycle();
+    this.mediaSource = new MSClass();
+    this._managedMediaSource = this._isManagedMediaSourceClass(MSClass);
+    this._managedStreamingActive = !this._managedMediaSource;
+
+    if (this._managedMediaSource) {
+      this._managedStartStreamingHandler = () => {
+        this._managedStreamingActive = true;
+        this._processPushQueue();
+      };
+      this._managedEndStreamingHandler = () => {
+        this._managedStreamingActive = false;
+      };
+      this.mediaSource.addEventListener('startstreaming', this._managedStartStreamingHandler);
+      this.mediaSource.addEventListener('endstreaming', this._managedEndStreamingHandler);
+      this.video.disableRemotePlayback = true;
+      this.video.srcObject = this.mediaSource;
+    } else {
+      this.video.src = URL.createObjectURL(this.mediaSource);
+    }
+
+    await new Promise((resolve) => {
+      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
+    });
+  }
+
+  _detachManagedMediaSourceLifecycle() {
+    if (this.mediaSource && this._managedStartStreamingHandler) {
+      this.mediaSource.removeEventListener('startstreaming', this._managedStartStreamingHandler);
+    }
+    if (this.mediaSource && this._managedEndStreamingHandler) {
+      this.mediaSource.removeEventListener('endstreaming', this._managedEndStreamingHandler);
+    }
+    this._managedStartStreamingHandler = null;
+    this._managedEndStreamingHandler = null;
+    this._managedMediaSource = false;
+    this._managedStreamingActive = true;
+  }
+
+  _canAppendToMediaSource() {
+    return !!(this.sourceBuffer && this.mediaSource && this.mediaSource.readyState === 'open' &&
+      (!this._managedMediaSource || this._managedStreamingActive));
+  }
+
+  async primePlayback() {
+    if (!this._isIOS() || this._playbackPrimed) {
+      return;
+    }
+
+    try {
+      this.video.muted = true;
+      if (this.video.srcObject || this.video.currentSrc || this.video.src) {
+        const playPromise = this.video.play();
+        if (playPromise) {
+          await playPromise;
+        }
+        this.video.pause();
+      }
+      this._playbackPrimed = true;
+    } catch (err) {
+      console.debug('[MediaPlayer] Playback priming skipped:', err?.message || err);
+    }
   }
 
   // ── MiniPlayerPlugin Interface ────────────────────────────
@@ -195,7 +278,7 @@ export class MediaPlayer extends EventTarget {
     this._bridgeSessionId = 'pwa-' + Date.now();
 
     // Set up MSE
-    const MSClass = window.ManagedMediaSource || window.MediaSource;
+    const MSClass = this._getMediaSourceClass();
     if (!MSClass) {
       console.error('[MediaPlayer] MediaSource API not available');
       this.state = PlayerState.STOPPED;
@@ -210,17 +293,7 @@ export class MediaPlayer extends EventTarget {
       return;
     }
 
-    this.mediaSource = new MSClass();
-    if (window.ManagedMediaSource) {
-      this.video.disableRemotePlayback = true;
-      this.video.srcObject = this.mediaSource;
-    } else {
-      this.video.src = URL.createObjectURL(this.mediaSource);
-    }
-
-    await new Promise((resolve) => {
-      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
-    });
+    await this._openMediaSource(MSClass);
 
     // Create fMP4 source buffer for H.264+AAC
     const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
@@ -366,10 +439,21 @@ export class MediaPlayer extends EventTarget {
    * Load HLS stream using hls.js or native Safari HLS.
    */
   async _loadHLS(url) {
+    const canUseNativeHls = !!this.video.canPlayType('application/vnd.apple.mpegurl');
+
+    if (this._isIOS() && canUseNativeHls) {
+      this.video.src = url;
+      this.video.load();
+      return;
+    }
+
     // Try loading hls.js dynamically
     if (!window.Hls) {
       try {
-        await this._loadScript('https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js');
+        await this._loadScript([
+          '/js/lib/hls.min.js',
+          'https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js',
+        ]);
       } catch {
         console.warn('[MediaPlayer] hls.js not available, trying native HLS');
       }
@@ -401,7 +485,7 @@ export class MediaPlayer extends EventTarget {
           });
         }
       });
-    } else if (this.video.canPlayType('application/vnd.apple.mpegurl')) {
+    } else if (canUseNativeHls) {
       // Native HLS (Safari/iPad)
       this.video.src = url;
       this.video.load();
@@ -427,7 +511,10 @@ export class MediaPlayer extends EventTarget {
     this._initSegmentSent = false;
 
     // Load mux.js
-    await this._loadScript('https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js');
+    await this._loadScript([
+      '/js/lib/mux.min.js',
+      'https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js',
+    ]);
     if (!window.muxjs) {
       console.error('[MediaPlayer] mux.js not available');
       this.state = PlayerState.STOPPED;
@@ -443,7 +530,7 @@ export class MediaPlayer extends EventTarget {
     }
 
     // Set up MediaSource
-    const MSClass = window.ManagedMediaSource || window.MediaSource;
+    const MSClass = this._getMediaSourceClass();
     if (!MSClass) {
       console.error('[MediaPlayer] MediaSource API not available');
       this.state = PlayerState.STOPPED;
@@ -459,18 +546,7 @@ export class MediaPlayer extends EventTarget {
       return;
     }
 
-    this.mediaSource = new MSClass();
-
-    if (window.ManagedMediaSource) {
-      this.video.disableRemotePlayback = true;
-      this.video.srcObject = this.mediaSource;
-    } else {
-      this.video.src = URL.createObjectURL(this.mediaSource);
-    }
-
-    await new Promise((resolve) => {
-      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
-    });
+    await this._openMediaSource(MSClass);
 
     // Create fMP4 source buffer
     const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
@@ -654,17 +730,30 @@ export class MediaPlayer extends EventTarget {
    * Load a script dynamically.
    */
   _loadScript(src) {
-    return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[src="${src}"]`)) {
-        resolve();
-        return;
+    const candidates = Array.isArray(src) ? src : [src];
+    const tryLoad = (index) => {
+      if (index >= candidates.length) {
+        return Promise.reject(new Error('script load failed'));
       }
-      const script = document.createElement('script');
-      script.src = src;
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
+
+      const candidate = candidates[index];
+      if (document.querySelector(`script[src="${candidate}"]`)) {
+        return Promise.resolve();
+      }
+
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = candidate;
+        script.onload = resolve;
+        script.onerror = () => {
+          script.remove();
+          reject(new Error(`failed to load ${candidate}`));
+        };
+        document.head.appendChild(script);
+      }).catch(() => tryLoad(index + 1));
+    };
+
+    return tryLoad(0);
   }
 
   // ── Playback Controls ─────────────────────────────────────
@@ -735,6 +824,7 @@ export class MediaPlayer extends EventTarget {
           this.mediaSource.endOfStream();
         }
       } catch {/* ignore */}
+      this._detachManagedMediaSourceLifecycle();
       this.mediaSource = null;
       this.sourceBuffer = null;
     }
@@ -821,6 +911,7 @@ export class MediaPlayer extends EventTarget {
           this.mediaSource.endOfStream();
         }
       } catch { /* ignore */ }
+      this._detachManagedMediaSourceLifecycle();
       this.mediaSource = null;
     }
 
@@ -828,18 +919,8 @@ export class MediaPlayer extends EventTarget {
     if (this._currentRestartId !== restartId) return;
 
     // Recreate MediaSource + SourceBuffer from scratch
-    const MSClass = window.ManagedMediaSource || window.MediaSource;
-    this.mediaSource = new MSClass();
-    if (window.ManagedMediaSource) {
-      this.video.disableRemotePlayback = true;
-      this.video.srcObject = this.mediaSource;
-    } else {
-      this.video.src = URL.createObjectURL(this.mediaSource);
-    }
-
-    await new Promise((resolve) => {
-      this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
-    });
+    const MSClass = this._getMediaSourceClass();
+    await this._openMediaSource(MSClass);
 
     // Check again after async wait
     if (this._currentRestartId !== restartId) return;
@@ -1022,6 +1103,9 @@ export class MediaPlayer extends EventTarget {
     // Guard against detached SourceBuffer
     if (!this.mediaSource || this.mediaSource.readyState !== 'open') {
       this._pushQueue = [];
+      return;
+    }
+    if (this._managedMediaSource && !this._managedStreamingActive) {
       return;
     }
 

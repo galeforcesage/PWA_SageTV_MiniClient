@@ -186,6 +186,7 @@ export class MiniClientConnection extends EventTarget {
     this._reconnectAttempts = 0;
     this._maxReconnectAttempts = 5;
     this._reconnectTimer = null;
+    this._reconnecting = false;
     this._shortSessionCount = 0; // consecutive sessions < 30s
     this._exitRequested = false; // true after GFXCMD_DEINIT
     this._verboseGfxLog = false; // log every GFX cmd for diagnostics
@@ -2615,6 +2616,9 @@ export class MiniClientConnection extends EventTarget {
    * Schedule a reconnect attempt with exponential backoff.
    */
   _scheduleReconnect() {
+    if (this._reconnectTimer) {
+      return;
+    }
     if (this._reconnectAttempts >= this._maxReconnectAttempts) {
       console.error('[Connection] Max reconnect attempts reached');
       this.dispatchEvent(new CustomEvent('reconnectfailed', {
@@ -2631,7 +2635,32 @@ export class MiniClientConnection extends EventTarget {
       detail: { attempt: this._reconnectAttempts, delay }
     }));
 
-    this._reconnectTimer = setTimeout(() => this._attemptFullReconnect(), delay);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._attemptFullReconnect();
+    }, delay);
+  }
+
+  async resumeIfDead() {
+    if (!this.reconnectAllowed || this._reconnecting) {
+      return;
+    }
+
+    if (this.gfxSocket && this.gfxSocket.readyState === WebSocket.OPEN) {
+      this._startKeepalive();
+      return;
+    }
+
+    if (!this.firstFrameStarted) {
+      return;
+    }
+
+    this._stopKeepalive();
+    if (!this._encryptEvents) {
+      await this._attemptSessionReconnect();
+    } else {
+      await this._attemptFullReconnect();
+    }
   }
 
   /**
@@ -2641,6 +2670,10 @@ export class MiniClientConnection extends EventTarget {
    * Falls back to type 0 (fresh) with cached auth if type 5 fails.
    */
   async _attemptSessionReconnect() {
+    if (this._reconnecting) {
+      return;
+    }
+    this._reconnecting = true;
     console.log('[Connection] Attempting type-5 session resume reconnect...');
     try {
       // Close existing sockets cleanly
@@ -2688,7 +2721,8 @@ export class MiniClientConnection extends EventTarget {
         // Fall back to type-0 fresh reconnect if we have cached auth
         if (this._cachedAuthBlock) {
           console.log('[Connection] Falling back to type-0 fresh reconnect with cached auth');
-          return this._attemptFullReconnect();
+          this._reconnecting = false;
+          return this._attemptFullReconnect(true);
         } else {
           throw new Error('Type-5 rejected and no cached auth for type-0 fallback');
         }
@@ -2725,6 +2759,8 @@ export class MiniClientConnection extends EventTarget {
     } catch (err) {
       console.error('[Connection] Session reconnect failed:', err);
       this._scheduleReconnect();
+    } finally {
+      this._reconnecting = false;
     }
   }
 
@@ -2732,7 +2768,11 @@ export class MiniClientConnection extends EventTarget {
    * Perform a full fresh reconnect (type 0) using cached auth to skip login.
    * Used as fallback when type-5 session resume is rejected by the server.
    */
-  async _attemptFullReconnect() {
+  async _attemptFullReconnect(force = false) {
+    if (this._reconnecting && !force) {
+      return;
+    }
+    this._reconnecting = true;
     console.log('[Connection] Attempting full reconnect (fresh connection with cached auth)...');
     try {
       // Close existing sockets cleanly
@@ -2823,6 +2863,8 @@ export class MiniClientConnection extends EventTarget {
     } catch (err) {
       console.error('[Connection] Full reconnect failed:', err);
       this._scheduleReconnect();
+    } finally {
+      this._reconnecting = false;
     }
   }
 

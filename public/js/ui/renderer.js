@@ -20,11 +20,12 @@ export class CanvasRenderer {
   /**
    * @param {HTMLCanvasElement} canvas - The main rendering canvas
    */
-  constructor(canvas) {
+  constructor(canvas, options = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: true });
     this.width = canvas.width;
     this.height = canvas.height;
+    this._isIOS = !!options.isIOS;
 
     // Image cache: handle → { bitmap: ImageBitmap|HTMLCanvasElement, width, height }
     this.images = new Map();
@@ -56,8 +57,9 @@ export class CanvasRenderer {
     this.backCtx = this.backCanvas.getContext('2d', { alpha: true });
     this.activeCtx = this.backCtx;
 
-    // Max cache size (128MB equivalent in pixels)
-    this._maxCachePixels = 128 * 1024 * 1024 / 4;
+    // Max cache size in pixels. iOS gets a tighter cap to avoid WebKit cache thrash.
+    const cacheMB = Number.isFinite(options.maxCacheMB) ? options.maxCacheMB : 128;
+    this._maxCachePixels = Math.max(8, cacheMB) * 1024 * 1024 / 4;
     this._currentCachePixels = 0;
 
     // Pending async image load tracking
@@ -73,7 +75,7 @@ export class CanvasRenderer {
     // Without this, stale images from previous connections consume the cache
     // budget and cause new LOADIMAGE calls to return 0 (can't cache).
     this.images.forEach((img) => {
-      if (img.bitmap && img.bitmap.close) img.bitmap.close();
+      this._releaseImageResources(img);
     });
     this.images.clear();
     this.surfaces.clear();
@@ -88,7 +90,7 @@ export class CanvasRenderer {
 
   deinit() {
     this.images.forEach((img) => {
-      if (img.bitmap && img.bitmap.close) img.bitmap.close();
+      this._releaseImageResources(img);
     });
     this.images.clear();
     this.surfaces.forEach((s) => {
@@ -335,7 +337,7 @@ export class CanvasRenderer {
     // calls and lets the event loop flush WebSocket replies between commands.
     const rawBuffer = new Uint8Array(width * height * 4); // RGBA straight
     this.images.set(handle, {
-      canvas: null, ctx: null, width, height, loaded: false,
+      bitmap: null, canvas: null, ctx: null, width, height, loaded: false,
       _rawBuffer: rawBuffer,
       _linesReceived: 0,
       _finalized: false
@@ -413,10 +415,13 @@ export class CanvasRenderer {
     );
     ctx.putImageData(imageData, 0, 0);
 
+    img.bitmap = null;
     img.canvas = canvas;
     img.ctx = ctx;
     img._finalized = true;
     img._rawBuffer = null; // Free the raw buffer
+
+    this._promoteCanvasToBitmap(handle, canvas);
   }
 
   /**
@@ -437,32 +442,28 @@ export class CanvasRenderer {
    */
   loadCompressedImage(handle, data) {
     const blob = new Blob([data]);
-    return createImageBitmap(blob).then((bitmap) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
-
-      this.images.set(handle, {
-        canvas, ctx, width: canvas.width, height: canvas.height, loaded: true
-      });
-      this._currentCachePixels += canvas.width * canvas.height;
-    }).catch((err) => {
-      console.warn(`[Renderer] Failed to decode image handle=${handle}:`, err.message);
-      // Leave a transparent placeholder on failure
-      if (!this.images.has(handle)) {
-        const placeholder = document.createElement('canvas');
-        placeholder.width = 1;
-        placeholder.height = 1;
+    if (typeof createImageBitmap === 'function') {
+      this._pendingImageLoads++;
+      return createImageBitmap(blob).then((bitmap) => {
         this.images.set(handle, {
-          canvas: placeholder,
-          ctx: placeholder.getContext('2d'),
-          width: 1, height: 1, loaded: false
+          bitmap,
+          canvas: null,
+          ctx: null,
+          width: bitmap.width,
+          height: bitmap.height,
+          loaded: true,
+          _finalized: true,
         });
-      }
-    });
+        this._currentCachePixels += bitmap.width * bitmap.height;
+      }).catch((err) => {
+        console.warn(`[Renderer] Failed to decode image handle=${handle}:`, err.message);
+        return this._loadCompressedImageFallback(handle, blob);
+      }).finally(() => {
+        this._completePendingImageLoad();
+      });
+    }
+
+    return this._loadCompressedImageFallback(handle, blob);
   }
 
   /**
@@ -471,6 +472,7 @@ export class CanvasRenderer {
   unloadImage(handle) {
     const img = this.images.get(handle);
     if (img) {
+      this._releaseImageResources(img);
       this._currentCachePixels -= img.width * img.height;
       this.images.delete(handle);
     }
@@ -605,6 +607,8 @@ export class CanvasRenderer {
     this._ensureFinalized(srcHandle);
     const srcImg = this.images.get(srcHandle);
     if (!srcImg) return;
+    const source = srcImg.bitmap || srcImg.canvas;
+    if (!source) return;
 
     const canvas = document.createElement('canvas');
     canvas.width = destWidth;
@@ -617,12 +621,13 @@ export class CanvasRenderer {
       ctx.clip();
     }
 
-    ctx.drawImage(srcImg.canvas, 0, 0, destWidth, destHeight);
+    ctx.drawImage(source, 0, 0, destWidth, destHeight);
 
     this.images.set(destHandle, {
-      canvas, ctx, width: destWidth, height: destHeight, loaded: true
+      bitmap: null, canvas, ctx, width: destWidth, height: destHeight, loaded: true, _finalized: true
     });
     this._currentCachePixels += destWidth * destHeight;
+    this._promoteCanvasToBitmap(destHandle, canvas);
   }
 
   // ── Transform Stack ───────────────────────────────────────
@@ -694,12 +699,118 @@ export class CanvasRenderer {
 
   putCachedImage(handle, cachedData, width, height) {
     // cachedData is a canvas or ImageBitmap from the offline cache
+    const bitmap = cachedData.bitmap ||
+      ((typeof ImageBitmap !== 'undefined' && cachedData instanceof ImageBitmap) ? cachedData : null);
     this.images.set(handle, {
-      canvas: cachedData.canvas || cachedData,
+      bitmap,
+      canvas: cachedData.canvas || (bitmap ? null : cachedData),
       ctx: cachedData.ctx || null,
       width, height, loaded: true
     });
     this._currentCachePixels += width * height;
+  }
+
+  _releaseImageResources(img) {
+    if (!img) return;
+    if (img.bitmap && img.bitmap.close) {
+      try { img.bitmap.close(); } catch { /* ignore */ }
+    }
+    img.bitmap = null;
+    img.canvas = null;
+    img.ctx = null;
+    img._rawBuffer = null;
+  }
+
+  _completePendingImageLoad() {
+    if (this._pendingImageLoads > 0) {
+      this._pendingImageLoads--;
+    }
+    if (this._pendingImageLoads === 0 && typeof this.onImagesReady === 'function') {
+      try {
+        this.onImagesReady();
+      } catch (err) {
+        console.warn('[Renderer] onImagesReady failed:', err?.message || err);
+      }
+    }
+  }
+
+  _promoteCanvasToBitmap(handle, canvas) {
+    if (typeof createImageBitmap !== 'function' || !canvas) {
+      return;
+    }
+
+    const img = this.images.get(handle);
+    if (!img) {
+      return;
+    }
+
+    this._pendingImageLoads++;
+    createImageBitmap(canvas).then((bitmap) => {
+      const current = this.images.get(handle);
+      if (!current) {
+        bitmap.close?.();
+        return;
+      }
+
+      if (current.bitmap && current.bitmap !== bitmap && current.bitmap.close) {
+        try { current.bitmap.close(); } catch { /* ignore */ }
+      }
+
+      current.bitmap = bitmap;
+      current.canvas = null;
+      current.ctx = null;
+    }).catch((err) => {
+      console.warn(`[Renderer] Failed to promote image ${handle} to ImageBitmap:`, err?.message || err);
+    }).finally(() => {
+      this._completePendingImageLoad();
+    });
+  }
+
+  _loadCompressedImageFallback(handle, blob) {
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    return new Promise((resolve) => {
+      image.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(image, 0, 0);
+        URL.revokeObjectURL(objectUrl);
+
+        this.images.set(handle, {
+          bitmap: null,
+          canvas,
+          ctx,
+          width: canvas.width,
+          height: canvas.height,
+          loaded: true,
+          _finalized: true,
+        });
+        this._currentCachePixels += canvas.width * canvas.height;
+        resolve();
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        console.warn(`[Renderer] Failed to decode image handle=${handle}`);
+        if (!this.images.has(handle)) {
+          const placeholder = document.createElement('canvas');
+          placeholder.width = 1;
+          placeholder.height = 1;
+          this.images.set(handle, {
+            bitmap: null,
+            canvas: placeholder,
+            ctx: placeholder.getContext('2d'),
+            width: 1,
+            height: 1,
+            loaded: false,
+            _finalized: true,
+          });
+        }
+        resolve();
+      };
+      image.src = objectUrl;
+    });
   }
 
   registerTexture(img) {

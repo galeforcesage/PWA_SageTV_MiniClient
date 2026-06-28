@@ -302,6 +302,10 @@ export class InputManager {
   // ── Pointer (Mouse/Touch) ────────────────────────────────
 
   _onPointerDown(event) {
+    if (this._hasTextInput && this.platformDetector?.isIOS?.() && event.pointerType !== 'mouse') {
+      this._showTextInput();
+    }
+
     event.preventDefault();
     const { x, y } = this._toServerCoords(event.clientX, event.clientY);
     const mods = domModsToJava(event);

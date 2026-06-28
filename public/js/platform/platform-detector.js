@@ -8,6 +8,8 @@ export class PlatformDetector {
   constructor() {
     this._initialized = false;
     this._isTizen = false;
+    this._isIOS = false;
+    this._iosVersion = null;
     this._remoteProfile = 'unknown';
     this._remoteKeys = new Set();
     this._capabilities = null;
@@ -19,6 +21,8 @@ export class PlatformDetector {
     }
 
     this._isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
+    this._isIOS = this._detectIOS();
+    this._iosVersion = this._detectIOSVersion();
     if (this._isTizen) {
       this._collectTizenRemoteKeys();
     }
@@ -30,6 +34,14 @@ export class PlatformDetector {
 
   isTizen() {
     return this._isTizen;
+  }
+
+  isIOS() {
+    return this._isIOS;
+  }
+
+  getIOSVersion() {
+    return this._iosVersion;
   }
 
   getCapabilities() {
@@ -104,6 +116,31 @@ export class PlatformDetector {
     return false;
   }
 
+  _detectIOS() {
+    const userAgent = navigator.userAgent || '';
+    return /iPad|iPhone|iPod/.test(userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
+  _detectIOSVersion() {
+    if (!this._isIOS) {
+      return null;
+    }
+
+    const userAgent = navigator.userAgent || '';
+    const directMatch = userAgent.match(/(?:OS|iPhone OS) (\d+)[._]/);
+    if (directMatch) {
+      return parseInt(directMatch[1], 10) || null;
+    }
+
+    const versionMatch = userAgent.match(/Version\/(\d+)(?:\.\d+)?/);
+    if (versionMatch) {
+      return parseInt(versionMatch[1], 10) || null;
+    }
+
+    return null;
+  }
+
   _buildCapabilities() {
     const video = document.createElement('video');
     const canPlay = (mime) => {
@@ -141,6 +178,8 @@ export class PlatformDetector {
     return {
       clientId: localStorage.getItem('sagetv_mac') || '',
       platform: this._isTizen ? 'tizen' : 'browser',
+      isIOS: this._isIOS,
+      iosVersion: this._iosVersion,
       display: {
         width,
         height,
@@ -159,6 +198,7 @@ export class PlatformDetector {
         canPlayMP4: canPlay('video/mp4; codecs="avc1.42E01E"'),
         canPlayHLS: canPlay('application/vnd.apple.mpegURL') || canPlay('application/x-mpegURL'),
         canPlayHEVC: canPlay('video/mp4; codecs="hvc1"') || canPlay('video/mp4; codecs="hev1"') || 'unknown',
+        canUseMediaSource: !!(window.MediaSource || window.ManagedMediaSource),
       },
       device: {
         model,

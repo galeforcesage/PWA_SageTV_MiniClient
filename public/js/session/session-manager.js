@@ -68,11 +68,21 @@ export class SessionManager extends EventTarget {
     canvas.width = width;
     canvas.height = height;
 
+    const configuredImageCacheMB = this.settings.getInt('image_cache_size_mb', 96);
+    const rendererCacheMB = this.platformDetector.isIOS()
+      ? Math.min(configuredImageCacheMB, 48)
+      : configuredImageCacheMB;
+
     // Create renderer
-    this.renderer = new CanvasRenderer(canvas);
+    this.renderer = new CanvasRenderer(canvas, {
+      isIOS: this.platformDetector.isIOS(),
+      maxCacheMB: rendererCacheMB,
+    });
 
     // Create media player
-    this.mediaPlayer = new MediaPlayer(videoElement, container);
+    this.mediaPlayer = new MediaPlayer(videoElement, container, {
+      platformDetector: this.platformDetector,
+    });
 
     // Forward codec errors to session listeners for UI display
     this.mediaPlayer.addEventListener('codecerror', (e) => {

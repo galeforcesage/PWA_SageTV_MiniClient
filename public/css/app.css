@@ -13,6 +13,8 @@
   --radius: 8px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -67,7 +69,7 @@ html, body {
 .server-sidebar {
   width: 220px;
   flex-shrink: 0;
-  padding: 60px 24px 24px;
+  padding: 60px calc(24px + var(--safe-right)) 24px calc(24px + var(--safe-left));
   background: rgba(0,80,0,0.25);
   display: flex;
   flex-direction: column;
@@ -683,6 +685,8 @@ html, body {
 #client-screen {
   background: #000;
   flex-direction: column;
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
 }
 
 .client-container {
@@ -732,9 +736,9 @@ html, body {
   color: #fff;
   background: rgba(0,0,0,0.8);
 }
-.float-btn-tl { top: 30px; left: 4px; }
-.float-btn-tr { top: 30px; right: 4px; }
-.float-btn-ml { top: 50%; left: 4px; transform: translateY(-50%); font-size: 20px; }
+.float-btn-tl { top: 30px; left: calc(4px + var(--safe-left)); }
+.float-btn-tr { top: 30px; right: calc(4px + var(--safe-right)); }
+.float-btn-ml { top: 50%; left: calc(4px + var(--safe-left)); transform: translateY(-50%); font-size: 20px; }
 
 .toolbar-title {
   flex: 1;
@@ -762,7 +766,7 @@ html, body {
 .touch-nav {
   position: absolute;
   bottom: calc(20px + var(--safe-bottom));
-  right: 20px;
+  right: calc(20px + var(--safe-right));
   display: grid;
   grid-template-areas:
     ".    up    ."

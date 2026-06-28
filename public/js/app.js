@@ -11,6 +11,9 @@ import { SageCommand } from './protocol/constants.js';
 
 const session = new SessionManager();
 let touchNavVisible = false;
+let wakeLockSentinel = null;
+let hadActiveSession = false;
+let resumeCheckTimer = null;
 
 // ── DOM References ───────────────────────────────────────
 
@@ -89,6 +92,49 @@ async function init() {
   setupEventHandlers();
 
   console.log('[App] SageTV MiniClient PWA initialized');
+}
+
+async function refreshWakeLock(forceRelease = false) {
+  const wantsWakeLock = session.settings.get('keep_screen_on', 'true') === 'true';
+  const canWakeLock = 'wakeLock' in navigator;
+
+  if (forceRelease || !session.connected || !wantsWakeLock || !canWakeLock || document.visibilityState !== 'visible') {
+    if (wakeLockSentinel) {
+      try {
+        await wakeLockSentinel.release();
+      } catch {
+        // ignore release failures
+      }
+      wakeLockSentinel = null;
+    }
+    return;
+  }
+
+  if (wakeLockSentinel) {
+    return;
+  }
+
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    wakeLockSentinel.addEventListener('release', () => {
+      wakeLockSentinel = null;
+    }, { once: true });
+  } catch (err) {
+    console.debug('[App] Wake lock unavailable:', err?.message || err);
+  }
+}
+
+function scheduleResumeCheck() {
+  if (!hadActiveSession || !session.connection?.resumeIfDead) {
+    return;
+  }
+  clearTimeout(resumeCheckTimer);
+  resumeCheckTimer = setTimeout(() => {
+    resumeCheckTimer = null;
+    session.connection?.resumeIfDead?.().catch((err) => {
+      console.warn('[App] resumeIfDead failed:', err?.message || err);
+    });
+  }, 150);
 }
 
 // ── Event Handlers ───────────────────────────────────────
@@ -231,7 +277,7 @@ function setupEventHandlers() {
   // Play overlay (autoplay unblock)
   document.getElementById('btn-play').addEventListener('click', () => {
     video.muted = false;
-    video.play().catch(() => {});
+    session.mediaPlayer?.play();
     playOverlay.hidden = true;
   });
 
@@ -255,9 +301,14 @@ function setupEventHandlers() {
   });
 
   session.addEventListener('connected', () => {
+    hadActiveSession = true;
     showScreen('client');
     canvas.focus();
     startStatusBar();
+    refreshWakeLock().catch(() => {});
+    clientScreen.addEventListener('pointerdown', () => {
+      session.mediaPlayer?.primePlayback?.().catch?.(() => {});
+    }, { capture: true, once: true });
   });
 
   session.addEventListener('firstframe', () => {
@@ -267,6 +318,7 @@ function setupEventHandlers() {
 
   session.addEventListener('disconnected', (e) => {
     stopStatusBar();
+    refreshWakeLock(true).catch(() => {});
     const reason = e.detail?.reason;
     if (reason === 'user' || reason === 'exit') {
       // User clicked disconnect or SageTV exit — return to connect screen cleanly
@@ -297,6 +349,7 @@ function setupEventHandlers() {
 
   session.addEventListener('reconnectfailed', () => {
     reconnectBanner.hidden = true;
+    refreshWakeLock(true).catch(() => {});
     showScreen('connect');
     connectError.textContent = 'Lost connection to server.';
     connectError.hidden = false;
@@ -354,6 +407,23 @@ function setupEventHandlers() {
   window.addEventListener('beforeunload', () => {
     if (session.connected) session.disconnect();
   });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      refreshWakeLock().catch(() => {});
+      scheduleResumeCheck();
+    } else {
+      refreshWakeLock(true).catch(() => {});
+    }
+  });
+
+  window.addEventListener('pageshow', () => {
+    refreshWakeLock().catch(() => {});
+    scheduleResumeCheck();
+  });
+
+  clientScreen.addEventListener('gesturestart', (e) => e.preventDefault());
+  clientScreen.addEventListener('gesturechange', (e) => e.preventDefault());
 
   // Triple-tap on canvas to show toolbar (touch devices like iPad)
   let tapCount = 0, tapTimer = null;
@@ -633,6 +703,8 @@ function saveSettings() {
 
   // Apply log level immediately
   _applyLogLevel(document.getElementById('set-log-level').value);
+
+  refreshWakeLock().catch(() => {});
 
   settingsDialog.hidden = true;
 }
