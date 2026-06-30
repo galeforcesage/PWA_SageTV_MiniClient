@@ -466,6 +466,10 @@ export class MiniClientConnection extends EventTarget {
 
     try {
       let cmdCount = 0;
+      const _nowFn = (typeof performance !== 'undefined' && performance.now) ? performance.now.bind(performance) : Date.now;
+      const startTs = _nowFn();
+      const TIME_BUDGET_MS = 8;     // yield when this much wall-time has elapsed
+      const HARD_CMD_CEILING = 500; // backstop so a tight cmd stream still flushes replies
       while (this.gfxBuffer.length >= 4) {
         // Peek at header
         const header = this.gfxBuffer.peek(4);
@@ -517,13 +521,15 @@ export class MiniClientConnection extends EventTarget {
           }
         }
 
-        // Yield periodically so WebSocket outgoing writes (replies) can
-        // actually flush. Without this, hundreds of LOADIMAGELINE commands
-        // pile up synchronously and block reply delivery, causing the server
-        // to timeout waiting for LOADIMAGE acknowledgements.
+        // Yield so WebSocket outgoing writes (replies) can flush. Use a
+        // time budget so dense draw-only frames finish in one task while
+        // long LOADIMAGELINE bursts still yield often enough for replies
+        // to drain. The command ceiling is a backstop against any pathological
+        // cmd-rate that beats the wall-clock check.
         // MessageChannel avoids iOS Safari's setTimeout 4ms+ throttle.
-        // Yield every 50 commands (was 500) to ensure replies flush quickly.
-        if (++cmdCount >= 50 && this.gfxBuffer.length >= 4) {
+        cmdCount++;
+        if (this.gfxBuffer.length >= 4 &&
+            (cmdCount >= HARD_CMD_CEILING || (_nowFn() - startTs) >= TIME_BUDGET_MS)) {
           this._yieldChannel.port2.postMessage(null);
           return;
         }

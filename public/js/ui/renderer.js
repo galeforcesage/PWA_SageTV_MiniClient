@@ -22,7 +22,7 @@ export class CanvasRenderer {
    */
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: true });
+    this.ctx = this._configureCtx(canvas.getContext('2d', { alpha: true }));
     this.width = canvas.width;
     this.height = canvas.height;
     this._isIOS = !!options.isIOS;
@@ -54,7 +54,7 @@ export class CanvasRenderer {
     this.backCanvas = document.createElement('canvas');
     this.backCanvas.width = this.width;
     this.backCanvas.height = this.height;
-    this.backCtx = this.backCanvas.getContext('2d', { alpha: true });
+    this.backCtx = this._configureCtx(this.backCanvas.getContext('2d', { alpha: true }));
     this.activeCtx = this.backCtx;
 
     // Max cache size in pixels. iOS gets a tighter cap to avoid WebKit cache thrash.
@@ -107,8 +107,8 @@ export class CanvasRenderer {
     this.canvas.height = height;
     this.backCanvas.width = width;
     this.backCanvas.height = height;
-    this.ctx = this.canvas.getContext('2d', { alpha: true });
-    this.backCtx = this.backCanvas.getContext('2d', { alpha: true });
+    this.ctx = this._configureCtx(this.canvas.getContext('2d', { alpha: true }));
+    this.backCtx = this._configureCtx(this.backCanvas.getContext('2d', { alpha: true }));
     this.activeCtx = this.backCtx;
     console.log(`[Renderer] Resized to ${width}x${height}`);
   }
@@ -300,29 +300,34 @@ export class CanvasRenderer {
    */
   drawText(x, y, text, fontInfo, argb, clipX, clipY, clipW, clipH) {
     const ctx = this.activeCtx;
-    ctx.save();
+    const hasClip = clipW > 0 && clipH > 0;
 
-    // Apply clip rect
-    if (clipW > 0 && clipH > 0) {
+    if (hasClip) {
+      ctx.save();
       ctx.beginPath();
       ctx.rect(clipX, clipY, clipW, clipH);
       ctx.clip();
     }
 
-    // Build CSS font string
+    // WebKit re-parses ctx.font on every assignment — cache per-context so
+    // a run of same-font draws (the common menu case) avoids the reparse.
     const size = fontInfo ? fontInfo.size : 16;
     const style = fontInfo ? fontInfo.style : 0;
     const name = fontInfo ? fontInfo.name : 'sans-serif';
     const bold = (style & 1) ? 'bold ' : '';
     const italic = (style & 2) ? 'italic ' : '';
-    ctx.font = `${italic}${bold}${size}px "${name}", sans-serif`;
+    const fontStr = `${italic}${bold}${size}px "${name}", sans-serif`;
+    if (ctx._lastFont !== fontStr) {
+      ctx.font = fontStr;
+      ctx._lastFont = fontStr;
+    }
 
-    // Set color
     ctx.fillStyle = argbToRgba(argb);
-    ctx.textBaseline = 'top';
     ctx.fillText(text, x, y);
 
-    ctx.restore();
+    if (hasClip) {
+      ctx.restore();
+    }
   }
 
   // ── Textures / Images ─────────────────────────────────────
@@ -405,23 +410,59 @@ export class CanvasRenderer {
       }
     }
 
-    const canvas = document.createElement('canvas');
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
     const imageData = new ImageData(
       new Uint8ClampedArray(buf.buffer, buf.byteOffset, totalPixels * 4),
       img.width, img.height
     );
-    ctx.putImageData(imageData, 0, 0);
 
     img.bitmap = null;
+    img.canvas = null;
+    img.ctx = null;
+    img._finalized = true;
+    img._rawBuffer = null;
+    img._imageData = imageData; // sync fallback if drawTexture beats bitmap promise
+
+    // Single GPU upload: ImageData → ImageBitmap. Skips the intermediate
+    // putImageData(canvas) + createImageBitmap(canvas) double conversion.
+    if (typeof createImageBitmap === 'function') {
+      this._pendingImageLoads++;
+      createImageBitmap(imageData).then((bitmap) => {
+        const current = this.images.get(handle);
+        if (!current) { bitmap.close?.(); return; }
+        if (current.bitmap && current.bitmap !== bitmap && current.bitmap.close) {
+          try { current.bitmap.close(); } catch { /* ignore */ }
+        }
+        current.bitmap = bitmap;
+        current.canvas = null;
+        current.ctx = null;
+        current._imageData = null;
+      }).catch((err) => {
+        console.warn(`[Renderer] createImageBitmap(ImageData) failed for ${handle}, using canvas fallback:`, err?.message || err);
+        this._materializeCanvas(handle);
+      }).finally(() => {
+        this._completePendingImageLoad();
+      });
+      return;
+    }
+
+    this._materializeCanvas(handle);
+  }
+
+  /**
+   * Synchronously realize a canvas from a pending ImageData fallback.
+   * Used when createImageBitmap is unsupported or fails, and when
+   * drawTexture fires before the async bitmap promise resolves.
+   */
+  _materializeCanvas(handle) {
+    const img = this.images.get(handle);
+    if (!img || img.canvas || img.bitmap || !img._imageData) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = this._configureCtx(canvas.getContext('2d'));
+    ctx.putImageData(img._imageData, 0, 0);
     img.canvas = canvas;
     img.ctx = ctx;
-    img._finalized = true;
-    img._rawBuffer = null; // Free the raw buffer
-
-    this._promoteCanvasToBitmap(handle, canvas);
   }
 
   /**
@@ -503,7 +544,11 @@ export class CanvasRenderer {
     const img = this.images.get(handle) || this.surfaces.get(handle);
     if (!img) return;
 
-    const source = img.canvas || img.bitmap;
+    let source = img.bitmap || img.canvas;
+    if (!source && img._imageData) {
+      this._materializeCanvas(handle);
+      source = img.canvas;
+    }
     if (!source) return;
 
     if (srcw === 0 || srch === 0 || width === 0 || height === 0) return;
@@ -540,7 +585,7 @@ export class CanvasRenderer {
           this._tintCanvas = document.createElement('canvas');
           this._tintCanvas.width = Math.max(absW, 256);
           this._tintCanvas.height = Math.max(absH, 256);
-          this._tintCtx = this._tintCanvas.getContext('2d');
+          this._tintCtx = this._configureCtx(this._tintCanvas.getContext('2d'));
         }
         const tc = this._tintCtx;
         tc.globalCompositeOperation = 'source-over';
@@ -572,7 +617,7 @@ export class CanvasRenderer {
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d', { alpha: true });
+    const ctx = this._configureCtx(canvas.getContext('2d', { alpha: true }));
     // Clear to transparent
     ctx.clearRect(0, 0, width, height);
     this.surfaces.set(handle, { canvas, ctx, width, height });
@@ -613,7 +658,7 @@ export class CanvasRenderer {
     const canvas = document.createElement('canvas');
     canvas.width = destWidth;
     canvas.height = destHeight;
-    const ctx = canvas.getContext('2d');
+    const ctx = this._configureCtx(canvas.getContext('2d'));
 
     if (maskCornerArc > 0) {
       // Apply rounded corner mask
@@ -627,7 +672,12 @@ export class CanvasRenderer {
       bitmap: null, canvas, ctx, width: destWidth, height: destHeight, loaded: true, _finalized: true
     });
     this._currentCachePixels += destWidth * destHeight;
-    this._promoteCanvasToBitmap(destHandle, canvas);
+    // Skip async ImageBitmap promotion on iOS — these are transient scaled
+    // posters and the concurrent burst stalls menu paint. Canvas works fine
+    // as a drawImage source.
+    if (!this._isIOS) {
+      this._promoteCanvasToBitmap(destHandle, canvas);
+    }
   }
 
   // ── Transform Stack ───────────────────────────────────────
@@ -774,7 +824,7 @@ export class CanvasRenderer {
         const canvas = document.createElement('canvas');
         canvas.width = image.width;
         canvas.height = image.height;
-        const ctx = canvas.getContext('2d');
+        const ctx = this._configureCtx(canvas.getContext('2d'));
         ctx.drawImage(image, 0, 0);
         URL.revokeObjectURL(objectUrl);
 
@@ -800,7 +850,7 @@ export class CanvasRenderer {
           this.images.set(handle, {
             bitmap: null,
             canvas: placeholder,
-            ctx: placeholder.getContext('2d'),
+            ctx: this._configureCtx(placeholder.getContext('2d')),
             width: 1,
             height: 1,
             loaded: false,
@@ -815,6 +865,21 @@ export class CanvasRenderer {
 
   registerTexture(img) {
     // No-op for Canvas 2D (needed for OpenGL path)
+  }
+
+  /**
+   * Apply uniform per-context defaults: low-quality smoothing (avoids
+   * WebKit's expensive default resampler on scaled blits) and a stable
+   * text baseline so drawText doesn't need to reset it per call.
+   */
+  _configureCtx(ctx) {
+    if (!ctx) return ctx;
+    try {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'low';
+    } catch { /* older browsers */ }
+    try { ctx.textBaseline = 'top'; } catch { /* ignore */ }
+    return ctx;
   }
 
   /**
