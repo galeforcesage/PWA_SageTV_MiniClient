@@ -219,6 +219,11 @@ export class MiniClientConnection extends EventTarget {
     this._bandwidthKbps = 0;           // computed every second
     this._bandwidthTimer = null;
 
+    // Media reconnect guards to prevent rapid reconnect storms.
+    this._mediaReconnectInProgress = false;
+    this._mediaReconnectTimer = null;
+    this._lastMediaCommandAt = 0;
+
     // MessageChannel for yielding without timer throttle (iOS Safari clamps setTimeout)
     this._yieldChannel = new MessageChannel();
     this._yieldChannel.port1.onmessage = () => this._processGfxBuffer();
@@ -306,7 +311,7 @@ export class MiniClientConnection extends EventTarget {
 
     // Media socket messages
     this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-    this.mediaSocket.onclose = () => this._onMediaSocketClosed();
+    this.mediaSocket.onclose = (ev) => this._onMediaSocketClosed(ev);
     this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
     this.dispatchEvent(new CustomEvent('connected'));
@@ -2109,6 +2114,8 @@ export class MiniClientConnection extends EventTarget {
    * Port of MediaCmd.java
    */
   _handleMediaCommand(cmd, len, data) {
+    this._lastMediaCommandAt = Date.now();
+
     const readInt = (pos) => {
       return ((data[pos] & 0xFF) << 24) | ((data[pos + 1] & 0xFF) << 16) |
              ((data[pos + 2] & 0xFF) << 8) | (data[pos + 3] & 0xFF);
@@ -2350,25 +2357,45 @@ export class MiniClientConnection extends EventTarget {
    * Auto-reconnect the media WebSocket when SageTV closes the TCP connection
    * between videos. The GFX channel stays open; only media needs reconnecting.
    */
-  async _onMediaSocketClosed() {
-    console.warn('[Connection] Media socket closed — will auto-reconnect');
+  async _onMediaSocketClosed(ev) {
+    const closeCode = ev?.code ?? 0;
+    const recentlyActive = (Date.now() - this._lastMediaCommandAt) < 5000;
+
+    // Clean close while idle is expected in some flows; do not churn reconnects.
+    if ((closeCode === 1000 || closeCode === 1001) && !recentlyActive) {
+      console.log(`[Connection] Media socket closed cleanly (code=${closeCode}) while idle; not reconnecting`);
+      return;
+    }
+
+    if (this._mediaReconnectInProgress || this._mediaReconnectTimer) {
+      return;
+    }
+
+    console.warn(`[Connection] Media socket closed (code=${closeCode}) — scheduling auto-reconnect`);
     if (!this.alive || !this.gfxSocket || this.gfxSocket.readyState !== WebSocket.OPEN) {
       console.warn('[Connection] GFX not alive, skipping media reconnect');
       return;
     }
-    try {
-      const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
-      this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
-      this.mediaSocket.binaryType = 'arraybuffer';
-      await this._waitForOpen(this.mediaSocket, 'Media-Auto-Reconnect');
-      await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
-      this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
-      this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
-      console.log('[Connection] Media socket auto-reconnected');
-    } catch (err) {
-      console.error('[Connection] Media auto-reconnect failed:', err);
-    }
+
+    this._mediaReconnectTimer = setTimeout(async () => {
+      this._mediaReconnectTimer = null;
+      this._mediaReconnectInProgress = true;
+      try {
+        const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
+        this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
+        this.mediaSocket.binaryType = 'arraybuffer';
+        await this._waitForOpen(this.mediaSocket, 'Media-Auto-Reconnect');
+        await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
+        this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
+        this.mediaSocket.onclose = (event) => this._onMediaSocketClosed(event);
+        this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
+        console.log('[Connection] Media socket auto-reconnected');
+      } catch (err) {
+        console.error('[Connection] Media auto-reconnect failed:', err);
+      } finally {
+        this._mediaReconnectInProgress = false;
+      }
+    }, 500);
   }
 
   // ── Event Sending (Client → Server) ──────────────────────
@@ -2749,7 +2776,7 @@ export class MiniClientConnection extends EventTarget {
       this._reconnectAttempts = 0;
 
       this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
+      this.mediaSocket.onclose = (ev) => this._onMediaSocketClosed(ev);
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
@@ -2850,7 +2877,7 @@ export class MiniClientConnection extends EventTarget {
       this._reconnectAttempts = 0;
 
       this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-      this.mediaSocket.onclose = () => this._onMediaSocketClosed();
+      this.mediaSocket.onclose = (ev) => this._onMediaSocketClosed(ev);
       this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
 
       this._startKeepalive();
@@ -2881,6 +2908,11 @@ export class MiniClientConnection extends EventTarget {
     this.reconnectAllowed = false;
     this._stopKeepalive();
     this._stopBandwidthTracking();
+    if (this._mediaReconnectTimer) {
+      clearTimeout(this._mediaReconnectTimer);
+      this._mediaReconnectTimer = null;
+    }
+    this._mediaReconnectInProgress = false;
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;

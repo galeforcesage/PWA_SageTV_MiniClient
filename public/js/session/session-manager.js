@@ -61,8 +61,14 @@ export class SessionManager extends EventTarget {
 
     // Get resolution from settings, with adaptive default for weak devices
     const adaptiveRes = this._detectAdaptiveResolution();
-    const width = this.settings.getInt('resolution_width', adaptiveRes.width);
-    const height = this.settings.getInt('resolution_height', adaptiveRes.height);
+    const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
+    const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
+    const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
+    const width = useIOSPerfProfile ? adaptiveRes.width : configuredWidth;
+    const height = useIOSPerfProfile ? adaptiveRes.height : configuredHeight;
+    if (useIOSPerfProfile) {
+      console.log(`[Session] iOS perf profile enabled: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
+    }
 
     // Set canvas size
     canvas.width = width;
@@ -70,7 +76,7 @@ export class SessionManager extends EventTarget {
 
     const configuredImageCacheMB = this.settings.getInt('image_cache_size_mb', 96);
     const rendererCacheMB = this.platformDetector.isIOS()
-      ? Math.min(configuredImageCacheMB, 48)
+      ? Math.min(configuredImageCacheMB, 32)
       : configuredImageCacheMB;
 
     // Create renderer
@@ -137,8 +143,11 @@ export class SessionManager extends EventTarget {
     }
 
     const adaptiveRes = this._detectAdaptiveResolution();
-    const width = this.settings.getInt('resolution_width', adaptiveRes.width);
-    const height = this.settings.getInt('resolution_height', adaptiveRes.height);
+    const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
+    const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
+    const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
+    const width = useIOSPerfProfile ? adaptiveRes.width : configuredWidth;
+    const height = useIOSPerfProfile ? adaptiveRes.height : configuredHeight;
 
     // Create connection
     this.connection = new MiniClientConnection({
@@ -339,10 +348,11 @@ export class SessionManager extends EventTarget {
    * to reduce pixel throughput and image transfer volume.
    */
   _detectAdaptiveResolution() {
-    // Use 1280x720 for all devices. Lower resolutions cause the STV to
-    // hide UI elements (e.g. media control buttons) due to layout constraints.
-    // Performance is handled by disabling effects (GFX_SURFACES=FALSE) and
-    // the ring buffer + memcpy image pipeline, not by reducing resolution.
+    // iOS Safari can become input-laggy on deep, image-heavy STV screens at 720p.
+    // Use a lighter runtime profile unless the user explicitly picked another size.
+    if (this.platformDetector.isIOS()) {
+      return { width: 1024, height: 576 };
+    }
     return { width: 1280, height: 720 };
   }
 }

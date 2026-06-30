@@ -407,7 +407,8 @@ export class MediaPlayer extends EventTarget {
         }
 
         // Auto-play after enough data (initial load or after seek)
-        if (!autoPlayed && totalBytes > 128 * 1024 &&
+        // Reduced threshold to 16KB to bypass browser play overlay
+        if (!autoPlayed && totalBytes > 16 * 1024 &&
             (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
           console.log(`[MediaPlayer] Bridge auto-playing after ${(totalBytes / 1024).toFixed(0)}KB`);
           this._wasPlayingBeforeSeek = false;

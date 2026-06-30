@@ -82,6 +82,13 @@ async function init() {
   // Initialize session (opens IndexedDB etc)
   await session.init(canvas, video, container);
 
+  // Apply log level immediately on startup so high-volume debug logs do not
+  // stall touch handling on iOS Safari.
+  const isIOS = /iPhone|iPad/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const configuredLogLevel = session.settings.get('log_level', isIOS ? 'warn' : 'info');
+  _applyLogLevel(isIOS && configuredLogLevel === 'debug' ? 'warn' : configuredLogLevel);
+
   // Render server cards from cookies
   renderServerGrid();
 
@@ -235,15 +242,20 @@ function setupEventHandlers() {
     settingsDialog.hidden = true;
   });
 
-  // Power button — sends POWER command to STV (shows standby/exit menu)
+  // Power button — gracefully closes session and returns to connect screen.
+  // Some touch browsers intermittently miss click on floating overlays, so
+  // handle pointer/touch/click explicitly and block passthrough to canvas.
   const btnDisconnect = document.getElementById('btn-disconnect');
-  if (btnDisconnect) btnDisconnect.addEventListener('click', () => {
-    if (session.connected) {
-      session.connection.sendCommand(19); // SageCommand.POWER (id=19)
-    } else {
-      handleDisconnect();
-    }
-  });
+  const onDisconnectPress = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    handleDisconnect();
+  };
+  if (btnDisconnect) {
+    btnDisconnect.addEventListener('pointerup', onDisconnectPress);
+    btnDisconnect.addEventListener('touchend', onDisconnectPress, { passive: false });
+    btnDisconnect.addEventListener('click', onDisconnectPress);
+  }
 
   // Fullscreen
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);

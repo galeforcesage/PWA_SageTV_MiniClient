@@ -105,7 +105,7 @@ const DEFAULTS = {
   'keep_screen_on': 'true',
   'exit_on_standby': 'true',
   'image_cache_size_mb': '96',
-  'log_level': 'debug',
+  'log_level': 'info',
 
   // Connection
   // Streaming

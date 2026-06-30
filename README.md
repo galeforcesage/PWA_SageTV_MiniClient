@@ -24,21 +24,23 @@ Browser (PWA)          Bridge (Jetty, Java)              SageTV Server
 └─────────────┘       └──────────────────────┘          └─────────────┘
 ```
 
-The Java bridge runs as a SageTV plugin (shadow JAR in `JARs/`). It embeds Jetty 11 for HTTP serving, WebSocket relay, and ffmpeg-based transcoding — all within the SageTV process.
+The Java bridge runs as a SageTV plugin (shadow JAR in `JARs/`). It embeds a relocated Jetty 9.x stack for HTTP serving, WebSocket relay, and ffmpeg-based transcoding — all within the SageTV process.
 
 > **Note:** An earlier Node.js bridge implementation (`bridge/ws-bridge.js`) is preserved in the repository for historical reference. It is no longer maintained — use the Java bridge for all deployments.
 
 ## Quick Start (SageTV Plugin)
 
 ### Prerequisites
-- SageTV 9.x server with Java 11+
+- SageTV 9.x server with Java 8+
 - ffmpeg on `PATH` (for media transcoding)
 
 ### Install
 
 1. Build the plugin: `cd bridge-java && ./gradlew shadowJar`
-2. Copy `build/libs/pwa-miniclient-bridge.jar` to `SageTV/JARs/`
-3. Extract PWA static files to `SageTV/pwa-miniclient/public/`
+2. Copy `build/libs/pwa-miniclient-bridge-<version>.jar` to `SageTV/JARs/`
+3. Optional: extract web assets to `SageTV/pwa-miniclient/public/` only if you want to override embedded assets. The bridge serves embedded `pwa-public/` by default.
+  - Do not deploy the PWA app to `SageTV/jetty/webapps/`.
+  - The bridge endpoint on `:8099` is served by the plugin itself, not SageTV's Jetty webapps deployer.
 4. Register the plugin in `Sage.properties`:
    ```properties
    sagetv_root_plugin_list/pwa-miniclient=pwa-miniclient
@@ -76,7 +78,7 @@ The bridge can also run outside SageTV for development:
 ```bash
 cd bridge-java
 ./gradlew shadowJar
-java -jar build/libs/pwa-miniclient-bridge.jar \
+java -jar build/libs/pwa-miniclient-bridge-<version>.jar \
   --port 8099 \
   --web-root ../public \
   --username <username> \

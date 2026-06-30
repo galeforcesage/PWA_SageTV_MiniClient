@@ -37,6 +37,11 @@ shadowJar {
     archiveClassifier.set('')
     mergeServiceFiles()
 
+    // Do NOT publish ServletContainerInitializer from shaded Jetty.
+    // If present on SageTV's global classpath, Jetty will try to run it for every
+    // webapp context (sagex, apidocs, etc.) and fail with classloader conflicts.
+    exclude 'META-INF/services/javax.servlet.ServletContainerInitializer'
+
     // Relocate Jetty and Jakarta to avoid conflicts with SageTV's bundled Jetty 9
     relocate 'org.eclipse.jetty', 'pwa.shadow.org.eclipse.jetty'
     relocate 'jakarta.servlet', 'pwa.shadow.jakarta.servlet'

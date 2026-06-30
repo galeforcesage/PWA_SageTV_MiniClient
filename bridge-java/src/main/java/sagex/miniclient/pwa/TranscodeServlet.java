@@ -260,6 +260,10 @@ public class TranscodeServlet extends HttpServlet {
 
         // Common video params
         args.addAll(java.util.Arrays.asList(
+            // Keep H.264 output broadly compatible with Safari/iPad decoders.
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "main",
+            "-level", "3.1",
                 "-b:v", "2000000",
                 "-maxrate", "2500000",
                 "-bufsize", "4000000",
