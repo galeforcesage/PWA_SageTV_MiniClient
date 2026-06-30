@@ -8,3 +8,12 @@ bridge-java/.gradle/
 bridge-java/.tmpjar/
 Sage.properties.remote
 .aider*
+
+# Tizen wgt packaging outputs — produced by `tizen package`, not source.
+deploy/tizen/.manifest.tmp
+deploy/tizen/*.wgt
+deploy/tizen/author-signature.xml
+deploy/tizen/signature*.xml
+deploy/tizen/public/
+deploy/tizen/icons/icon-512.png
+
