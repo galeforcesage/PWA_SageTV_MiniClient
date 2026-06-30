@@ -215,6 +215,29 @@ html, body {
 .server-card .card-delete:hover { color: #ef4444; background: rgba(255,255,255,0.1); }
 .server-card .card-edit:hover { color: #60a5fa; background: rgba(255,255,255,0.1); }
 
+/* Discovered (LAN scan) cards — same shape as saved cards but with a
+   subtle dashed border and a "LAN" badge so users can tell them apart. */
+.server-card-discovered {
+  border: 1px dashed rgba(96,165,250,0.55);
+  background: rgba(96,165,250,0.08);
+}
+.server-card-discovered:hover {
+  background: rgba(96,165,250,0.14);
+}
+.server-card .card-badge {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #60a5fa;
+  background: rgba(96,165,250,0.18);
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
 /* Action buttons row */
 .server-actions {
   display: flex;

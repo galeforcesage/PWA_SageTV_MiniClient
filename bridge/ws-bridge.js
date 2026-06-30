@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
+import { discoverServers } from './discovery.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +47,52 @@ const MIME_TYPES = {
 
 // Track active transcode processes
 const activeTranscodes = new Map();
+
+// ── LAN discovery cache ────────────────────────────────────
+// The UDP probe takes ~2 s. Cache results briefly so a stream of clients
+// hitting /discover in quick succession share one scan.
+const DISCOVER_TTL_MS = 30_000;
+let _discoverCache = { at: 0, data: null, inflight: null };
+
+async function handleDiscover(reqUrl, res) {
+  const force = reqUrl.searchParams.get('force') === '1';
+  const timeoutMs = Math.max(500, Math.min(5000,
+    parseInt(reqUrl.searchParams.get('timeout') || '2000', 10) || 2000));
+  const now = Date.now();
+
+  const sendJson = (status, body) => {
+    res.writeHead(status, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify(body));
+  };
+
+  if (!force && _discoverCache.data && (now - _discoverCache.at) < DISCOVER_TTL_MS) {
+    sendJson(200, { servers: _discoverCache.data, cached: true, age: now - _discoverCache.at });
+    return;
+  }
+
+  if (!_discoverCache.inflight) {
+    _discoverCache.inflight = discoverServers({ timeoutMs })
+      .then((data) => {
+        _discoverCache = { at: Date.now(), data, inflight: null };
+        return data;
+      })
+      .catch((err) => {
+        _discoverCache.inflight = null;
+        throw err;
+      });
+  }
+
+  try {
+    const data = await _discoverCache.inflight;
+    sendJson(200, { servers: data, cached: false, age: 0 });
+  } catch (err) {
+    sendJson(500, { error: err?.message || String(err) });
+  }
+}
 
 const server = http.createServer((req, res) => {
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
@@ -197,6 +244,12 @@ const server = http.createServer((req, res) => {
       'Access-Control-Allow-Headers': 'Content-Type',
     });
     res.end();
+    return;
+  }
+
+  // ── LAN discovery ───────────────────────────────────────
+  if (reqUrl.pathname === '/discover') {
+    handleDiscover(reqUrl, res);
     return;
   }
 

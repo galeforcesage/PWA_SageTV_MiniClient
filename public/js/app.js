@@ -6,6 +6,7 @@
 
 import { SessionManager } from './session/session-manager.js';
 import { SageCommand } from './protocol/constants.js';
+import { SpatialNavigation } from './input/spatial-nav.js';
 
 // ── Globals ──────────────────────────────────────────────
 
@@ -14,6 +15,7 @@ let touchNavVisible = false;
 let wakeLockSentinel = null;
 let hadActiveSession = false;
 let resumeCheckTimer = null;
+let _spatnav = null;
 
 // ── DOM References ───────────────────────────────────────
 
@@ -43,6 +45,11 @@ const settingsDialog = document.getElementById('settings-dialog');
 // Tracks server being edited (null = adding new)
 let _editingServer = null;
 
+// Discovered (LAN scan) servers — IP-keyed, merged into the grid alongside
+// saved entries. Cleared on each scan.
+let _discoveredServers = [];
+let _discoverInflight = false;
+
 /**
  * Open the Add Server dialog pre-filled for editing an existing server card.
  */
@@ -67,15 +74,119 @@ function openEditServerDialog(card) {
   });
 }
 
+/**
+ * Open the Add Server dialog pre-filled from a discovered (LAN-scan) card so
+ * the user can name + save it. We don't auto-save: the user may want to set
+ * a friendly name or a custom bridge URL.
+ */
+function openAddServerDialogForDiscovered(card) {
+  const host = card.dataset.host;
+  const name = card.dataset.name || host;
+  _editingServer = null;
+  document.getElementById('dlg-server-name').value = name;
+  document.getElementById('dlg-server-host').value = host;
+  document.getElementById('dlg-bridge-url').value = '';
+  document.getElementById('dlg-save').textContent = 'ADD';
+  document.getElementById('dlg-delete').hidden = true;
+  document.getElementById('dlg-delete-confirm').hidden = true;
+  addServerDialog.hidden = false;
+  requestAnimationFrame(() => {
+    const nameInput = document.getElementById('dlg-server-name');
+    nameInput.focus();
+    nameInput.setSelectionRange(0, nameInput.value.length);
+  });
+}
+
+/**
+ * Resolve which bridge base URL (http://host:port) to hit for /discover.
+ *
+ * Priority:
+ *   1. Saved server's explicit bridgeUrl (ws:// → http://)
+ *   2. window.location.origin if served over http(s) (i.e. running from a
+ *      bridge in --serve-static mode)
+ *   3. Saved server's host on default bridge port 8099
+ *   4. null — caller must prompt the user to Add Server first
+ */
+function _resolveBridgeHttpBase() {
+  const saved = session.getSavedServers() || [];
+  const explicit = saved.find((s) => s.bridgeUrl);
+  if (explicit?.bridgeUrl) {
+    return explicit.bridgeUrl.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+  }
+  const origin = window.location?.origin || '';
+  if (/^https?:/i.test(origin) && !/^https?:\/\/(?:null|localhost\.local)/i.test(origin)) {
+    return origin;
+  }
+  if (saved[0]?.host) {
+    return `http://${saved[0].host}:8099`;
+  }
+  return null;
+}
+
+async function runDiscovery({ force = false } = {}) {
+  if (_discoverInflight) return;
+  const base = _resolveBridgeHttpBase();
+  if (!base) {
+    connectError.textContent = 'Add a server (or open this PWA from a bridge) before scanning the LAN.';
+    connectError.hidden = false;
+    return;
+  }
+  _discoverInflight = true;
+  const btn = document.getElementById('btn-discover');
+  const prevLabel = btn?.textContent;
+  if (btn) { btn.textContent = 'Scanning…'; btn.disabled = true; }
+  connectStatus.textContent = 'Scanning the LAN for SageTV servers…';
+  connectStatus.hidden = false;
+  connectError.hidden = true;
+  try {
+    const url = `${base.replace(/\/$/, '')}/discover${force ? '?force=1' : ''}`;
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const body = await resp.json();
+    _discoveredServers = Array.isArray(body?.servers) ? body.servers : [];
+    if (_discoveredServers.length === 0) {
+      connectStatus.textContent = 'No SageTV servers found on this LAN.';
+    } else {
+      connectStatus.textContent = `Found ${_discoveredServers.length} server${_discoveredServers.length === 1 ? '' : 's'} on the LAN.`;
+    }
+    renderServerGrid();
+  } catch (err) {
+    console.warn('[Discovery] failed:', err);
+    connectStatus.hidden = true;
+    connectError.textContent = `LAN scan failed: ${err?.message || err}`;
+    connectError.hidden = false;
+  } finally {
+    _discoverInflight = false;
+    if (btn) { btn.textContent = prevLabel || 'Find on LAN'; btn.disabled = false; }
+    setTimeout(() => { if (!connectError.hidden === false) connectStatus.hidden = true; }, 4000);
+  }
+}
+
 // ── Initialization ───────────────────────────────────────
 
 async function init() {
-  // Register service worker
-  if ('serviceWorker' in navigator) {
+  // Register service worker. Skip on Tizen TV: it's a packaged local app
+  // (no offline benefit) and aggressive SW caching defeats reinstall-based
+  // updates of the wgt.
+  const _isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
+  if ('serviceWorker' in navigator && !_isTizen) {
     try {
       await navigator.serviceWorker.register('sw.js');
     } catch (e) {
       console.warn('Service worker registration failed:', e);
+    }
+  } else if (_isTizen && 'serviceWorker' in navigator) {
+    // If a SW was registered by a previous build, unregister it and purge caches
+    // so the freshly-installed wgt assets are actually served.
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const r of regs) { try { await r.unregister(); } catch { /* ignore */ } }
+      if (typeof caches !== 'undefined' && caches.keys) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (e) {
+      console.warn('[Tizen] SW cleanup failed:', e?.message || e);
     }
   }
 
@@ -91,6 +202,11 @@ async function init() {
 
   // Render server cards from cookies
   renderServerGrid();
+
+  // Universal D-pad / arrow-key navigation for connect screen and dialogs.
+  // Inactive during playback (input-manager forwards keys to SageTV then).
+  _spatnav = new SpatialNavigation();
+  _spatnav.start();
 
   // Check for iPad Safari install prompt
   checkInstallPrompt();
@@ -161,6 +277,12 @@ function setupEventHandlers() {
     requestAnimationFrame(() => {
       document.getElementById('dlg-server-host').focus();
     });
+  });
+
+  // Find on LAN button — asks the bridge to broadcast SageTV locator probes
+  // and renders any replies as discovered cards next to the saved ones.
+  document.getElementById('btn-discover')?.addEventListener('click', () => {
+    runDiscovery({ force: true });
   });
 
   // Add/Edit Server dialog — Save
@@ -457,8 +579,13 @@ function setupEventHandlers() {
 
 function renderServerGrid() {
   const servers = session.getSavedServers();
-  if (servers.length === 0) {
-    serverGrid.innerHTML = '<p style="color:rgba(255,255,255,0.4); font-size:14px;">No servers. Click <b>Add Server</b> to get started.</p>';
+  const savedKeys = new Set(servers.map((s) => `${s.host}:${s.port || 31099}`));
+  const lanOnly = _discoveredServers.filter(
+    (d) => !savedKeys.has(`${d.host}:${d.port || 31099}`)
+  );
+
+  if (servers.length === 0 && lanOnly.length === 0) {
+    serverGrid.innerHTML = '<p style="color:rgba(255,255,255,0.4); font-size:14px;">No servers. Click <b>Add Server</b> or <b>Find on LAN</b> to get started.</p>';
     return;
   }
 
@@ -468,7 +595,7 @@ function renderServerGrid() {
     const host = escapeHtml(s.host);
     const port = s.port || 31099;
     html += `
-      <div class="server-card" data-host="${escapeAttr(s.host)}" data-port="${port}" data-name="${escapeAttr(s.name || '')}" data-bridge-url="${escapeAttr(s.bridgeUrl || '')}">
+      <div class="server-card" tabindex="0" data-host="${escapeAttr(s.host)}" data-port="${port}" data-name="${escapeAttr(s.name || '')}" data-bridge-url="${escapeAttr(s.bridgeUrl || '')}">
         <button class="card-edit" title="Edit server">✎</button>
         <button class="card-delete" title="Remove server">✕</button>
         <div class="card-icon"></div>
@@ -476,26 +603,45 @@ function renderServerGrid() {
         <div class="card-host">${host}${port !== 31099 ? ':' + port : ''}</div>
       </div>`;
   }
+  for (const d of lanOnly) {
+    const name = escapeHtml(d.name || d.host);
+    const host = escapeHtml(d.host);
+    const port = d.port || 31099;
+    html += `
+      <div class="server-card server-card-discovered" tabindex="0" data-host="${escapeAttr(d.host)}" data-port="${port}" data-name="${escapeAttr(d.name || '')}" data-discovered="1">
+        <div class="card-badge">LAN</div>
+        <div class="card-icon"></div>
+        <div class="card-name">${name}</div>
+        <div class="card-host">${host}${port !== 31099 ? ':' + port : ''}</div>
+      </div>`;
+  }
   serverGrid.innerHTML = html;
+  if (_spatnav) _spatnav.refresh();
 
-  // Click card → connect
+  // Click card → connect (saved) or open Add dialog pre-filled (discovered)
   serverGrid.querySelectorAll('.server-card').forEach((card) => {
     card.addEventListener('click', (e) => {
       if (e.target.classList.contains('card-delete') || e.target.classList.contains('card-edit')) return;
+      if (card.dataset.discovered === '1') {
+        openAddServerDialogForDiscovered(card);
+        return;
+      }
       const host = card.dataset.host;
       const port = parseInt(card.dataset.port, 10) || 31099;
       handleConnect(host, port);
     });
 
-    // Right-click → edit
+    // Right-click → edit (only for saved cards)
     card.addEventListener('contextmenu', (e) => {
+      if (card.dataset.discovered === '1') return;
       e.preventDefault();
       openEditServerDialog(card);
     });
 
-    // Long-press → edit (touch devices)
+    // Long-press → edit (touch devices, saved only)
     let lpTimer = null;
-    card.addEventListener('touchstart', (e) => {
+    card.addEventListener('touchstart', () => {
+      if (card.dataset.discovered === '1') return;
       lpTimer = setTimeout(() => { lpTimer = null; openEditServerDialog(card); }, 600);
     }, { passive: true });
     card.addEventListener('touchend', () => { if (lpTimer) clearTimeout(lpTimer); });
@@ -750,6 +896,7 @@ function _applyLogLevel(level) {
 function showScreen(name) {
   connectScreen.classList.toggle('active', name === 'connect');
   clientScreen.classList.toggle('active', name === 'client');
+  if (_spatnav && name === 'connect') _spatnav.refresh();
 }
 
 // ── Fullscreen ───────────────────────────────────────────

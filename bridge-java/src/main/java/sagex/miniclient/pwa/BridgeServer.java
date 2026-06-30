@@ -124,6 +124,10 @@ public class BridgeServer {
         // Secure proxy for Sage transfer download endpoints.
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
 
+        // LAN discovery — broadcasts SageTV locator probes so the PWA can
+        // populate its server picker without needing UDP itself.
+        context.addServlet(new ServletHolder("discover", new DiscoveryServlet()), "/discover");
+
         // Static file serving for PWA
         String resourceBase = resolveWebRoot();
         if (resourceBase != null) {

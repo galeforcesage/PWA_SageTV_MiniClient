@@ -83,6 +83,29 @@ export class PlatformDetector {
         return;
       }
 
+      // Samsung TV delivers Arrows/Enter to keydown by default. Color, media,
+      // numeric, channel and Back/Exit keys must be explicitly registered or
+      // they will not fire a keydown at all.
+      const toRegister = [
+        'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow', 'ColorF3Blue',
+        'MediaPlay', 'MediaPause', 'MediaStop', 'MediaPlayPause',
+        'MediaRewind', 'MediaFastForward', 'MediaTrackNext', 'MediaTrackPrevious',
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+        'ChannelUp', 'ChannelDown', 'ChannelList',
+        'VolumeUp', 'VolumeDown', 'VolumeMute',
+        'Menu', 'Tools', 'Info', 'Guide', 'Source',
+        'Caption', 'Exit',
+      ];
+      if (typeof api.registerKeyBatch === 'function') {
+        try { api.registerKeyBatch(toRegister); } catch (err) {
+          console.warn('[PlatformDetector] registerKeyBatch failed:', err?.message || err);
+        }
+      } else if (typeof api.registerKey === 'function') {
+        for (const k of toRegister) {
+          try { api.registerKey(k); } catch { /* key not available on this model */ }
+        }
+      }
+
       const supported = api.getSupportedKeys() || [];
       for (const entry of supported) {
         const keyName = String(entry?.name || '').trim();
