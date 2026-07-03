@@ -86,16 +86,29 @@ export class PlatformDetector {
       // Samsung TV delivers Arrows/Enter to keydown by default. Color, media,
       // numeric, channel and Back/Exit keys must be explicitly registered or
       // they will not fire a keydown at all.
+      // NOTE: VolumeUp/VolumeDown/VolumeMute are intentionally NOT registered.
+      // If registered, keydown fires and the WebView swallows the native TV
+      // volume action; the user then can't control TV volume with the remote.
+      // We want those keys to fall through to the TV's built-in handling.
       const toRegister = [
         'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow', 'ColorF3Blue',
         'MediaPlay', 'MediaPause', 'MediaStop', 'MediaPlayPause',
         'MediaRewind', 'MediaFastForward', 'MediaTrackNext', 'MediaTrackPrevious',
         '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
         'ChannelUp', 'ChannelDown', 'ChannelList',
-        'VolumeUp', 'VolumeDown', 'VolumeMute',
         'Menu', 'Tools', 'Info', 'Guide', 'Source',
         'Caption', 'Exit',
       ];
+      // Reverse any previous-build registration of volume keys so upgrading
+      // an existing install restores native TV volume control.
+      const toUnregister = ['VolumeUp', 'VolumeDown', 'VolumeMute'];
+      if (typeof api.unregisterKeyBatch === 'function') {
+        try { api.unregisterKeyBatch(toUnregister); } catch { /* ignore */ }
+      } else if (typeof api.unregisterKey === 'function') {
+        for (const k of toUnregister) {
+          try { api.unregisterKey(k); } catch { /* ignore */ }
+        }
+      }
       if (typeof api.registerKeyBatch === 'function') {
         try { api.registerKeyBatch(toRegister); } catch (err) {
           console.warn('[PlatformDetector] registerKeyBatch failed:', err?.message || err);

@@ -150,6 +150,12 @@ export class InputManager {
 
     // Keyboard long-press repeat handling
     this._heldKeys = new Set();
+    // Tizen long-press-OK state: defers SELECT until keyup so a hold can
+    // instead open the on-screen nav overlay. Non-Tizen keeps the immediate
+    // SELECT on keydown.
+    this._tizenSelectTimer = null;
+    this._tizenSelectSuppress = false;
+    this._TIZEN_LONGPRESS_MS = 550;
 
     // Hidden text input for soft keyboard on mobile/iPad
     this._textInput = document.getElementById('sage-text-input');
@@ -248,6 +254,18 @@ export class InputManager {
     if ((event.ctrlKey || event.metaKey) &&
         'rRlLiIjJtTwWnN'.includes(event.key)) return;
 
+    // Tizen: never intercept volume keys — let the TV control its own volume.
+    // Registration was already dropped in the platform detector; this guard
+    // covers models that deliver these anyway (or if a stale install still
+    // has them registered when the fresh code first runs).
+    if (this._tizenAdapter.isEnabled()) {
+      const rawKey = String(event.key || '');
+      if (rawKey === 'VolumeUp' || rawKey === 'VolumeDown' || rawKey === 'VolumeMute' ||
+          rawKey === 'AudioVolumeUp' || rawKey === 'AudioVolumeDown' || rawKey === 'AudioVolumeMute') {
+        return;
+      }
+    }
+
     const keyChar = effectiveKey.length === 1 ? effectiveKey.charCodeAt(0) : 0;
 
     // ── 1. Printable characters → raw keystroke (typing) ──
@@ -282,6 +300,23 @@ export class InputManager {
       event.preventDefault();
       if (this._heldKeys.has(effectiveCode)) return;
       this._heldKeys.add(effectiveCode);
+
+      // Tizen: for OK/Enter, defer SELECT to keyup so a long-press can
+      // instead surface the on-screen nav drawer (dpad + playback controls).
+      // Short tap (< _TIZEN_LONGPRESS_MS) fires SELECT on release.
+      if (this._tizenAdapter.isEnabled() && effectiveKey === 'Enter') {
+        this._tizenSelectSuppress = false;
+        if (this._tizenSelectTimer) clearTimeout(this._tizenSelectTimer);
+        this._tizenSelectTimer = setTimeout(() => {
+          this._tizenSelectTimer = null;
+          this._tizenSelectSuppress = true;
+          try {
+            document.dispatchEvent(new CustomEvent('sagetv:open-nav-drawer'));
+          } catch { /* ignore */ }
+        }, this._TIZEN_LONGPRESS_MS);
+        return;
+      }
+
       this.connection.sendCommand(cmd.id);
       return;
     }
@@ -297,6 +332,24 @@ export class InputManager {
 
   _onKeyUp(event) {
     this._heldKeys.delete(event.code);
+    // Tizen deferred-SELECT: fire SELECT on release if the long-press timer
+    // is still pending (short tap); otherwise the timer already triggered
+    // the nav drawer and we suppress the SELECT.
+    if (this._tizenAdapter.isEnabled()) {
+      const tizenNorm = this._tizenAdapter.normalize(event);
+      const effectiveKey = tizenNorm?.key || event.key;
+      if (effectiveKey === 'Enter') {
+        this._heldKeys.delete(tizenNorm?.code || event.code);
+        if (this._tizenSelectTimer) {
+          clearTimeout(this._tizenSelectTimer);
+          this._tizenSelectTimer = null;
+          if (!this._tizenSelectSuppress) {
+            this.connection.sendCommand(SageCommand.SELECT.id);
+          }
+        }
+        this._tizenSelectSuppress = false;
+      }
+    }
   }
 
   // ── Pointer (Mouse/Touch) ────────────────────────────────

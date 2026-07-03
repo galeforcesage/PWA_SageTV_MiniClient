@@ -64,10 +64,23 @@ export class SessionManager extends EventTarget {
     const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
     const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
     const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
-    const width = useIOSPerfProfile ? adaptiveRes.width : configuredWidth;
-    const height = useIOSPerfProfile ? adaptiveRes.height : configuredHeight;
+    // Legacy Tizen installs have `resolution_width=1280, height=720` saved
+    // from before we bumped the Tizen adaptive default to 1080p. Detect that
+    // exact legacy default and auto-upgrade to 1920x1080 so the menus stop
+    // looking blurry on 4K panels. If the user explicitly picked another
+    // resolution (e.g. 960x540 or 1920x1080) we leave it alone.
+    const useTizenUpgrade = this.platformDetector.isTizen()
+      && configuredWidth === 1280 && configuredHeight === 720
+      && adaptiveRes.width === 1920 && adaptiveRes.height === 1080;
+    const width = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.width : configuredWidth;
+    const height = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.height : configuredHeight;
     if (useIOSPerfProfile) {
       console.log(`[Session] iOS perf profile enabled: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
+    }
+    if (useTizenUpgrade) {
+      console.log(`[Session] Tizen auto-upgrade to 1080p: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
+      this.settings.set('resolution_width', String(width));
+      this.settings.set('resolution_height', String(height));
     }
 
     // Set canvas size
@@ -75,13 +88,21 @@ export class SessionManager extends EventTarget {
     canvas.height = height;
 
     const configuredImageCacheMB = this.settings.getInt('image_cache_size_mb', 96);
+    // Tizen TVs have more headroom than iOS but still benefit from a cap to
+    // avoid GC pauses on rich menus. 96 MB is enough for a full recordings
+    // grid without evicting on every scroll (32 MB was too small — every
+    // scroll dropped posters and forced a fresh LOADCOMPRESSED round-trip,
+    // which is what made up/down feel like 7-10 s per row).
     const rendererCacheMB = this.platformDetector.isIOS()
       ? Math.min(configuredImageCacheMB, 32)
-      : configuredImageCacheMB;
+      : this.platformDetector.isTizen()
+        ? Math.min(configuredImageCacheMB, 96)
+        : configuredImageCacheMB;
 
     // Create renderer
     this.renderer = new CanvasRenderer(canvas, {
       isIOS: this.platformDetector.isIOS(),
+      isTizen: this.platformDetector.isTizen(),
       maxCacheMB: rendererCacheMB,
     });
 
@@ -136,18 +157,43 @@ export class SessionManager extends EventTarget {
       serverHost = parts[0];
     }
 
-    // Auto-detect bridge URL if not provided — default to the SageTV server address on port 8099
+    // Auto-detect bridge URL if not provided. The shipped Java bridge listens
+    // on port 8099 (TLS, wss://) and 8100 (plain, ws://). Order the probe by
+    // page origin so we don't create mixed-content violations in browsers:
+    //   - Page over https: → try wss://:8099 first, ws://:8100 as fallback.
+    //   - Page over http:  → try ws://:8100 first, wss://:8099 as fallback.
+    //   - Other origins (Tizen wgt file://, packaged installs) → ws first,
+    //     since cert-strict WebViews can't accept the self-signed TLS cert.
     if (!bridgeUrl) {
-      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      bridgeUrl = `${protocol}//${serverHost}:8099`;
+      const proto = location.protocol;
+      const httpsFirst = proto === 'https:';
+      const wsCandidate  = [`ws://${serverHost}:8100`,  `http://${serverHost}:8100/discover`];
+      const wssCandidate = [`wss://${serverHost}:8099`, `https://${serverHost}:8099/discover`];
+      const candidates = httpsFirst ? [wssCandidate, wsCandidate] : [wsCandidate, wssCandidate];
+      bridgeUrl = candidates[0][0];
+      const detected = await this._probeBridgeScheme(candidates);
+      if (detected) bridgeUrl = detected;
+    }
+
+    // Publish the resolved http(s) bridge base to the media player so
+    // /transcode fetches use an absolute URL. Required for clients where the
+    // page origin isn't the bridge (Tizen wgt file://, iOS PWA installs).
+    const bridgeHttpBase = bridgeUrl
+      .replace(/^ws:/i, 'http:')
+      .replace(/^wss:/i, 'https:');
+    if (this.mediaPlayer && typeof this.mediaPlayer.setBridgeBase === 'function') {
+      this.mediaPlayer.setBridgeBase(bridgeHttpBase);
     }
 
     const adaptiveRes = this._detectAdaptiveResolution();
     const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
     const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
     const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
-    const width = useIOSPerfProfile ? adaptiveRes.width : configuredWidth;
-    const height = useIOSPerfProfile ? adaptiveRes.height : configuredHeight;
+    const useTizenUpgrade = this.platformDetector.isTizen()
+      && configuredWidth === 1280 && configuredHeight === 720
+      && adaptiveRes.width === 1920 && adaptiveRes.height === 1080;
+    const width = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.width : configuredWidth;
+    const height = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.height : configuredHeight;
 
     // Create connection
     this.connection = new MiniClientConnection({
@@ -288,10 +334,14 @@ export class SessionManager extends EventTarget {
     const displayWidth = Math.round(serverWidth * scale);
     const displayHeight = Math.round(serverHeight * scale);
 
+    // Flex centering on .client-container (justify-content/align-items:center)
+    // already places the canvas in the middle — do NOT also set margins here,
+    // as flex counts margins against the centered outer box and would shift
+    // the canvas off-center. Just set the size; the container centers it.
     this.canvas.style.width = `${displayWidth}px`;
     this.canvas.style.height = `${displayHeight}px`;
-    this.canvas.style.marginLeft = `${Math.round((containerWidth - displayWidth) / 2)}px`;
-    this.canvas.style.marginTop = `${Math.round((containerHeight - displayHeight) / 2)}px`;
+    this.canvas.style.marginLeft = '0';
+    this.canvas.style.marginTop = '0';
 
     // Update input scaling
     if (this.inputManager) {
@@ -353,6 +403,33 @@ export class SessionManager extends EventTarget {
     if (this.platformDetector.isIOS()) {
       return { width: 1024, height: 576 };
     }
+    // Tizen TVs are typically 4K panels — rendering at 720p forces the TV to
+    // triple-upscale text and bitmaps, producing the fuzzy menus users see
+    // on 55"+ sets. 1080p is the sweet spot: sharp on 4K panels (integer 2x
+    // upscale) without doubling the image-transfer volume of full 4K.
+    if (this.platformDetector.isTizen()) {
+      return { width: 1920, height: 1080 };
+    }
     return { width: 1280, height: 720 };
+  }
+
+  /**
+   * Probe /discover on each candidate endpoint. Returns the ws(s):// URL of
+   * whichever answered first, or null if none did.
+   * @param {Array<[string,string]>} candidates - [wsUrl, httpProbeUrl] pairs
+   */
+  async _probeBridgeScheme(candidates) {
+    for (const [wsUrl, httpUrl] of candidates) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        const resp = await fetch(httpUrl, { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(timer);
+        if (resp.ok) return wsUrl;
+      } catch (err) {
+        // try the next candidate
+      }
+    }
+    return null;
   }
 }

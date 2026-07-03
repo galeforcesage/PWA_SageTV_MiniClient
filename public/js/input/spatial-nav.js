@@ -86,10 +86,13 @@ export class SpatialNavigation {
     const active = document.activeElement;
     const inTextField = this._isTextLikeInput(active);
 
-    // Let arrows move the caret in text fields. Up/Down can still escape to
-    // the next focusable when at the field boundary, but for simplicity we
-    // just yield to native behavior.
-    if (dir && inTextField) return;
+    // In text-like inputs, left/right stay native (caret movement), but
+    // up/down escape to the next focusable element so TV/keyboard users can
+    // move between fields and buttons in a form.
+    if (dir && inTextField) {
+      if (dir === 'left' || dir === 'right') return;
+      // fall through to neighbor logic for up/down
+    }
 
     // Enter inside a text field should submit / native behavior — but for
     // password-style submit, let buttons handle it. We yield by default.
@@ -123,16 +126,68 @@ export class SpatialNavigation {
     }
 
     if (dir) {
-      const from = active && this._isFocusable(active) && scope.contains(active)
-        ? active
-        : (this._lastFocused && scope.contains(this._lastFocused) ? this._lastFocused : this._firstIn(scope));
-      if (!from) return;
-      const next = this._findNeighbor(from, dir, scope);
+      const activeInScope = active && this._isFocusable(active) && scope.contains(active);
+      const lastInScope = this._lastFocused && scope.contains(this._lastFocused) && this._isFocusable(this._lastFocused);
+      // Determine whether this scope is a floating overlay (modal/drawer).
+      // For those, always trap the arrow so it can't leak to the playback
+      // input-manager underneath; a dead-end arrow simply does nothing.
+      const isOverlayScope = scope.classList?.contains('modal-overlay')
+        || scope.hasAttribute?.('data-spatnav-scope');
+      // When nothing inside the scope is focused yet (e.g. drawer just opened
+      // and focus is still on the canvas), the first arrow should land focus
+      // on the first focusable inside the scope rather than "jumping over" it
+      // to a neighbor of an imaginary starting point.
+      if (!activeInScope && !lastInScope) {
+        const first = this._firstIn(scope);
+        if (first) {
+          first.focus({ preventScroll: false });
+          ev.preventDefault();
+          ev.stopPropagation();
+          return;
+        }
+        if (isOverlayScope) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        return;
+      }
+      const from = activeInScope ? active : this._lastFocused;
+      let next = this._findNeighbor(from, dir, scope);
+      // Fallback: when going up/down inside an overlay scope (settings/add-
+      // server dialogs), if no directional neighbor was found but the modal
+      // has a fixed action row at the bottom (Save/Cancel), route the arrow
+      // there so those buttons are always reachable via D-pad. Same in
+      // reverse: going up from a modal action button falls back to the last
+      // focusable in the scroll area above it.
+      if (!next && isOverlayScope && (dir === 'up' || dir === 'down')) {
+        const buttons = Array.from(scope.querySelectorAll('.modal-buttons'))
+          .flatMap((b) => this._focusableIn(b));
+        if (buttons.length) {
+          const inButtons = buttons.includes(from);
+          if (dir === 'down' && !inButtons) {
+            next = buttons[0];
+          } else if (dir === 'up' && inButtons) {
+            const scroll = scope.querySelector('.settings-scroll, .modal-card');
+            const above = scroll ? this._focusableIn(scroll) : [];
+            if (above.length) next = above[above.length - 1];
+          }
+        }
+      }
       if (next) {
         next.focus({ preventScroll: false });
+        // Belt-and-braces: some older TV WebViews (Tizen 5/6) don't fire
+        // the automatic scroll on focus() when the element is inside a
+        // scrollable container. Force it so the newly focused row is
+        // guaranteed visible.
+        if (typeof next.scrollIntoView === 'function') {
+          try { next.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
+        }
         ev.preventDefault();
         ev.stopPropagation();
         if (this._debug) console.log('[Spatnav]', dir, '->', next);
+      } else if (isOverlayScope) {
+        ev.preventDefault();
+        ev.stopPropagation();
       }
     }
   }
@@ -162,12 +217,14 @@ export class SpatialNavigation {
   _activeScope() {
     // Highest-priority modal scope first.
     const modals = Array.from(document.querySelectorAll('.modal-overlay'))
-      .filter((m) => !m.hidden && m.offsetParent !== null);
+      .filter((m) => !m.hidden && this._isRendered(m));
     if (modals.length) return modals[modals.length - 1];
 
-    // Drawer/menu panels that mark themselves with aria-hidden="false".
+    // Drawer/menu panels that mark themselves with [data-spatnav-scope].
+    // Note: position:fixed elements have offsetParent===null per spec, so
+    // we use a broader visibility check (getBoundingClientRect + display).
     const drawer = document.querySelector('[data-spatnav-scope]:not([hidden])');
-    if (drawer && drawer.offsetParent !== null) return drawer;
+    if (drawer && this._isRendered(drawer)) return drawer;
 
     const client = document.getElementById('client-screen');
     if (client && client.classList.contains('active')) return null; // playback owns
@@ -176,6 +233,15 @@ export class SpatialNavigation {
     if (connect && connect.classList.contains('active')) return connect;
 
     return document.body;
+  }
+
+  _isRendered(el) {
+    if (!el) return false;
+    if (el.hidden) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
   }
 
   _isFocusable(el) {

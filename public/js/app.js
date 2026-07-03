@@ -82,10 +82,11 @@ function openEditServerDialog(card) {
 function openAddServerDialogForDiscovered(card) {
   const host = card.dataset.host;
   const name = card.dataset.name || host;
+  const bridgeUrl = card.dataset.bridgeUrl || '';
   _editingServer = null;
   document.getElementById('dlg-server-name').value = name;
   document.getElementById('dlg-server-host').value = host;
-  document.getElementById('dlg-bridge-url').value = '';
+  document.getElementById('dlg-bridge-url').value = bridgeUrl;
   document.getElementById('dlg-save').textContent = 'ADD';
   document.getElementById('dlg-delete').hidden = true;
   document.getElementById('dlg-delete-confirm').hidden = true;
@@ -98,67 +99,128 @@ function openAddServerDialogForDiscovered(card) {
 }
 
 /**
- * Resolve which bridge base URL (http://host:port) to hit for /discover.
+ * Build the ordered list of bridge base URLs to try for /discover.
  *
  * Priority:
- *   1. Saved server's explicit bridgeUrl (ws:// → http://)
+ *   1. Every saved server's explicit bridgeUrl (ws:// → http://) — user
+ *      intent trumps everything.
  *   2. window.location.origin if served over http(s) (i.e. running from a
- *      bridge in --serve-static mode)
- *   3. Saved server's host on default bridge port 8099
- *   4. null — caller must prompt the user to Add Server first
+ *      bridge in --serve-static mode).
+ *   3. Each saved server's host on the default bridge ports, ordered so we
+ *      try the scheme that matches the page origin first (avoids
+ *      mixed-content blocks in browsers). For non-http origins (Tizen wgt,
+ *      packaged installs), http://:8100 comes first because cert-strict
+ *      WebViews can't accept the shipped self-signed cert on https://:8099.
+ *
+ * De-duplicated in priority order.
  */
-function _resolveBridgeHttpBase() {
+function _resolveBridgeHttpBases() {
+  const bases = [];
+  const seen = new Set();
+  const add = (u) => {
+    if (!u) return;
+    const clean = u.replace(/\/$/, '');
+    if (seen.has(clean)) return;
+    seen.add(clean);
+    bases.push(clean);
+  };
+
   const saved = session.getSavedServers() || [];
-  const explicit = saved.find((s) => s.bridgeUrl);
-  if (explicit?.bridgeUrl) {
-    return explicit.bridgeUrl.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+  for (const s of saved) {
+    if (s.bridgeUrl) {
+      add(s.bridgeUrl.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:'));
+    }
   }
   const origin = window.location?.origin || '';
   if (/^https?:/i.test(origin) && !/^https?:\/\/(?:null|localhost\.local)/i.test(origin)) {
-    return origin;
+    add(origin);
   }
-  if (saved[0]?.host) {
-    return `http://${saved[0].host}:8099`;
+  const pageIsHttps = window.location?.protocol === 'https:';
+  for (const s of saved) {
+    if (!s.host) continue;
+    if (pageIsHttps) {
+      // Same-scheme first — plain http would be blocked by mixed content.
+      add(`https://${s.host}:8099`);
+      add(`http://${s.host}:8100`);
+    } else {
+      // Plain HTTP first — works in cert-strict WebViews (Tizen wgt, iOS
+      // PWAs without our CA) and in dev-mode Node bridge over plain http.
+      add(`http://${s.host}:8100`);
+      add(`https://${s.host}:8099`);
+    }
   }
-  return null;
+  return bases;
 }
 
-async function runDiscovery({ force = false } = {}) {
+/** @deprecated use _resolveBridgeHttpBases; kept for callers that want a single hint. */
+function _resolveBridgeHttpBase() {
+  return _resolveBridgeHttpBases()[0] || null;
+}
+
+async function runDiscovery({ force = false, silent = false } = {}) {
   if (_discoverInflight) return;
-  const base = _resolveBridgeHttpBase();
-  if (!base) {
-    connectError.textContent = 'Add a server (or open this PWA from a bridge) before scanning the LAN.';
-    connectError.hidden = false;
+  const bases = _resolveBridgeHttpBases();
+  if (bases.length === 0) {
+    if (!silent) {
+      connectError.textContent = 'Add a server (or open this PWA from a bridge) before scanning the LAN.';
+      connectError.hidden = false;
+    }
     return;
   }
   _discoverInflight = true;
   const btn = document.getElementById('btn-discover');
   const prevLabel = btn?.textContent;
-  if (btn) { btn.textContent = 'Scanning…'; btn.disabled = true; }
-  connectStatus.textContent = 'Scanning the LAN for SageTV servers…';
-  connectStatus.hidden = false;
-  connectError.hidden = true;
+  if (!silent && btn) { btn.textContent = 'Scanning…'; btn.disabled = true; }
+  if (!silent) {
+    connectStatus.textContent = 'Scanning the LAN for SageTV servers…';
+    connectStatus.hidden = false;
+    connectError.hidden = true;
+  }
+  let firstErr = null;
+  let usedBase = null;
+  let rawServers = null;
   try {
-    const url = `${base.replace(/\/$/, '')}/discover${force ? '?force=1' : ''}`;
-    const resp = await fetch(url, { cache: 'no-store' });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const body = await resp.json();
-    _discoveredServers = Array.isArray(body?.servers) ? body.servers : [];
-    if (_discoveredServers.length === 0) {
-      connectStatus.textContent = 'No SageTV servers found on this LAN.';
-    } else {
-      connectStatus.textContent = `Found ${_discoveredServers.length} server${_discoveredServers.length === 1 ? '' : 's'} on the LAN.`;
+    for (const base of bases) {
+      try {
+        const url = `${base}/discover${force ? '?force=1' : ''}`;
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const body = await resp.json();
+        rawServers = Array.isArray(body?.servers) ? body.servers : [];
+        usedBase = base;
+        break;
+      } catch (err) {
+        if (!firstErr) firstErr = err;
+        console.debug('[Discovery]', base, 'failed:', err?.message || err);
+      }
+    }
+    if (!usedBase) throw firstErr || new Error('no bridge reachable');
+    // Convert the bridge's http(s) base into the ws(s) equivalent so a
+    // discovered card can be saved with a working bridgeUrl without the
+    // user having to type one.
+    const bridgeWsUrl = usedBase.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
+    _discoveredServers = rawServers.map((s) => ({ ...s, _bridgeUrl: bridgeWsUrl }));
+    if (!silent) {
+      if (_discoveredServers.length === 0) {
+        connectStatus.textContent = 'No SageTV servers found on this LAN.';
+      } else {
+        connectStatus.textContent = `Found ${_discoveredServers.length} server${_discoveredServers.length === 1 ? '' : 's'} on the LAN.`;
+      }
     }
     renderServerGrid();
   } catch (err) {
     console.warn('[Discovery] failed:', err);
-    connectStatus.hidden = true;
-    connectError.textContent = `LAN scan failed: ${err?.message || err}`;
-    connectError.hidden = false;
+    if (!silent) {
+      connectStatus.hidden = true;
+      connectError.textContent = `LAN scan failed: ${err?.message || err}`;
+      connectError.hidden = false;
+    }
   } finally {
     _discoverInflight = false;
-    if (btn) { btn.textContent = prevLabel || 'Find on LAN'; btn.disabled = false; }
-    setTimeout(() => { if (!connectError.hidden === false) connectStatus.hidden = true; }, 4000);
+    if (!silent && btn) { btn.textContent = prevLabel || 'Find on LAN'; btn.disabled = false; }
+    if (!silent) {
+      setTimeout(() => { if (!connectError.hidden === false) connectStatus.hidden = true; }, 4000);
+    }
   }
 }
 
@@ -194,11 +256,14 @@ async function init() {
   await session.init(canvas, video, container);
 
   // Apply log level immediately on startup so high-volume debug logs do not
-  // stall touch handling on iOS Safari.
+  // stall touch handling on iOS Safari or Tizen TV WebViews (both serialize
+  // console output even without an attached inspector, and the per-frame
+  // [GFX]/[Frame] chatter is enough to visibly slow menu navigation).
   const isIOS = /iPhone|iPad/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const configuredLogLevel = session.settings.get('log_level', isIOS ? 'warn' : 'info');
-  _applyLogLevel(isIOS && configuredLogLevel === 'debug' ? 'warn' : configuredLogLevel);
+  const slowConsole = isIOS || _isTizen;
+  const configuredLogLevel = session.settings.get('log_level', slowConsole ? 'warn' : 'info');
+  _applyLogLevel(slowConsole && configuredLogLevel === 'debug' ? 'warn' : configuredLogLevel);
 
   // Render server cards from cookies
   renderServerGrid();
@@ -207,6 +272,25 @@ async function init() {
   // Inactive during playback (input-manager forwards keys to SageTV then).
   _spatnav = new SpatialNavigation();
   _spatnav.start();
+
+  // Silently pull the bridge's warm LAN-scan cache and merge discovered
+  // servers into the grid. No-op if we don't yet know any bridge URL.
+  runDiscovery({ silent: true });
+
+  // Tizen TV hardware back/exit key.
+  // Without this listener the WebView exits the app on Back. Route Back to
+  // the client screen (SageTV BACK command) or to dialog/drawer close on
+  // the connect screen. Fall through to app exit only when nothing is open.
+  if (_isTizen) {
+    document.addEventListener('tizenhwkey', (e) => {
+      const name = String(e.keyName || '').toLowerCase();
+      if (name !== 'back') return;
+      if (handleTizenBack()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+  }
 
   // Check for iPad Safari install prompt
   checkInstallPrompt();
@@ -220,8 +304,12 @@ async function init() {
 async function refreshWakeLock(forceRelease = false) {
   const wantsWakeLock = session.settings.get('keep_screen_on', 'true') === 'true';
   const canWakeLock = 'wakeLock' in navigator;
+  // Tizen power API — Samsung TVs don't expose navigator.wakeLock, so use
+  // the native tizen.power.request('SCREEN', 'SCREEN_NORMAL') fallback so
+  // the setting is actually honored on-device.
+  const tizenPower = (typeof window !== 'undefined' && window.tizen && window.tizen.power) || null;
 
-  if (forceRelease || !session.connected || !wantsWakeLock || !canWakeLock || document.visibilityState !== 'visible') {
+  if (forceRelease || !session.connected || !wantsWakeLock || document.visibilityState !== 'visible') {
     if (wakeLockSentinel) {
       try {
         await wakeLockSentinel.release();
@@ -230,12 +318,22 @@ async function refreshWakeLock(forceRelease = false) {
       }
       wakeLockSentinel = null;
     }
+    if (tizenPower) {
+      try { tizenPower.release('SCREEN'); } catch { /* ignore */ }
+    }
     return;
   }
 
-  if (wakeLockSentinel) {
-    return;
+  if (tizenPower) {
+    try {
+      tizenPower.request('SCREEN', 'SCREEN_NORMAL');
+    } catch (err) {
+      console.debug('[App] tizen.power.request failed:', err?.message || err);
+    }
   }
+
+  if (!canWakeLock) return;
+  if (wakeLockSentinel) return;
 
   try {
     wakeLockSentinel = await navigator.wakeLock.request('screen');
@@ -308,6 +406,9 @@ function setupEventHandlers() {
     _editingServer = null;
     addServerDialog.hidden = true;
     renderServerGrid();
+    // Newly-added server may include a bridgeUrl we didn't have before,
+    // giving us a base to hit /discover on. Try it silently.
+    runDiscovery({ silent: true });
   });
 
   // Add/Edit Server dialog — Cancel
@@ -358,6 +459,40 @@ function setupEventHandlers() {
 
   // Settings dialog — Save
   document.getElementById('set-save').addEventListener('click', saveSettings);
+
+  // Settings dialog — direct D-pad/keyboard routing for Save/Cancel.
+  // Spatial-nav's geometric neighbor search sometimes prefers an in-scroll
+  // candidate over the action row (especially when the last scroll item is
+  // a `<summary>` at the top of the last group and Save is far below).
+  // Belt-and-suspenders: when D-pad Down is pressed and the current focus
+  // is the last focusable inside .settings-scroll, jump to Save. When Up
+  // is pressed on Save/Cancel, jump back to that last focusable.
+  const scrollFocusableSelector = 'button:not([disabled]):not([hidden]),a[href],'
+    + 'input:not([type="hidden"]):not([disabled]):not([hidden]),'
+    + 'select:not([disabled]),textarea,summary,[tabindex]:not([tabindex="-1"])';
+  settingsDialog.addEventListener('keydown', (e) => {
+    if (settingsDialog.hidden) return;
+    const key = e.key || e.code;
+    if (key !== 'ArrowDown' && key !== 'ArrowUp') return;
+    const scroll = settingsDialog.querySelector('.settings-scroll');
+    if (!scroll) return;
+    const saveBtn = document.getElementById('set-save');
+    const cancelBtn = document.getElementById('set-cancel');
+    const active = document.activeElement;
+    const list = Array.from(scroll.querySelectorAll(scrollFocusableSelector))
+      .filter((el) => el.offsetParent !== null);
+    const last = list[list.length - 1];
+    if (key === 'ArrowDown' && active === last && saveBtn) {
+      saveBtn.focus();
+      e.preventDefault();
+      e.stopPropagation();
+    } else if (key === 'ArrowUp' && (active === saveBtn || active === cancelBtn) && last) {
+      last.focus();
+      try { last.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true); // capture so we win before spatial-nav
 
   // Settings dialog — Cancel
   document.getElementById('set-cancel').addEventListener('click', () => {
@@ -529,6 +664,14 @@ function setupEventHandlers() {
     session.mediaPlayer.addEventListener('playblocked', () => {
       playOverlay.hidden = false;
     });
+    // Auto-dismiss the overlay if playback actually starts (Tizen retry path,
+    // or the user tapping through the block on desktop). Without this, the
+    // big blue play button can linger over live video on TV remotes.
+    if (session.mediaPlayer.video) {
+      session.mediaPlayer.video.addEventListener('playing', () => {
+        playOverlay.hidden = true;
+      });
+    }
     session.mediaPlayer.addEventListener('seeking', () => {
       seekingOverlay.hidden = false;
     });
@@ -608,7 +751,7 @@ function renderServerGrid() {
     const host = escapeHtml(d.host);
     const port = d.port || 31099;
     html += `
-      <div class="server-card server-card-discovered" tabindex="0" data-host="${escapeAttr(d.host)}" data-port="${port}" data-name="${escapeAttr(d.name || '')}" data-discovered="1">
+      <div class="server-card server-card-discovered" tabindex="0" data-host="${escapeAttr(d.host)}" data-port="${port}" data-name="${escapeAttr(d.name || '')}" data-bridge-url="${escapeAttr(d._bridgeUrl || '')}" data-discovered="1">
         <div class="card-badge">LAN</div>
         <div class="card-icon"></div>
         <div class="card-name">${name}</div>
@@ -694,6 +837,45 @@ function handleDisconnect() {
   showScreen('connect');
 }
 
+/**
+ * Handle Tizen Back/Exit hardware key. Returns true when handled so caller
+ * can preventDefault(). Priority: dismiss modal overlays first, then the
+ * nav drawer, then send BACK to SageTV (client screen), then close the
+ * add-server/settings dialogs (connect screen). Only when nothing is open
+ * do we return false and let the WebView exit the app.
+ */
+function handleTizenBack() {
+  // Close nav drawer if open.
+  const drawer = document.getElementById('nav-drawer');
+  if (drawer && !drawer.hidden && drawer.classList.contains('open')) {
+    document.dispatchEvent(new CustomEvent('sagetv:close-nav-drawer'));
+    return true;
+  }
+  // Close touch-nav overlay if visible.
+  if (touchNav && !touchNav.hidden) {
+    touchNavVisible = false;
+    touchNav.hidden = true;
+    return true;
+  }
+  // On the client screen, forward to SageTV as BACK so the STV can unwind.
+  if (clientScreen && !clientScreen.hidden && clientScreen.classList.contains('active')) {
+    if (session.connected) {
+      session.sendCommand(SageCommand.BACK.id);
+      return true;
+    }
+  }
+  // On the connect screen, close dialogs if open.
+  if (addServerDialog && !addServerDialog.hidden) {
+    addServerDialog.hidden = true;
+    return true;
+  }
+  if (settingsDialog && !settingsDialog.hidden) {
+    settingsDialog.hidden = true;
+    return true;
+  }
+  return false;
+}
+
 // ── Settings Dialog ──────────────────────────────────────
 
 /** Populate a <select> with SageCommand options */
@@ -749,8 +931,14 @@ function openSettings() {
   document.getElementById('set-transcode-abitrate').value = g('fixed_encoding/audio_bitrate_kbps', '128');
   document.getElementById('set-transcode-achannels').value = g('fixed_encoding/audio_channels', '');
 
-  // Update server profile display and show/hide codec options based on detected capabilities
+  // Update server profile display and show/hide codec options based on
+  // BOTH server encoder availability AND client decode capability. An option
+  // is only useful if the server can produce it AND the client can play it.
   const profile = session.connection?.serverProfile;
+  const clientCaps = session.connection?.getProbedCapabilities?.() || { video: '', audio: '', pull: '' };
+  const clientVideoCodecs = new Set(clientCaps.video.split(',').filter(Boolean));
+  const clientAudioCodecs = new Set(clientCaps.audio.split(',').filter(Boolean));
+  const clientPullContainers = new Set(clientCaps.pull.split(',').filter(Boolean));
   const profileEl = document.getElementById('set-server-profile');
   if (profile && profile.serverFfmpeg) {
     const ver = profile.serverFfmpeg.version || 'unknown';
@@ -763,13 +951,47 @@ function openSettings() {
     profileEl.textContent = 'Not connected';
     profileEl.style.color = '#aaa';
   }
-  // Show/hide HEVC video codec option
+  // HEVC: needs server encoder AND client decoder.
+  const showHevc = !!profile?.hasHevc && clientVideoCodecs.has('HEVC');
   document.querySelectorAll('.opt-hevc').forEach(el => {
-    el.style.display = profile?.hasHevc ? '' : 'none';
+    el.style.display = showHevc ? '' : 'none';
   });
-  // Show/hide Opus audio option
+  // Opus: needs server encoder AND client decoder.
+  const showOpus = !!profile?.hasOpus && clientAudioCodecs.has('OPUS');
   document.querySelectorAll('.opt-opus').forEach(el => {
-    el.style.display = profile?.hasOpus ? '' : 'none';
+    el.style.display = showOpus ? '' : 'none';
+  });
+  // EAC3 / E-AC-3: server-side "eac3" encoder is standard in modern ffmpeg;
+  // Tizen and most current TVs decode it natively. Client probes for
+  // audio/eac3 (or codecs="ec-3") and adds EAC3 to the audio codec list.
+  const serverHasEac3 = !!(profile?.serverFfmpeg?.encoders && (
+    profile.serverFfmpeg.encoders.includes('eac3') ||
+    profile.serverFfmpeg.encoders.includes('e-ac-3')
+  ));
+  const showEac3 = serverHasEac3 && clientAudioCodecs.has('EAC3');
+  document.querySelectorAll('.opt-eac3').forEach(el => {
+    el.style.display = showEac3 ? '' : 'none';
+  });
+  // Container formats: hide those the client can't consume via pull mode
+  // (transcoded output is delivered via HTTP progressive, so the container
+  //  must be one the browser's native player can parse).
+  //   MPEG-TS  -> MPEG2-TS       (advertised when client has native MP2T)
+  //   MKV      -> MATROSKA       (mkv containers)
+  //   DVD (PS) -> MPEG2-PS       (only Tizen advertises this today)
+  const transcodeFormatOpts = {
+    mpegts: clientPullContainers.has('MPEG2-TS'),
+    matroska: clientPullContainers.has('MATROSKA'),
+    dvd: clientPullContainers.has('MPEG2-PS'),
+  };
+  document.querySelectorAll('#set-transcode-format option').forEach(opt => {
+    const supported = transcodeFormatOpts[opt.value];
+    // Always leave the default (mpegts) visible so the field is never empty;
+    // hide only clearly unsupported containers.
+    if (supported === false && opt.value !== 'mpegts') {
+      opt.style.display = 'none';
+    } else {
+      opt.style.display = '';
+    }
   });
 
   // Remuxing
@@ -806,6 +1028,14 @@ function openSettings() {
     ? `${(performance.memory.jsHeapSizeLimit / 1024 / 1024).toFixed(0)} MB heap limit, ${(performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0)} MB used`
     : memInfo;
   document.getElementById('set-available-memory').textContent = jsHeap;
+
+  // Expand every collapsible group. On TV/D-pad the user can't reach items
+  // inside a closed <details> (they render with offsetParent=null, so the
+  // spatial navigator skips them); expanding on open makes every option
+  // reachable via arrow keys.
+  for (const d of settingsDialog.querySelectorAll('details.settings-group')) {
+    d.open = true;
+  }
 
   settingsDialog.hidden = false;
 }
@@ -980,6 +1210,12 @@ function initNavDrawer() {
     // Force reflow then animate
     drawer.offsetHeight;
     drawer.classList.add('open');
+    // Give SpatialNavigation a starting point inside the drawer so remote
+    // arrows/enter operate on drawer buttons instead of leaking to SageTV.
+    queueMicrotask(() => {
+      const first = drawer.querySelector('.nav-drawer-btn:not([hidden]):not([disabled])');
+      if (first) first.focus({ preventScroll: true });
+    });
   }
 
   function closeDrawer() {
@@ -990,17 +1226,21 @@ function initNavDrawer() {
       drawer.hidden = true;
       backdrop.hidden = true;
     }, 250);
+    // Return focus to the playback canvas so subsequent keys reach SageTV.
+    const cvs = document.getElementById('sage-canvas');
+    if (cvs) { try { cvs.focus({ preventScroll: true }); } catch { /* ignore */ } }
   }
 
   // Close on backdrop click
   backdrop.addEventListener('click', closeDrawer);
   closeBtn.addEventListener('click', closeDrawer);
 
-  // Wire drawer buttons to SageCommands
-  // Use pointerup instead of click for instant touch response (no 300ms delay)
+  // Wire drawer buttons to SageCommands.
+  // Use `click` so both pointer taps and remote/keyboard Enter (via
+  // SpatialNavigation .click() on the focused button) trigger the action.
   const playPauseBtn = document.getElementById('btn-play-pause');
   drawer.querySelectorAll('.nav-drawer-btn').forEach((btn) => {
-    btn.addEventListener('pointerup', (e) => {
+    btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
       if (btn === playPauseBtn) {
@@ -1058,9 +1298,13 @@ function initNavDrawer() {
     isPtrSwiping = false;
   });
 
-  // ── Menu button to open drawer ──
+  // Menu button to open drawer
   const menuBtn = document.getElementById('btn-nav-menu');
   if (menuBtn) menuBtn.addEventListener('click', openDrawer);
+
+  // External openers (e.g., Tizen long-press OK from input-manager).
+  document.addEventListener('sagetv:open-nav-drawer', () => openDrawer());
+  document.addEventListener('sagetv:close-nav-drawer', () => closeDrawer());
 
   // Close on Escape
   document.addEventListener('keydown', (e) => {
@@ -1080,6 +1324,9 @@ function checkInstallPrompt() {
                       window.navigator.standalone === true;
 
   if (isInstalled) return;
+  // Tizen (Samsung TV) apps are installed via .wgt — the "add to home screen"
+  // flow is a browser concept that doesn't apply. Skip the banner entirely.
+  if (typeof window !== 'undefined' && typeof window.tizen !== 'undefined') return;
   if (session.settings.getBool('install_prompted')) return;
 
   const banner = document.getElementById('install-banner');

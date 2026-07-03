@@ -251,9 +251,28 @@ html, body {
   color: rgba(255,255,255,0.7);
   font-size: 15px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s, border-color 0.15s;
 }
 .action-btn:hover { background: rgba(80,80,80,0.9); color: #fff; }
+.action-btn:focus,
+.action-btn:focus-visible {
+  outline: none;
+  background: rgba(80,80,80,0.95);
+  color: #fff;
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.55);
+}
+
+/* Focus ring for the tile-style server cards on the connect screen.
+   TV remotes / arrow-key users have no cursor, so a visible focus state
+   is critical. */
+.server-card:focus,
+.server-card:focus-visible {
+  outline: none;
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.55), 0 8px 24px rgba(0,0,0,0.35);
+  transform: translateY(-2px);
+}
 
 /* Modal overlay (Add Server / Settings dialogs) */
 .modal-overlay {
@@ -359,7 +378,19 @@ html, body {
   height: 24px;
   flex-shrink: 0;
 }
-.toggle input { opacity: 0; width: 0; height: 0; }
+/* Keep the input focusable AND findable by spatial navigation: give it the
+ * full size of the toggle (was width:0/height:0 which gave a 0x0 bounding
+ * rect, causing the D-pad neighbor search to skip it entirely). */
+.toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
 .toggle .slider {
   position: absolute;
   inset: 0;
@@ -413,6 +444,45 @@ html, body {
 .settings-group > .settings-item {
   padding-left: 16px;
 }
+
+/* Visible focus indicators for TV/D-pad navigation inside the Settings
+   dialog. Without these, keyboard-only users have no way to see where the
+   focus is (browser defaults are often hidden or too subtle on dark UI). */
+.settings-group summary:focus,
+.settings-group summary:focus-visible {
+  outline: none;
+  background: rgba(96,165,250,0.18);
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px rgba(96,165,250,0.6);
+}
+.settings-select:focus,
+.settings-select:focus-visible,
+.settings-input:focus,
+.settings-input:focus-visible {
+  outline: none;
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 2px rgba(96,165,250,0.55);
+}
+/* The <input> inside a toggle is visually hidden; light up the slider. */
+.toggle input:focus + .slider,
+.toggle input:focus-visible + .slider {
+  box-shadow: 0 0 0 2px rgba(96,165,250,0.8);
+}
+/* Highlight the whole settings row when any control inside is focused so
+   the user can see their place in the list, even for scrolled rows. */
+.settings-item:focus-within {
+  background: rgba(96,165,250,0.10);
+  border-radius: 4px;
+}
+/* Keep surrounding context visible when native scrollIntoView fires from
+   focus() — spatial-nav focuses across the list and we want the neighbors
+   to remain on screen for orientation. */
+.settings-scroll .settings-item,
+.settings-scroll .settings-group summary {
+  scroll-margin-top: 40px;
+  scroll-margin-bottom: 40px;
+}
+
 .modal-buttons {
   display: flex;
   gap: 12px;
@@ -676,6 +746,13 @@ html, body {
   transform: scale(0.95);
 }
 
+.nav-drawer-btn:focus,
+.nav-drawer-btn:focus-visible {
+  outline: 3px solid rgba(120, 200, 255, 0.95);
+  outline-offset: 2px;
+  background: rgba(240, 160, 20, 0.55);
+}
+
 .nav-drawer-select {
   background: rgba(220, 140, 0, 0.5);
   border-color: rgba(255, 180, 40, 0.6);
@@ -728,6 +805,12 @@ html, body {
   z-index: 2;                /* canvas OSD above video */
   outline: none;
   touch-action: none;
+  /* When the browser upscales the canvas (e.g. 1080p backing store on a 4K
+   * TV panel), prefer high-quality interpolation over the default. Without
+   * this hint some Tizen webviews use a low-quality path that produces the
+   * fuzzy menu look on large screens. */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: auto;
 }
 
 #sage-video {
@@ -735,6 +818,27 @@ html, body {
   pointer-events: none;
   z-index: 1;                /* video below canvas OSD */
   background: transparent;
+  /* Preserve source aspect ratio inside whatever destRect the server sends.
+   * setVideoRectangles() may override to 'fill' for PIP; default 'contain'
+   * prevents distortion (e.g. 4:3 source stretched into a 16:9 destRect). */
+  object-fit: contain;
+  object-position: center center;
+}
+
+/* Suppress WebKit/TV native media control chrome (centered play overlay,
+ * scrubbing bar, etc). Tizen and iOS WebViews inject these even without the
+ * `controls` attribute in some cases, which puts a persistent play icon
+ * over live video. */
+#sage-video::-webkit-media-controls,
+#sage-video::-webkit-media-controls-panel,
+#sage-video::-webkit-media-controls-play-button,
+#sage-video::-webkit-media-controls-start-playback-button,
+#sage-video::-webkit-media-controls-overlay-play-button,
+#sage-video::-webkit-media-controls-enclosure {
+  display: none !important;
+  -webkit-appearance: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* ── Floating Buttons ────────────────────────────────── */

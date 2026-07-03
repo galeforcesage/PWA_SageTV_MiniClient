@@ -740,6 +740,165 @@ export class MiniClientConnection extends EventTarget {
   }
 
   /**
+   * Probe the browser once for supported codecs and containers, then cache.
+   * Every browser advertises what it can decode via HTMLMediaElement.canPlayType,
+   * so this works uniformly for desktop Chrome/Edge/Safari/Firefox and Tizen.
+   *
+   * Policy:
+   *  - Only 'probably' counts as supported. 'maybe' is treated as unsupported
+   *    because in practice ('maybe' == "I know the container, unsure about
+   *    the codec") the browser frequently fails to decode. We'd rather force
+   *    the server to transcode than silently ship a broken stream.
+   *  - Tizen-specific quirks are applied on top of the generic result: Tizen
+   *    webviews report 'probably' for containers/codecs that only work via
+   *    pull mode (native <video src=...>), not via MSE push. The pull-mode
+   *    hints live in the `pull` list; the codec list is trusted only for
+   *    codecs known-good in MSE.
+   */
+  _probeMediaCapabilities() {
+    if (this._probedCaps) return this._probedCaps;
+    const v = document.createElement('video');
+    const a = document.createElement('audio');
+    // Strict: 'probably' only. 'maybe' means the browser recognizes the
+    // container but has no committed decoder — those combos regularly fail
+    // at decode time and are better handled by server-side transcode.
+    const ok = (el, m) => {
+      try { return el.canPlayType(m) === 'probably'; } catch { return false; }
+    };
+    const vok = (m) => ok(v, m);
+    const aok = (m) => ok(a, m);
+    const isTizen = !!(this.platformDetector && this.platformDetector.isTizen && this.platformDetector.isTizen());
+
+    const video = [];
+    // H.264 is universally supported by MSE-capable browsers; always advertise
+    // so at minimum bridge transcode works end-to-end.
+    video.push('H.264');
+    if (vok('video/mp4; codecs="hvc1"') || vok('video/mp4; codecs="hev1"') ||
+        vok('video/mp4; codecs="hvc1.1.6.L120.90"')) {
+      video.push('HEVC');
+    }
+    if (vok('video/mp4; codecs="mp4v.20.8"') || vok('video/mp4; codecs="mp4v.20.240"')) {
+      video.push('MPEG4-VIDEO');
+    }
+    // NOTE: MPEG2-VIDEO / MPEG1-VIDEO are intentionally NOT advertised in the
+    // codec list even when canPlayType('video/mpeg') returns 'probably'. The
+    // codec list tells the server "these codecs are decodable via push (MSE)."
+    // Our push pipeline transmuxes MPEG-TS -> fMP4 via mux.js, which only
+    // supports H.264/AAC. If we advertised MPEG2-VIDEO the server would pick
+    // push for MPEG2 content in "fixed" streaming mode and mux.js would stall.
+    // Native <video src=/rawmedia?...> pull decode is still enabled via the
+    // pull-container advertisement below (MPEG2-PS/MPEG on Tizen); the server
+    // will use pull when it matches, and will transcode to H.264 for push
+    // when pull isn't chosen.
+    if (vok('video/webm; codecs="vp9"') || vok('video/mp4; codecs="vp09.00.10.08"')) {
+      video.push('VP9');
+    }
+    if (vok('video/webm; codecs="vp8"')) {
+      video.push('VP8');
+    }
+    if (vok('video/mp4; codecs="av01.0.08M.08"')) {
+      video.push('AV1');
+    }
+
+    const audio = [];
+    if (aok('audio/mp4; codecs="mp4a.40.2"') || aok('audio/mp4; codecs="mp4a.40.5"')) {
+      audio.push('AAC', 'AAC-HE');
+    }
+    if (aok('audio/mpeg')) {
+      audio.push('MP3', 'MP2', 'MPG1L2', 'MPG1L3');
+    }
+    if (aok('audio/ac3') || aok('audio/mp4; codecs="ac-3"')) {
+      audio.push('AC3');
+    }
+    if (aok('audio/eac3') || aok('audio/mp4; codecs="ec-3"')) {
+      audio.push('EAC3', 'EC-3');
+    }
+    if (aok('audio/flac') || aok('audio/mp4; codecs="flac"')) {
+      audio.push('FLAC');
+    }
+    if (aok('audio/ogg; codecs="vorbis"') || aok('audio/webm; codecs="vorbis"')) {
+      audio.push('VORBIS');
+    }
+    if (aok('audio/ogg; codecs="opus"') || aok('audio/webm; codecs="opus"') ||
+        aok('audio/mp4; codecs="opus"')) {
+      audio.push('OPUS');
+    }
+    if (aok('audio/wav') || aok('audio/x-wav')) {
+      audio.push('PCM', 'PCM_S16LE');
+    }
+
+    const pull = ['MP4'];
+    // SageTV's ffmpeg-based format detector often reports .mp4 files as
+    // 'Quicktime' (same underlying ISO BMFF container). If we don't advertise
+    // QUICKTIME the server refuses to send the file via pull mode and falls
+    // back to push, which mis-parses the MP4 as MPEG-PS.
+    if (vok('video/mp4; codecs="avc1.42E01E"')) pull.push('QUICKTIME');
+    // Fragmented / progressive MP4 with H.264 is the universal baseline.
+    if (vok('video/webm; codecs="vp9,opus"') || vok('video/webm; codecs="vp8,vorbis"')) {
+      pull.push('WEBM');
+    }
+    // MKV / Matroska has broad support on Tizen/Samsung TVs and Chrome-based
+    // desktops (mkv containers frequently play via native decoders even when
+    // canPlayType returns empty). Only advertise when actually reported.
+    if (vok('video/x-matroska') || vok('video/x-matroska; codecs="avc1"')) {
+      pull.push('MATROSKA');
+    }
+    if (aok('audio/mpeg')) pull.push('MP3');
+    if (aok('audio/mp4')) pull.push('AAC');
+    if (aok('audio/flac')) pull.push('FLAC');
+    if (aok('audio/wav')) pull.push('WAV');
+    if (vok('application/vnd.apple.mpegurl') || vok('application/x-mpegURL')) {
+      // HLS URLs served by SageTV can be handed to <video src=...> directly on
+      // Safari / Tizen.
+      pull.push('MPEG2-TS');
+    }
+    // MPEG program/transport streams: when the browser reports native MPEG
+    // decode, advertise the stream containers as pull-capable so the server
+    // serves the file via /rawmedia (native <video src=...> decode) instead
+    // of Push mode. Push mode would route MPEG2-Video through mux.js, which
+    // only transmuxes H.264 — producing a broken MSE stream.
+    //
+    // Tizen-vs-generic: verified on Samsung Tizen TVs that native pull-mode
+    // decode of MPEG2-PS/MPEG works. Desktop Chrome/Edge/Safari report
+    // 'probably' for video/mpeg too but their native decoders don't actually
+    // handle MPEG program streams, so we restrict this pull-advertisement to
+    // Tizen only and let generic browsers fall through to server transcode.
+    if (isTizen && (vok('video/mpeg') || vok('video/mp2t'))) {
+      pull.push('MPEG2-PS', 'MPEG1-PS', 'MPEG');
+      if (!pull.includes('MPEG2-TS')) pull.push('MPEG2-TS');
+    }
+
+    this._probedCaps = {
+      video: video.join(','),
+      audio: audio.join(','),
+      pull: pull.join(','),
+    };
+    console.log(`[Connection] Probed codec support (strict 'probably', tizen=${isTizen}): video=[${this._probedCaps.video}] audio=[${this._probedCaps.audio}] pull=[${this._probedCaps.pull}]`);
+    return this._probedCaps;
+  }
+
+  _getSupportedVideoCodecs() {
+    return this._probeMediaCapabilities().video;
+  }
+
+  _getSupportedAudioCodecs() {
+    return this._probeMediaCapabilities().audio;
+  }
+
+  _getSupportedPullContainers() {
+    return this._probeMediaCapabilities().pull;
+  }
+
+  /**
+   * Public accessor for probed client codec capability lists (comma-joined
+   * strings — video, audio, pull). Used by the settings UI to hide options
+   * that only make sense when the client can also decode them.
+   */
+  getProbedCapabilities() {
+    return this._probeMediaCapabilities();
+  }
+
+  /**
    * Conservative browser audio route matrix for NG negotiation.
    */
   _buildAudioRouteMatrix() {
@@ -1082,15 +1241,16 @@ export class MiniClientConnection extends EventTarget {
       case 'STREAMING_PROTOCOLS':
         return ClientProperty.STREAMING_PROTOCOLS;
       case 'VIDEO_CODECS':
-        // Report broad codec support so server always sends file path (pull/bridge mode).
-        // Bridge ffmpeg handles all actual decoding/transcoding to H.264 fMP4.
-        return 'MPEG2-VIDEO,MPEG2-VIDEO@HL,MPEG1-VIDEO,MPEG4-VIDEO,H.264,HEVC,VC1,WMV9,MJPEG,VP8,VP9';
+        return this._getSupportedVideoCodecs();
       case 'AUDIO_CODECS':
-        return 'AC3,EAC3,AAC,AAC-HE,MP3,MP2,DTS,FLAC,PCM,VORBIS,OPUS';
+        return this._getSupportedAudioCodecs();
       case 'PUSH_AV_CONTAINERS':
-        return 'MPEG2-TS';  // Accept push in MPEG-TS for live TV
+        // Push mode only works through the mux.js transmuxer, which requires
+        // MPEG-TS carrying H.264+AAC/MP3. Do not advertise any other push
+        // containers even if the <video> element could theoretically play them.
+        return 'MPEG2-TS';
       case 'PULL_AV_CONTAINERS':
-        return 'MPEG2-PS,MPEG2-TS,MPEG1-PS,MP4,MATROSKA,AVI,ASF';
+        return this._getSupportedPullContainers();
       // Transcoding settings
       case 'FIXED_ENCODING_PREFERENCE':
         return pref('fixed_encoding/preference', 'needed');
@@ -2161,21 +2321,11 @@ export class MiniClientConnection extends EventTarget {
           const isAbsPath = urlString.startsWith('/');
           console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
 
-          if (isStv) {
-            // Pull mode with stv:// — extract file path, use bridge transcoder
-            // Format: stv://hostname/full/path/to/file.mpg
-            const stvUrl = urlString.substring(6); // remove 'stv://'
-            const slashIdx = stvUrl.indexOf('/');
-            const filePath = slashIdx >= 0 ? stvUrl.substring(slashIdx) : '/' + stvUrl;
-            console.log(`[Media] Pull mode via bridge transcoder: ${filePath}`);
-            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, false, 0, filePath);
-          } else if (isAbsPath) {
-            // Plain absolute path from server — use bridge transcoder
-            console.log(`[Media] Pull mode via bridge transcoder (abs path): ${urlString}`);
-            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, false, 0, urlString);
-          } else {
-            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
-          }
+          // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
+          // via the bridge's /rawmedia byte-range endpoint — matches the fork's
+          // stv:// pull data source (browser-safe HTTP equivalent). Don't route
+          // through the transcoder: DIRECT_PLAY should preserve original bitstream.
+          this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
         }
         this._sendMediaReturn(1);
         break;

@@ -41,6 +41,10 @@ public class BridgeServer {
     private static final Logger log = LoggerFactory.getLogger(BridgeServer.class);
     private static final String TLS_KEYSTORE_PATH = "pwa-miniclient/ssl/pwa-miniclient.p12";
     private static final String TLS_KEYSTORE_PASSWORD = "changeit";
+    /** Offset from the primary TLS port for the plain-HTTP companion listener.
+     *  Cert-strict WebViews (Tizen wgt, iOS PWA without the CA installed) can't
+     *  accept our self-signed cert, so they connect over ws://host:(port+HTTP_PORT_OFFSET). */
+    private static final int HTTP_PORT_OFFSET = 1;
 
     private final int port;
     private final String webRoot;
@@ -49,6 +53,7 @@ public class BridgeServer {
     private final String username;
     private final String password;
     private Server server;
+    private DiscoveryServlet discoveryServlet;
 
     public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel,
                         String username, String password) {
@@ -63,8 +68,12 @@ public class BridgeServer {
     public void start() throws Exception {
         server = new Server();
 
-        ServerConnector connector = createHttpsConnector(server, port);
-        server.addConnector(connector);
+        ServerConnector tlsConnector = createHttpsConnector(server, port);
+        server.addConnector(tlsConnector);
+
+        int httpPort = port + HTTP_PORT_OFFSET;
+        ServerConnector httpConnector = createHttpConnector(server, httpPort);
+        server.addConnector(httpConnector);
 
         ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
         context.setContextPath("/");
@@ -113,6 +122,10 @@ public class BridgeServer {
         context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath, hwAccel)), "/transcode");
         context.addServlet(new ServletHolder("transcode-stop", new TranscodeStopServlet()), "/transcode/stop");
 
+        // Raw file pass-through for DIRECT_PLAY compatible sources — browser-safe
+        // equivalent of SageTV's port 7818 pull socket protocol used by fork clients.
+        context.addServlet(new ServletHolder("rawmedia", new RawMediaServlet()), "/rawmedia");
+
         // Server info API — probes ffmpeg capabilities for profile auto-detection
         context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
 
@@ -125,8 +138,12 @@ public class BridgeServer {
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
 
         // LAN discovery — broadcasts SageTV locator probes so the PWA can
-        // populate its server picker without needing UDP itself.
-        context.addServlet(new ServletHolder("discover", new DiscoveryServlet()), "/discover");
+        // populate its server picker without needing UDP itself. A background
+        // scanner keeps the cache warm so /discover returns instantly.
+        DiscoveryServlet discoveryServlet = new DiscoveryServlet();
+        discoveryServlet.startBackgroundScanner();
+        this.discoveryServlet = discoveryServlet;
+        context.addServlet(new ServletHolder("discover", discoveryServlet), "/discover");
 
         // Static file serving for PWA
         String resourceBase = resolveWebRoot();
@@ -142,13 +159,17 @@ public class BridgeServer {
         }
 
         server.start();
-        log.info("PWA MiniClient Bridge running on port {}", port);
-        log.info("PWA at https://localhost:{}/", port);
-        log.info("WebSocket endpoints: wss://localhost:{}/gfx, /media", port);
+        int httpListenPort = port + HTTP_PORT_OFFSET;
+        log.info("PWA MiniClient Bridge running on ports {} (TLS) and {} (plain HTTP)", port, httpListenPort);
+        log.info("PWA at https://localhost:{}/  (or http://localhost:{}/ for cert-strict WebViews)", port, httpListenPort);
+        log.info("WebSocket endpoints: wss://localhost:{}/gfx,/media  or  ws://localhost:{}/gfx,/media", port, httpListenPort);
         log.info("Transcode endpoint:  https://localhost:{}/transcode?file=<path>&seek=<sec>", port);
     }
 
     public void stop() throws Exception {
+        if (discoveryServlet != null) {
+            discoveryServlet.stopBackgroundScanner();
+        }
         if (server != null) {
             server.stop();
             TranscodeManager.getInstance().killAll();
@@ -192,6 +213,21 @@ public class BridgeServer {
         }
 
         return null;
+    }
+
+    /**
+     * Create a plain HTTP/1.1 connector. Used as a companion to the TLS listener
+     * so cert-strict WebViews (Tizen wgt, iOS PWA installs without our CA) can
+     * connect over ws://.
+     */
+    private ServerConnector createHttpConnector(Server server, int httpPort) {
+        ServerConnector connector = new ServerConnector(
+            server,
+            new HttpConnectionFactory(new HttpConfiguration())
+        );
+        connector.setPort(httpPort);
+        connector.setIdleTimeout(300000);
+        return connector;
     }
 
     /**

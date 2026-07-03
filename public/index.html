@@ -214,6 +214,7 @@
               <select id="set-transcode-acodec" class="settings-select">
                 <option value="aac">AAC (default)</option>
                 <option value="ac3">AC3</option>
+                <option value="eac3" class="opt-eac3" style="display:none">EAC3 / E-AC-3</option>
                 <option value="mp3">MP3</option>
                 <option value="opus" class="opt-opus" style="display:none">Opus</option>
               </select>
@@ -379,7 +380,7 @@
 
     <!-- Navigation Drawer (swipe from left edge) -->
     <div id="nav-drawer-backdrop" class="nav-drawer-backdrop" hidden></div>
-    <div id="nav-drawer" class="nav-drawer" hidden>
+    <div id="nav-drawer" class="nav-drawer" data-spatnav-scope hidden>
       <div class="nav-drawer-header">
         <span>Navigation</span>
         <button id="nav-drawer-close" class="nav-drawer-close" aria-label="Close">✕</button>
@@ -453,6 +454,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=20260630-discover"></script>
+    <script type="module" src="js/app.js?v=20260702-savefix"></script>
 </body>
 </html>

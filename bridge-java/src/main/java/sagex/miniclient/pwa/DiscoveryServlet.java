@@ -19,11 +19,16 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * GET /discover — LAN scan for SageTV servers.
@@ -54,8 +59,8 @@ import java.util.TreeMap;
  * <pre>
  * {
  *   "servers": [
- *     { "host":"192.168.0.75","port":31099,"name":"SageTV-CL",
- *       "guid":"1e09d919a2c138bb","sageVersion":"10.0.16",
+ *     { "host":"192.0.2.10","port":31099,"name":"SageTV-CL",
+ *       "guid":"0000000000000000","sageVersion":"10.0.16",
  *       "sagePort":42024,"sources":["fat","mini"] }
  *   ],
  *   "cached": false,
@@ -67,6 +72,8 @@ public class DiscoveryServlet extends HttpServlet {
     private static final Logger log = LoggerFactory.getLogger(DiscoveryServlet.class);
 
     private static final long CACHE_TTL_MS = 30_000L;
+    private static final long AUTO_SCAN_INTERVAL_MS = 30_000L;
+    private static final int AUTO_SCAN_TIMEOUT_MS = 2000;
 
     // Probe version reported to the fat-client locator. Must be >= the
     // server's CLIENT_COMPATIBLE_*_VERSION (currently 9.0.14 in Sage.java)
@@ -78,6 +85,47 @@ public class DiscoveryServlet extends HttpServlet {
     private final Object lock = new Object();
     private long cacheAt = 0L;
     private List<Server> cachedServers = Collections.emptyList();
+
+    private ScheduledExecutorService scanner;
+    private ScheduledFuture<?> scannerTask;
+
+    /**
+     * Start a background scan loop so the cache is always warm and
+     * {@code /discover} returns instantly. Safe to call multiple times —
+     * subsequent calls are no-ops.
+     */
+    public synchronized void startBackgroundScanner() {
+        if (scanner != null) return;
+        scanner = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "DiscoveryAutoScan");
+            t.setDaemon(true);
+            return t;
+        });
+        scannerTask = scanner.scheduleWithFixedDelay(() -> {
+            try {
+                List<Server> servers = scan(AUTO_SCAN_TIMEOUT_MS);
+                synchronized (lock) {
+                    cachedServers = servers;
+                    cacheAt = System.currentTimeMillis();
+                }
+                log.debug("[Discovery] auto-scan found {} server(s)", servers.size());
+            } catch (Throwable e) {
+                log.warn("[Discovery] auto-scan failed: {}", e.toString());
+            }
+        }, 0L, AUTO_SCAN_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** Stop the background scan loop. Safe to call multiple times. */
+    public synchronized void stopBackgroundScanner() {
+        if (scannerTask != null) {
+            scannerTask.cancel(true);
+            scannerTask = null;
+        }
+        if (scanner != null) {
+            scanner.shutdownNow();
+            scanner = null;
+        }
+    }
 
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
@@ -115,6 +163,11 @@ public class DiscoveryServlet extends HttpServlet {
             }
         }
 
+        // Filter loopback + dedupe multi-homed replies by GUID, preferring the
+        // address on the requesting client's subnet so the tile shows the IP
+        // the user already knows their SageTV by.
+        servers = filterAndDedupe(servers, req.getRemoteAddr());
+
         try (PrintWriter w = resp.getWriter()) {
             w.write(toJson(servers, fromCache, age));
         }
@@ -128,6 +181,73 @@ public class DiscoveryServlet extends HttpServlet {
         } catch (NumberFormatException e) {
             return def;
         }
+    }
+
+    /**
+     * Strip loopback replies and collapse multi-homed responses (same GUID from
+     * several interfaces) into a single tile. When there's a choice, pick the
+     * address on the requesting client's subnet so the user sees the IP they
+     * already know their SageTV by.
+     */
+    private static List<Server> filterAndDedupe(List<Server> raw, String clientIp) {
+        // 1. Drop pure loopback replies — they're useless as a display value,
+        //    and the bridge always sees at least one when it broadcasts on
+        //    the loopback interface. If every reply happens to be loopback
+        //    (e.g. all-localhost dev setup), keep one as a last resort.
+        List<Server> nonLoop = new ArrayList<>();
+        for (Server s : raw) {
+            if (!isLoopback(s.host)) nonLoop.add(s);
+        }
+        if (nonLoop.isEmpty() && !raw.isEmpty()) {
+            return Collections.singletonList(raw.get(0));
+        }
+
+        // 2. Group by GUID (fallback: hostname if no guid, so pre-GUID SageTVs
+        //    still work).
+        Map<String, List<Server>> byKey = new LinkedHashMap<>();
+        for (Server s : nonLoop) {
+            String key = s.guid != null ? "guid:" + s.guid : "host:" + s.host;
+            byKey.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
+        }
+
+        // 3. For each group pick the entry whose host shares the longest
+        //    /8/16/24 prefix with the client, merging sources across the group.
+        List<Server> out = new ArrayList<>(byKey.size());
+        for (List<Server> group : byKey.values()) {
+            Server best = group.get(0);
+            int bestScore = subnetScore(best.host, clientIp);
+            for (int i = 1; i < group.size(); i++) {
+                int score = subnetScore(group.get(i).host, clientIp);
+                if (score > bestScore) {
+                    best = group.get(i);
+                    bestScore = score;
+                }
+            }
+            for (Server other : group) {
+                if (other != best) best.sources.addAll(other.sources);
+            }
+            out.add(best);
+        }
+        out.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+        return out;
+    }
+
+    private static boolean isLoopback(String host) {
+        return host != null && (host.startsWith("127.") || "::1".equals(host));
+    }
+
+    /** IPv4 shared-prefix octet count vs the client's IP (0..4). */
+    private static int subnetScore(String serverIp, String clientIp) {
+        if (serverIp == null || clientIp == null) return 0;
+        String[] a = serverIp.split("\\.");
+        String[] b = clientIp.split("\\.");
+        if (a.length != 4 || b.length != 4) return 0;
+        int match = 0;
+        for (int i = 0; i < 4; i++) {
+            if (!a[i].equals(b[i])) break;
+            match++;
+        }
+        return match;
     }
 
     /**

@@ -78,7 +78,7 @@ tizen install -n <PACKAGE_FILE.wgt> -t <TV_IP>
 Example:
 
 ```powershell
-tizen install -n SageTVMiniClient.wgt -t 192.168.0.75
+tizen install -n SageTVMiniClient.wgt -t 192.0.2.10
 ```
 
 ## 7) Launch The App

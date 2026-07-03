@@ -50,9 +50,45 @@ const activeTranscodes = new Map();
 
 // ── LAN discovery cache ────────────────────────────────────
 // The UDP probe takes ~2 s. Cache results briefly so a stream of clients
-// hitting /discover in quick succession share one scan.
+// hitting /discover in quick succession share one scan. A background
+// scanner keeps this cache warm so /discover always returns instantly
+// with a near-realtime list — the PWA never has to wait for a probe.
 const DISCOVER_TTL_MS = 30_000;
+const AUTO_SCAN_INTERVAL_MS = 30_000;
+const AUTO_SCAN_TIMEOUT_MS = 2000;
 let _discoverCache = { at: 0, data: null, inflight: null };
+let _autoScanTimer = null;
+
+async function _runScan(timeoutMs) {
+  if (_discoverCache.inflight) return _discoverCache.inflight;
+  _discoverCache.inflight = discoverServers({ timeoutMs })
+    .then((data) => {
+      _discoverCache = { at: Date.now(), data, inflight: null };
+      return data;
+    })
+    .catch((err) => {
+      _discoverCache.inflight = null;
+      throw err;
+    });
+  return _discoverCache.inflight;
+}
+
+function startAutoDiscovery() {
+  if (_autoScanTimer) return;
+  const tick = () => {
+    _runScan(AUTO_SCAN_TIMEOUT_MS)
+      .then((servers) => {
+        console.log(`[Discovery] auto-scan found ${servers.length} server${servers.length === 1 ? '' : 's'}`);
+      })
+      .catch((err) => {
+        console.warn('[Discovery] auto-scan failed:', err?.message || err);
+      });
+  };
+  // Initial scan on startup, then every AUTO_SCAN_INTERVAL_MS.
+  tick();
+  _autoScanTimer = setInterval(tick, AUTO_SCAN_INTERVAL_MS);
+  _autoScanTimer.unref?.();
+}
 
 async function handleDiscover(reqUrl, res) {
   const force = reqUrl.searchParams.get('force') === '1';
@@ -74,20 +110,8 @@ async function handleDiscover(reqUrl, res) {
     return;
   }
 
-  if (!_discoverCache.inflight) {
-    _discoverCache.inflight = discoverServers({ timeoutMs })
-      .then((data) => {
-        _discoverCache = { at: Date.now(), data, inflight: null };
-        return data;
-      })
-      .catch((err) => {
-        _discoverCache.inflight = null;
-        throw err;
-      });
-  }
-
   try {
-    const data = await _discoverCache.inflight;
+    const data = await _runScan(timeoutMs);
     sendJson(200, { servers: data, cached: false, age: 0 });
   } catch (err) {
     sendJson(500, { error: err?.message || String(err) });
@@ -394,4 +418,5 @@ server.listen(BRIDGE_PORT, () => {
   } else {
     console.log(`[Bridge] Pass ?host=IP&port=31099 in WebSocket URL to specify server`);
   }
+  startAutoDiscovery();
 });

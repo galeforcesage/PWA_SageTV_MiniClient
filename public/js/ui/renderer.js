@@ -26,6 +26,10 @@ export class CanvasRenderer {
     this.width = canvas.width;
     this.height = canvas.height;
     this._isIOS = !!options.isIOS;
+    this._isTizen = !!options.isTizen;
+    // Tizen TV WebViews share iOS's weakness with concurrent ImageBitmap
+    // promotions during menu paint bursts. Group both under one flag.
+    this._slowGpu = this._isIOS || this._isTizen;
 
     // Image cache: handle → { bitmap: ImageBitmap|HTMLCanvasElement, width, height }
     this.images = new Map();
@@ -672,10 +676,10 @@ export class CanvasRenderer {
       bitmap: null, canvas, ctx, width: destWidth, height: destHeight, loaded: true, _finalized: true
     });
     this._currentCachePixels += destWidth * destHeight;
-    // Skip async ImageBitmap promotion on iOS — these are transient scaled
-    // posters and the concurrent burst stalls menu paint. Canvas works fine
-    // as a drawImage source.
-    if (!this._isIOS) {
+    // Skip async ImageBitmap promotion on slow-GPU targets (iOS, Tizen TV).
+    // These are transient scaled posters and the concurrent burst stalls menu
+    // paint. Canvas works fine as a drawImage source.
+    if (!this._slowGpu) {
       this._promoteCanvasToBitmap(destHandle, canvas);
     }
   }
@@ -876,7 +880,11 @@ export class CanvasRenderer {
     if (!ctx) return ctx;
     try {
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'low';
+      // 'high' produces materially sharper text/icons when SageTV downscales
+      // large source assets into the render canvas — the CPU cost is small
+      // relative to the perceptual quality gain, especially on TVs where the
+      // final canvas is upscaled again by the display.
+      ctx.imageSmoothingQuality = 'high';
     } catch { /* older browsers */ }
     try { ctx.textBaseline = 'top'; } catch { /* ignore */ }
     return ctx;

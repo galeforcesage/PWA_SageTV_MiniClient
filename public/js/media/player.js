@@ -35,7 +35,18 @@ export class MediaPlayer extends EventTarget {
     this._bridgeFilePath = null;
     this._bridgeAbortController = null;
     this._bridgeSessionId = 'pwa-' + Date.now();
+    // When pull-mode falls back to bridge transcode after a native decode
+    // error, remember the absolute file path + hostname so we can retry.
+    this._pullFilePath = null;
+    this._pullHostname = null;
+    this._pullFallbackTried = false;
     this._bridgeTimeOffsetMs = 0;  // offset added to video.currentTime for seek
+    // Absolute http(s) base of the bridge (e.g. "http://192.0.2.10:8100").
+    // Set by SessionManager after the WS bridge URL is resolved. Required for
+    // /transcode fetches to work when the PWA is served from a non-http origin
+    // (Tizen wgt, iOS home-screen install without a service worker), where a
+    // root-relative URL would resolve against file:// and fail.
+    this._bridgeBase = '';
 
     // Bandwidth tracking (bytes received per 1-second window)
     this._bwBytesWindow = 0;
@@ -76,6 +87,11 @@ export class MediaPlayer extends EventTarget {
     this._managedStartStreamingHandler = null;
     this._managedEndStreamingHandler = null;
     this._playbackPrimed = false;
+    // Whether the user (or a protocol MUTE command) has explicitly muted.
+    // The <video> element starts with the `muted` attribute so browsers /
+    // TV WebViews allow autoplay; once playback starts we auto-unmute unless
+    // this flag is set.
+    this._userMuted = false;
 
     // Runtime telemetry state
     this._telemetrySequence = 0;
@@ -95,6 +111,13 @@ export class MediaPlayer extends EventTarget {
 
     this.video.addEventListener('playing', () => {
       this.state = PlayerState.PLAY;
+      // The <video> element is authored with `muted autoplay` so browsers /
+      // TV WebViews allow the initial play() without a user gesture. Once
+      // playback is actually running the user expects sound, so unmute
+      // unless the user (or a protocol command) explicitly asked for mute.
+      if (!this._userMuted && this.video.muted) {
+        try { this.video.muted = false; } catch { /* ignore */ }
+      }
     });
 
     this.video.addEventListener('pause', () => {
@@ -117,6 +140,25 @@ export class MediaPlayer extends EventTarget {
         console.debug('[MediaPlayer] Ignoring video error during bridge mode:', this.video.error?.message);
         return;
       }
+      // Pull-mode native decode failed (Tizen's canPlayType sometimes lies
+      // about MPEG-PS / VC-1 etc.). Retry once via the bridge transcode
+      // servlet, which remuxes / transcodes to fMP4 that MSE can consume.
+      if (!this.pushMode && this._pullFilePath && !this._pullFallbackTried) {
+        this._pullFallbackTried = true;
+        const path = this._pullFilePath;
+        const host = this._pullHostname;
+        console.warn(`[MediaPlayer] Native pull decode failed (code=${this.video.error?.code} msg=${this.video.error?.message}); retrying via bridge transcode for ${path}`);
+        this._loadBridgeMode(path, host).catch((err) => {
+          console.error('[MediaPlayer] Bridge transcode fallback failed:', err);
+          this.state = PlayerState.STOPPED;
+          this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
+            mode: 'pull->bridge',
+            code: this.video.error?.code || null,
+            message: (err && err.message) || 'bridge fallback failed',
+          });
+        });
+        return;
+      }
       console.error('[MediaPlayer] Video error:', this.video.error);
       this.state = PlayerState.STOPPED;
       this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
@@ -133,6 +175,10 @@ export class MediaPlayer extends EventTarget {
 
   _isIOS() {
     return this.platformDetector?.isIOS?.() === true;
+  }
+
+  _isTizen() {
+    return this.platformDetector?.isTizen?.() === true;
   }
 
   _getMediaSourceClass() {
@@ -236,19 +282,52 @@ export class MediaPlayer extends EventTarget {
 
   /**
    * PULL mode: client fetches media via URL.
+   *
+   * URL forms we handle (matching fork client's `BaseMediaPlayerImpl.load()`):
+   *   http(s)://…            — HLS or direct HTTP; play as-is.
+   *   file:///abs/path       — local file path from server; route via bridge /rawmedia.
+   *   stv://<host>/abs/path  — SageTV pull URI (equivalent to abs path); route via bridge /rawmedia.
+   *   /abs/path              — bare absolute path (server's default OPENURL form); same as stv://.
+   *
+   * A browser cannot open raw TCP sockets so we cannot speak SageTV's
+   * port 7818 pull protocol directly. Instead the bridge (which runs on
+   * the SageTV host) exposes a byte-range HTTP endpoint that streams the
+   * raw file — the browser's native decoder handles playback (needed for
+   * DIRECT_PLAY of HEVC/H.264 MP4 sources where transcoding would waste
+   * CPU and lose quality).
    */
   async _loadPullMode(url, hostname) {
     this.pushMode = false;
     let mediaUrl = url;
+    let absPath = null;
 
-    // Convert file:// to HTTP stream via SageTV server
-    if (url.startsWith('file://')) {
+    const asRawMedia = (p) => {
+      const base = (this._bridgeBase || '').replace(/\/$/, '');
+      return `${base}/rawmedia?path=${encodeURIComponent(p)}`;
+    };
+
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      // Already an HTTP URL (e.g. HLS playlist) — play as-is.
+      mediaUrl = url;
+    } else if (url.startsWith('file://')) {
       const path = url.substring(7);
-      mediaUrl = `http://${hostname}:7818${path}`;
+      absPath = path.startsWith('/') ? path : '/' + path;
+      mediaUrl = asRawMedia(absPath);
     } else if (url.startsWith('stv://')) {
-      const path = url.substring(6);
-      mediaUrl = `http://${hostname}:7818/${path}`;
+      const rest = url.substring(6);
+      const slash = rest.indexOf('/');
+      const path = slash >= 0 ? rest.substring(slash) : '/';
+      absPath = path.replace(/^\/+/, '/');
+      mediaUrl = asRawMedia(absPath);
+    } else if (url.startsWith('/')) {
+      absPath = url;
+      mediaUrl = asRawMedia(url);
     }
+
+    // Remember for the transcode fallback (see 'error' handler above).
+    this._pullFilePath = absPath;
+    this._pullHostname = hostname;
+    this._pullFallbackTried = false;
 
     console.log(`[MediaPlayer] PULL mode: ${mediaUrl}`);
 
@@ -256,7 +335,7 @@ export class MediaPlayer extends EventTarget {
     if (mediaUrl.includes('.m3u8') || mediaUrl.includes('format=hls')) {
       await this._loadHLS(mediaUrl);
     } else {
-      // Direct URL playback
+      // Direct URL playback — native decode.
       this.video.src = mediaUrl;
       this.video.load();
     }
@@ -338,8 +417,9 @@ export class MediaPlayer extends EventTarget {
     }
     this._bridgeAbortController = new AbortController();
 
-    // Build bridge URL — bridge is on same origin (same host:port as PWA)
-    const bridgeUrl = `/transcode?file=${encodeURIComponent(filePath)}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    // Build bridge URL — absolute path against the resolved bridge base so
+    // the fetch works from non-http origins (Tizen wgt file://, etc).
+    const bridgeUrl = `${this._bridgeBase}/transcode?file=${encodeURIComponent(filePath)}&seek=${seekSec}&session=${this._bridgeSessionId}`;
     console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
 
     try {
@@ -761,12 +841,33 @@ export class MediaPlayer extends EventTarget {
     const playPromise = this.video.play();
     if (playPromise) {
       playPromise.catch((err) => {
-        // Autoplay blocked - show play button overlay
         console.warn('[MediaPlayer] Play blocked:', err.message);
+        // Tizen TV WebViews sometimes reject the first play() promise even
+        // for muted <video autoplay>. Retry a few times before showing the
+        // manual-unblock overlay (which is unreachable with a TV remote).
+        if (this._isTizen()) {
+          this._retryTizenPlay(0);
+          return;
+        }
         this.dispatchEvent(new CustomEvent('playblocked'));
       });
     }
     this.state = PlayerState.PLAY;
+  }
+
+  _retryTizenPlay(attempt) {
+    if (attempt >= 4) {
+      this.dispatchEvent(new CustomEvent('playblocked'));
+      return;
+    }
+    setTimeout(() => {
+      if (!this.video || this.state === PlayerState.STOPPED) return;
+      this.video.muted = true;
+      const p = this.video.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => this._retryTizenPlay(attempt + 1));
+      }
+    }, 200 * (attempt + 1));
   }
 
   pause() {
@@ -795,7 +896,7 @@ export class MediaPlayer extends EventTarget {
     }
     if (this.bridgeMode && this._bridgeSessionId) {
       // Fire-and-forget stop request to bridge
-      fetch(`/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
+      fetch(`${this._bridgeBase}/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
     }
     this.bridgeMode = false;
     this._bridgeFilePath = null;
@@ -975,7 +1076,8 @@ export class MediaPlayer extends EventTarget {
   }
 
   setMute(muted) {
-    this.video.muted = muted;
+    this._userMuted = !!muted;
+    this.video.muted = !!muted;
   }
 
   getVolume() {
@@ -1191,6 +1293,17 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
+   * Set the absolute http(s) base URL of the bridge (e.g. "http://192.0.2.10:8100").
+   * Must be called before playback begins so /transcode fetches build absolute URLs.
+   * An empty base falls back to same-origin (legacy behavior for browsers that
+   * loaded the PWA directly from the bridge).
+   */
+  setBridgeBase(base) {
+    if (typeof base !== 'string') { this._bridgeBase = ''; return; }
+    this._bridgeBase = base.replace(/\/$/, '');
+  }
+
+  /**
    * Evict old data from the source buffer when quota is exceeded.
    */
   _evictBuffer() {
@@ -1376,12 +1489,14 @@ export class MediaPlayer extends EventTarget {
     this.video.style.top = `${destRect.y * scaleY + offsetY}px`;
     this.video.style.width = `${destRect.width * scaleX}px`;
     this.video.style.height = `${destRect.height * scaleY}px`;
-    this.video.style.objectFit = 'fill';
+    // Preserve source aspect ratio — don't stretch to fill server destRect.
+    this.video.style.objectFit = 'contain';
   }
 
   setVideoAdvancedAspect(aspectMode) {
     switch (aspectMode) {
       case 'Fill':
+        // 'Fill' = stretch to destRect (source AR discarded).
         this.video.style.objectFit = 'fill';
         break;
       case '4x3':
