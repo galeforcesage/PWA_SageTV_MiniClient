@@ -1227,6 +1227,15 @@ export class MiniClientConnection extends EventTarget {
         console.log(`[Connection] Reporting GFX_RESOLUTION = ${res}`);
         return res;
       }
+      case 'GFX_FIXED_PAR':
+        // Returning a non-empty PAR sets iPhoneMode=true server-side, which
+        // routes ClientProfileManager.autoDetectProfile() to the `pwa_safe`
+        // profile (MP4/H.264/AAC only). Without this the server picks
+        // `desktop_hevc_optin`, whose whitelist includes MPEG2-VIDEO — that
+        // profile's authoritative override then force-pushes MPEG-PS as-is
+        // and our mux.js transmuxer (H.264-only) stalls. `1.0` = square
+        // pixels, correct for modern square-pixel displays.
+        return '1.0';
       case 'GFX_SUPPORTED_RESOLUTIONS':
         return `${this.width}x${this.height}`;
       case 'GFX_OFFLINE_IMAGE_CACHE':
@@ -1235,9 +1244,10 @@ export class MiniClientConnection extends EventTarget {
         return ClientProperty.ADVANCED_IMAGE_CACHING;
       case 'INPUT_DEVICES':
         return ClientProperty.INPUT_DEVICES;
-      case 'STREAMING_MODE':
+      case 'STREAMING_MODE': {
         if (this._ngNegotiated) return 'dynamic';
         return pref('streaming_mode', 'fixed');
+      }
       case 'STREAMING_PROTOCOLS':
         return ClientProperty.STREAMING_PROTOCOLS;
       case 'VIDEO_CODECS':
@@ -2315,6 +2325,14 @@ export class MiniClientConnection extends EventTarget {
           let urlString = '';
           if (strLen > 1) {
             urlString = new TextDecoder('iso-8859-1').decode(data.subarray(4, 4 + strLen - 1));
+          }
+          // Server's HTTPLSServer emits URLs with a literal "HOSTNAME"
+          // placeholder (see sage/MiniPlayer.java: `ipPort = "HOSTNAME"`) —
+          // MCSR shares the socket with HTTPLSServer, so the correct target
+          // is our current SageTV host+port.
+          if (urlString.includes('HOSTNAME')) {
+            const hostPort = `${this.serverHost}:${this.serverPort}`;
+            urlString = urlString.split('HOSTNAME').join(hostPort);
           }
           const isPush = urlString.startsWith('push:');
           const isStv = urlString.startsWith('stv://');
