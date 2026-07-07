@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'sagex.miniclient.pwa'
-version = '1.0.0.1'
+version = '1.0.0.2'
 
 // Compile against the Java 8 API surface (not just Java 8 bytecode). `--release 8`
 // makes javac reject any Java 9+ API (e.g. Set.of, Process.pid, String.isBlank)

@@ -70,7 +70,11 @@ any change** — several "obvious" fixes are either already done or unsafe.
     already honors UNLOADIMAGE.
   Both require touching the server GFX protocol handler (`MiniClientSageRenderer`).
   Pair with the PWA0 metrics to confirm the accounting-leak fix isn't already
-  sufficient before investing.
+  sufficient before investing. **Blocked where Sage.jar is frozen** (e.g. the
+  live `sagetv-mine` image, which only accepts plugin updates): the server-side
+  change can't be deployed there, so only the client-side accounting-leak fix
+  applies on those hosts. This is the highest-value *future* item once a
+  server-writable target is available.
 
 ### Not Recommended
 - **PWA3 — Unilateral client-side LRU eviction (no server change).** Protocol-
@@ -106,22 +110,27 @@ any change** — several "obvious" fixes are either already done or unsafe.
 - **Server-cooperative cache** — see *Recommended → PWA3* above; pursue if PWA0
   metrics still show image re-fetch thrash after the accounting-leak fix.
 
-## Java 8 / Plugin-Repo Conformance
+## Java 8 / Plugin-Repo Conformance — Done (v1.0.0.2)
 
-The plugin is intended for the OpenSageTV V9 plugin repo, whose entire catalog
-tops out at `<JVM/>` MinVersion `1.8` (web, jetty, sagex-api). The PWA plugin
-currently declares JVM `11` and contains one Java 9 API call, so it neither
-installs on a stock Java 8 SageTV V9 server nor conforms to the repo convention.
-To align (all three required together):
+The plugin targets the OpenSageTV V9 plugin repo, whose entire catalog tops out
+at `<JVM/>` MinVersion `1.8` (web, jetty, sagex-api). The plugin previously
+declared JVM `11` and used Java 9 APIs, so it neither installed on a stock
+Java 8 SageTV V9 server nor conformed to the repo convention. Fixed:
 
-- **Manifest** — change `<JVM/>` MinVersion `11` → `1.8` in
-  `plugin/pwa-miniclient.xml` and `pwa-miniclient-dev.xml` (Core stays `9.0.0`,
-  matching jetty/web/sagex-api).
-- **Code** — replace `Set.of(...)` in
-  `bridge-java/…/ServerInfoServlet.java` (Java 9 API → `NoSuchMethodError` on
-  Java 8) with a Java 8 form, e.g. `new HashSet<>(Arrays.asList(...))`.
-- **Build hardening** — replace `sourceCompatibility/targetCompatibility` in
-  `bridge-java/build.gradle` with `options.release = 8` so javac rejects any
-  future Java 9+ API at compile time (guarantees both bytecode version and API
-  surface stay Java 8).
-- Requires a `pluginRelease` rebuild and refreshed manifest MD5s afterward.
+- **Manifest** — `<JVM/>` MinVersion `11` → `1.8` in `plugin/pwa-miniclient.xml`
+  and `pwa-miniclient-dev.xml` (Core stays `9.0.0`, matching jetty/web/sagex-api).
+- **Code** — replaced `Set.of(...)` in `ServerInfoServlet.java` with a Java 8
+  `new HashSet<>(Arrays.asList(...))` form.
+- **Build hardening** — `options.release = 8` in `bridge-java/build.gradle`
+  rejects Java 9+ APIs at compile time. This immediately caught a *second* slip
+  it would otherwise have missed: `Process.pid()` (Java 9) in
+  `TranscodeManager.java`, now removed.
+- **Verified** — shadow-jar bytecode major version 52 (Java 8).
+- **Released** — cut as **v1.0.0.2**: rebuilt release ZIPs uploaded to the
+  GitHub release, and `plugin/pwa-miniclient.xml` package URLs + MD5s refreshed
+  to point at the v1.0.0.2 assets (was still pointing at v1.0.0.1). The manifest
+  is now installable from the repo.
+
+Remaining (repo publishing): open a PR to `OpenSageTV/sagetv-plugin-repo` adding
+`plugin/pwa-miniclient.xml` under `plugins/` so it appears in the in-app plugin
+browser.
