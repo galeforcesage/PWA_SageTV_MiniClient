@@ -554,17 +554,21 @@ export class MediaPlayer extends EventTarget {
       this._hls.on(window.Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
           console.error('[MediaPlayer] HLS fatal error:', data.type, data.details);
-          if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-            this._hls.startLoad();
-          } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-            this._hls.recoverMediaError();
-          }
           if (!this._hlsFatalFallbackTried) {
+            // First fatal: skip hls.js's own recover paths (we're about to
+            // destroy the instance anyway) and go straight to fallback.
             this._hlsFatalFallbackTried = true;
             this._attemptHlsFatalFallback(url).catch((err) => {
               console.error('[MediaPlayer] HLS fallback failed:', err);
             });
             return;
+          }
+          // Fallback already exhausted. Try hls.js internal recovery as a
+          // last-ditch effort before surfacing the failure.
+          if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+            this._hls.startLoad();
+          } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+            this._hls.recoverMediaError();
           }
           this._emitPlaybackFailure('HLS_FATAL_ERROR', {
             mode: 'pull-hls',
