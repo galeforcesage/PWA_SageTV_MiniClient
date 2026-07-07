@@ -40,6 +40,7 @@ export class MediaPlayer extends EventTarget {
     this._pullFilePath = null;
     this._pullHostname = null;
     this._pullFallbackTried = false;
+    this._hlsFatalFallbackTried = false;
     this._bridgeTimeOffsetMs = 0;  // offset added to video.currentTime for seek
     // Absolute http(s) base of the bridge (e.g. "http://192.0.2.10:8100").
     // Set by SessionManager after the WS bridge URL is resolved. Required for
@@ -328,6 +329,7 @@ export class MediaPlayer extends EventTarget {
     this._pullFilePath = absPath;
     this._pullHostname = hostname;
     this._pullFallbackTried = false;
+    this._hlsFatalFallbackTried = false;
 
     console.log(`[MediaPlayer] PULL mode: ${mediaUrl}`);
 
@@ -556,6 +558,13 @@ export class MediaPlayer extends EventTarget {
             this._hls.startLoad();
           } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
             this._hls.recoverMediaError();
+          }
+          if (!this._hlsFatalFallbackTried) {
+            this._hlsFatalFallbackTried = true;
+            this._attemptHlsFatalFallback(url).catch((err) => {
+              console.error('[MediaPlayer] HLS fallback failed:', err);
+            });
+            return;
           }
           this._emitPlaybackFailure('HLS_FATAL_ERROR', {
             mode: 'pull-hls',
@@ -833,6 +842,35 @@ export class MediaPlayer extends EventTarget {
     };
 
     return tryLoad(0);
+  }
+
+  async _attemptHlsFatalFallback(originalUrl) {
+    if (this._hls) {
+      try { this._hls.destroy(); } catch { /* ignore */ }
+      this._hls = null;
+    }
+
+    // First fallback: native playback path if browser advertises support.
+    const canUseNativeHls = !!this.video.canPlayType('application/vnd.apple.mpegurl');
+    if (canUseNativeHls) {
+      console.warn('[MediaPlayer] Retrying HLS via native video element');
+      this.video.src = originalUrl;
+      this.video.load();
+      return;
+    }
+
+    // Second fallback: bridge transcode for file-backed pull sessions.
+    if (this._pullFilePath && !this._pullFallbackTried) {
+      this._pullFallbackTried = true;
+      console.warn(`[MediaPlayer] Retrying HLS failure via bridge transcode for ${this._pullFilePath}`);
+      await this._loadBridgeMode(this._pullFilePath, this._pullHostname);
+      return;
+    }
+
+    this._emitPlaybackFailure('HLS_FATAL_ERROR', {
+      mode: 'pull-hls',
+      details: 'No native or bridge fallback available',
+    });
   }
 
   // ── Playback Controls ─────────────────────────────────────

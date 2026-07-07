@@ -2782,10 +2782,11 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _onDisconnect(reason, closeCode) {
-    // If server sent DEINIT or bridge closed cleanly (code 1000/1001),
-    // go straight to connect screen — no reconnect
-    if (this._exitRequested || closeCode === 1000 || closeCode === 1001) {
-      console.log(`[Connection] Clean disconnect (exit=${this._exitRequested}, code=${closeCode}) — skipping reconnect`);
+    // Only an explicit exit request should hard-stop reconnect logic.
+    // Clean close codes (1000/1001) can occur during transient media
+    // restarts; treat those as reconnectable unless exit was requested.
+    if (this._exitRequested) {
+      console.log(`[Connection] Exit requested (code=${closeCode}) — skipping reconnect`);
       this.alive = false;
       this._stopKeepalive();
       this._stopBandwidthTracking();
