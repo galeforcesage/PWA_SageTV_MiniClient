@@ -22,7 +22,7 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
 
   <Dependency>
     <JVM/>
-    <MinVersion>11</MinVersion>
+    <MinVersion>1.8</MinVersion>
   </Dependency>
 
   <PluginType>Standard</PluginType>
@@ -30,13 +30,13 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
   <Package>
     <PackageType>JAR</PackageType>
     <Location>file:///opt/sagetv/server/SageTVPluginsDev.d/pwa-miniclient-jar-1.0.0.1.zip</Location>
-    <MD5>585a590ed430c89599c8b3118b376df7</MD5>
+    <MD5>d4a7638854383d12dd303d6ef812d691</MD5>
   </Package>
 
   <Package>
     <PackageType>System</PackageType>
     <Location>file:///opt/sagetv/server/SageTVPluginsDev.d/pwa-miniclient-web-1.0.0.1.zip</Location>
-    <MD5>96af5becc6d910719900a3b913fc2dee</MD5>
+    <MD5>a30c528796b106a3c74231972df5349d</MD5>
   </Package>
 
   <ImplementationClass>sagex.miniclient.pwa.BridgePlugin</ImplementationClass>

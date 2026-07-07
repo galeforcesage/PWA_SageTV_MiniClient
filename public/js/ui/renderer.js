@@ -22,14 +22,21 @@ export class CanvasRenderer {
    */
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.ctx = this._configureCtx(canvas.getContext('2d', { alpha: true }));
-    this.width = canvas.width;
-    this.height = canvas.height;
     this._isIOS = !!options.isIOS;
     this._isTizen = !!options.isTizen;
     // Tizen TV WebViews share iOS's weakness with concurrent ImageBitmap
     // promotions during menu paint bursts. Group both under one flag.
     this._slowGpu = this._isIOS || this._isTizen;
+    // PWA5: constrained WebKit/Tizen GPUs pay a real per-blit cost for the
+    // 'high' resampler when SageTV downscales large source art. Default those
+    // targets to 'low'; desktop/Android keep 'high' for sharper downscales.
+    // Overridable via options.smoothingQuality ('low'|'medium'|'high').
+    this._smoothingQuality = options.smoothingQuality
+      || (this._slowGpu ? 'low' : 'high');
+
+    this.ctx = this._configureCtx(canvas.getContext('2d', { alpha: true }));
+    this.width = canvas.width;
+    this.height = canvas.height;
 
     // Image cache: handle → { bitmap: ImageBitmap|HTMLCanvasElement, width, height }
     this.images = new Map();
@@ -65,6 +72,11 @@ export class CanvasRenderer {
     const cacheMB = Number.isFinite(options.maxCacheMB) ? options.maxCacheMB : 128;
     this._maxCachePixels = Math.max(8, cacheMB) * 1024 * 1024 / 4;
     this._currentCachePixels = 0;
+
+    // Per-frame draw counters (populated only when perf instrumentation reads
+    // them via getCacheStats(); reset each startFrame()).
+    this._frameDrawImage = 0;
+    this._frameScaledDraw = 0;
 
     // Pending async image load tracking
     this._pendingImageLoads = 0;
@@ -121,6 +133,8 @@ export class CanvasRenderer {
     this._frameStarted = true;
     this.activeCtx = this.backCtx;
     this.targetSurface = 0;
+    this._frameDrawImage = 0;
+    this._frameScaledDraw = 0;
   }
 
   flipBuffer() {
@@ -521,8 +535,18 @@ export class CanvasRenderer {
       this._currentCachePixels -= img.width * img.height;
       this.images.delete(handle);
     }
-    // Also check surfaces
-    this.surfaces.delete(handle);
+    // Surfaces also consume the shared pixel budget (added in createSurface).
+    // Previously their pixels were never subtracted here, so every
+    // create/destroy surface cycle (menu transitions, animated posters) leaked
+    // the counter upward until canCacheImage() returned false permanently —
+    // after which every poster round-tripped from the server (the multi-second
+    // per-row menu lag). Subtract them on delete to keep the budget honest.
+    const surf = this.surfaces.get(handle);
+    if (surf) {
+      this._currentCachePixels -= surf.width * surf.height;
+      this.surfaces.delete(handle);
+    }
+    if (this._currentCachePixels < 0) this._currentCachePixels = 0;
   }
 
   /**
@@ -562,6 +586,10 @@ export class CanvasRenderer {
     const opaqueOverwrite = height < 0;
     const absW = Math.abs(width);
     const absH = Math.abs(height);
+
+    // Per-frame draw accounting for perf instrumentation (cheap int adds).
+    this._frameDrawImage++;
+    if (srcw !== absW || srch !== absH) this._frameScaledDraw++;
 
     const blendA = ((blend >>> 24) & 0xFF) / 255;
     const blendR = (blend >>> 16) & 0xFF;
@@ -880,11 +908,12 @@ export class CanvasRenderer {
     if (!ctx) return ctx;
     try {
       ctx.imageSmoothingEnabled = true;
-      // 'high' produces materially sharper text/icons when SageTV downscales
-      // large source assets into the render canvas — the CPU cost is small
-      // relative to the perceptual quality gain, especially on TVs where the
-      // final canvas is upscaled again by the display.
-      ctx.imageSmoothingQuality = 'high';
+      // PWA5: 'high' produces sharper downscales on desktop/Android where the
+      // GPU resampler is cheap. On WebKit (iPad) and Tizen TVs the 'high'
+      // resampler is a measurable per-blit cost during menu paint bursts, so
+      // those targets default to 'low' (set via this._smoothingQuality in the
+      // constructor). Overridable with options.smoothingQuality.
+      ctx.imageSmoothingQuality = this._smoothingQuality || 'high';
     } catch { /* older browsers */ }
     try { ctx.textBaseline = 'top'; } catch { /* ignore */ }
     return ctx;
@@ -895,5 +924,41 @@ export class CanvasRenderer {
    */
   getScreenSize() {
     return { width: this.width, height: this.height };
+  }
+
+  /**
+   * Snapshot of image/surface cache state for perf instrumentation (PWA0).
+   * Computed on demand (only called once per frame when perf is enabled), so
+   * it does not add hot-path overhead. Pixel→byte uses 4 bytes/pixel (RGBA).
+   *
+   * evictionsThisFrame/evictionsTotal are always 0: this client never evicts
+   * cached images unilaterally, because the SageTV server owns handle
+   * lifecycle (it assumes any handle it received stays cached until it sends
+   * UNLOADIMAGE). The fields are kept for schema stability.
+   */
+  getCacheStats() {
+    let imagePixels = 0;
+    for (const img of this.images.values()) imagePixels += img.width * img.height;
+    let surfacePixels = 0;
+    for (const s of this.surfaces.values()) surfacePixels += s.width * s.height;
+    const usedPixels = imagePixels + surfacePixels;
+    return {
+      imageCount: this.images.size,
+      surfaceCount: this.surfaces.size,
+      imagePixels,
+      surfacePixels,
+      usedPixels,
+      budgetPixels: this._maxCachePixels,
+      usedBytes: usedPixels * 4,
+      imageBytes: imagePixels * 4,
+      surfaceBytes: surfacePixels * 4,
+      budgetBytes: this._maxCachePixels * 4,
+      accountedPixels: this._currentCachePixels,
+      pendingImageLoads: this._pendingImageLoads,
+      drawImageThisFrame: this._frameDrawImage,
+      scaledDrawsThisFrame: this._frameScaledDraw,
+      evictionsThisFrame: 0,
+      evictionsTotal: 0,
+    };
   }
 }

@@ -6,9 +6,13 @@ plugins {
 group = 'sagex.miniclient.pwa'
 version = '1.0.0.1'
 
-java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+// Compile against the Java 8 API surface (not just Java 8 bytecode). `--release 8`
+// makes javac reject any Java 9+ API (e.g. Set.of, Process.pid, String.isBlank)
+// at COMPILE time, so the plugin can't accidentally break on a stock Java 8
+// SageTV V9 server. This supersedes sourceCompatibility/targetCompatibility
+// (which only pin the bytecode version, not the API surface). Requires JDK 9+.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
 }
 
 repositories {

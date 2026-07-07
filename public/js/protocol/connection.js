@@ -22,6 +22,7 @@ import {
 } from './constants.js';
 import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
+import { perf } from '../perf/perf-monitor.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -1678,17 +1679,19 @@ export class MiniClientConnection extends EventTarget {
              (cmddata[off + 3] & 0xFF);
     };
 
-    // Track commands per frame for diagnostics
-    const cmdName = GFXCMD_NAMES[cmd] || `CMD${cmd}`;
-    if (this._frameCmdSummary) {
-      this._frameCmdSummary[cmdName] = (this._frameCmdSummary[cmdName] || 0) + 1;
-      // Verbose logging: log every command within the frame for debugging
-      if (this._verboseGfxLog) {
-        console.log(`[GFX] ${cmdName} len=${len}`);
-      }
-    } else {
-      // Log commands outside STARTFRAME..FLIPBUFFER (pre-frame setup)
-      if (cmd !== GFXCMD.STARTFRAME) {
+    // Per-command diagnostics — only when perf instrumentation is enabled
+    // (?perf=1 / localStorage sagetv.perf=1). Off by default: no per-command
+    // string work or console output in the hot path.
+    if (perf.enabled) {
+      const cmdName = GFXCMD_NAMES[cmd] || `CMD${cmd}`;
+      perf.countCommand(cmdName);
+      if (this._frameCmdSummary) {
+        this._frameCmdSummary[cmdName] = (this._frameCmdSummary[cmdName] || 0) + 1;
+        if (this._verboseGfxLog) {
+          console.log(`[GFX] ${cmdName} len=${len}`);
+        }
+      } else if (cmd !== GFXCMD.STARTFRAME) {
+        // Log commands outside STARTFRAME..FLIPBUFFER (pre-frame setup)
         if (!this._preFrameLogged) this._preFrameLogged = new Set();
         if (!this._preFrameLogged.has(cmdName)) {
           this._preFrameLogged.add(cmdName);
@@ -1714,7 +1717,13 @@ export class MiniClientConnection extends EventTarget {
 
       case GFXCMD.STARTFRAME:
         this.renderer.startFrame();
-        this._frameCmdSummary = {};
+        if (perf.enabled) {
+          perf.startFrame();
+          perf.noteWsBufferedStart(this.gfxSocket ? this.gfxSocket.bufferedAmount : 0);
+          this._frameCmdSummary = {};
+        } else {
+          this._frameCmdSummary = null;
+        }
         this.firstFrameStarted = true;
         if (!this._firstFrameFired) {
           this._firstFrameFired = true;
@@ -1725,41 +1734,41 @@ export class MiniClientConnection extends EventTarget {
       case GFXCMD.FLIPBUFFER: {
         hasret[0] = 1;
         this.renderer.flipBuffer();
-        // Log frame command summary
-        if (this._frameCmdSummary) {
-          const parts = Object.entries(this._frameCmdSummary)
-            .map(([k, v]) => `${k}:${v}`)
-            .join(' ');
-          console.log(`[Frame] ${parts}`);
-          // One-shot: log all loaded images on first frame
-          if (!this._firstFrameLogged) {
-            this._firstFrameLogged = true;
-            const imgs = [];
-            for (const [h, img] of this.renderer.images) {
-              imgs.push(`h${h}:${img.width}x${img.height}${img.loaded?'':'(pending)'}`);
+        // Frame-level perf summary — only when instrumentation is enabled.
+        if (perf.enabled) {
+          const cacheStats = this.renderer.getCacheStats ? this.renderer.getCacheStats() : null;
+          perf.endFrame(cacheStats, this.gfxSocket ? this.gfxSocket.bufferedAmount : undefined);
+          if (this._frameCmdSummary) {
+            // One-shot: log all loaded images on first frame
+            if (!this._firstFrameLogged) {
+              this._firstFrameLogged = true;
+              const imgs = [];
+              for (const [h, img] of this.renderer.images) {
+                imgs.push(`h${h}:${img.width}x${img.height}${img.loaded ? '' : '(pending)'}`);
+              }
+              console.log(`[Frame1] Images: ${imgs.join(', ')}`);
+              const surfs = [];
+              for (const [h, s] of this.renderer.surfaces) {
+                surfs.push(`h${h}:${s.width}x${s.height}`);
+              }
+              if (surfs.length) console.log(`[Frame1] Surfaces: ${surfs.join(', ')}`);
+              // Log DRAWTEXTURED summary for frame 1
+              if (this._dtLog) {
+                const dtParts = Object.entries(this._dtLog)
+                  .map(([k, v]) => `${k}(n=${v.count},blend=${v.blend},a=${v.ba},src=${v.sw}x${v.sh},dst=${v.firstDx},${v.firstDy},${v.firstDw}x${v.firstDh},surf=${v.surface})`)
+                  .join(', ');
+                console.log(`[Frame1] DrawTex: ${dtParts}`);
+              }
             }
-            console.log(`[Frame1] Images: ${imgs.join(', ')}`);
-            const surfs = [];
-            for (const [h, s] of this.renderer.surfaces) {
-              surfs.push(`h${h}:${s.width}x${s.height}`);
-            }
-            if (surfs.length) console.log(`[Frame1] Surfaces: ${surfs.join(', ')}`);
-            // Log DRAWTEXTURED summary for frame 1
-            if (this._dtLog) {
-              const dtParts = Object.entries(this._dtLog)
-                .map(([k, v]) => `${k}(n=${v.count},blend=${v.blend},a=${v.ba},src=${v.sw}x${v.sh},dst=${v.firstDx},${v.firstDy},${v.firstDw}x${v.firstDh},surf=${v.surface})`)
-                .join(', ');
-              console.log(`[Frame1] DrawTex: ${dtParts}`);
-            }
+            this._frameCmdSummary = null;
           }
-          this._frameCmdSummary = null;
-        }
-        // Turn off verbose logging after 3 frames
-        if (this._verboseGfxLog) {
-          this._verboseFrameCount = (this._verboseFrameCount || 0) + 1;
-          if (this._verboseFrameCount >= 10) {
-            this._verboseGfxLog = false;
-            console.log('[Connection] Verbose GFX logging disabled after 3 frames');
+          // Turn off verbose logging after 10 frames
+          if (this._verboseGfxLog) {
+            this._verboseFrameCount = (this._verboseFrameCount || 0) + 1;
+            if (this._verboseFrameCount >= 10) {
+              this._verboseGfxLog = false;
+              console.log('[Connection] Verbose GFX logging disabled after 10 frames');
+            }
           }
         }
         return 0;
@@ -1877,8 +1886,25 @@ export class MiniClientConnection extends EventTarget {
           const dx = readInt(0), dy = readInt(4), dw = readInt(8), dh = readInt(12);
           const sx = readInt(20), sy = readInt(24), sw = readInt(28), sh = readInt(32);
           let blend = readInt(36);
-          // One-shot: log first frame's DRAWTEXTURED calls
-          if (!this._firstFrameLogged) {
+          // Detect server rendering resolution from the first full-screen
+          // background draw. This is FUNCTIONAL (resizes the canvas) and must
+          // run regardless of perf instrumentation.
+          if (!this._serverResDetected && dx === 0 && dy === 0 && dw > 0 && dh > 0) {
+            const absDw = Math.abs(dw);
+            const absDh = Math.abs(dh);
+            if (absDw !== this.width || absDh !== this.height) {
+              console.log(`[Connection] Server renders at ${absDw}x${absDh}, canvas was ${this.width}x${this.height} — resizing`);
+              this.width = absDw;
+              this.height = absDh;
+              this.renderer.setSize(absDw, absDh);
+              this.dispatchEvent(new CustomEvent('resolutionchange', { detail: { width: absDw, height: absDh } }));
+            }
+            this._serverResDetected = true;
+          }
+          // One-shot DRAWTEXTURED diagnostic — perf-gated so it doesn't rebuild
+          // every frame when instrumentation is off (_firstFrameLogged only
+          // flips inside the perf-enabled FLIPBUFFER path).
+          if (perf.enabled && !this._firstFrameLogged) {
             const ba = (blend >>> 24) & 0xFF;
             if (!this._dtLog) this._dtLog = {};
             const key = `h${handle}`;
@@ -1886,19 +1912,6 @@ export class MiniClientConnection extends EventTarget {
               this._dtLog[key] = { count: 0, blend: `0x${(blend >>> 0).toString(16)}`, ba, sw, sh, firstDx: dx, firstDy: dy, firstDw: dw, firstDh: dh, surface: this.renderer.targetSurface };
             }
             this._dtLog[key].count++;
-            // Detect server rendering resolution from the first full-screen background draw
-            if (!this._serverResDetected && dx === 0 && dy === 0 && dw > 0 && dh > 0) {
-              const absDw = Math.abs(dw);
-              const absDh = Math.abs(dh);
-              if (absDw !== this.width || absDh !== this.height) {
-                console.log(`[Connection] Server renders at ${absDw}x${absDh}, canvas was ${this.width}x${this.height} — resizing`);
-                this.width = absDw;
-                this.height = absDh;
-                this.renderer.setSize(absDw, absDh);
-                this.dispatchEvent(new CustomEvent('resolutionchange', { detail: { width: absDw, height: absDh } }));
-              }
-              this._serverResDetected = true;
-            }
           }
           this.renderer.drawTexture(dx, dy, dw, dh, handle, sx, sy, sw, sh, blend);
         }
@@ -1923,7 +1936,7 @@ export class MiniClientConnection extends EventTarget {
           const width = readInt(0);
           const height = readInt(4);
           const canCache = this.renderer.canCacheImage(width, height);
-          console.log(`[GFX] LOADIMAGE: ${width}x${height} canCache=${canCache} handle=${imgHandle} cachePixels=${this.renderer._currentCachePixels}/${this.renderer._maxCachePixels}`);
+          if (perf.enabled) console.log(`[GFX] LOADIMAGE: ${width}x${height} canCache=${canCache} handle=${imgHandle} cachePixels=${this.renderer._currentCachePixels}/${this.renderer._maxCachePixels}`);
           if (canCache) {
             this.renderer.loadImage(imgHandle, width, height);
             hasret[0] = 1;
@@ -1970,7 +1983,7 @@ export class MiniClientConnection extends EventTarget {
         if (len >= 8) {
           const handle = readInt(0);
           const dataLen = readInt(4);
-          console.log(`[GFX] LOADIMAGECOMPRESSED: handle=${handle} dataLen=${dataLen} advCache=${this._advancedImageCaching}`);
+          if (perf.enabled) console.log(`[GFX] LOADIMAGECOMPRESSED: handle=${handle} dataLen=${dataLen} advCache=${this._advancedImageCaching}`);
           if (len >= 8 + dataLen) {
             const imgData = cmddata.subarray(12, 12 + dataLen);
             let rvHandle;
@@ -1994,7 +2007,7 @@ export class MiniClientConnection extends EventTarget {
         if (len >= 8) {
           const width = readInt(0);
           const height = readInt(4);
-          console.log(`[GFX] PREPIMAGE: ${width}x${height} canCache=${this.renderer.canCacheImage(width, height)}`);
+          if (perf.enabled) console.log(`[GFX] PREPIMAGE: ${width}x${height} canCache=${this.renderer.canCacheImage(width, height)}`);
           let imgHandle = 1;
           if (!this.renderer.canCacheImage(width, height)) {
             imgHandle = 0;
@@ -2028,7 +2041,7 @@ export class MiniClientConnection extends EventTarget {
           const imgHandle = readInt(0);
           const width = readInt(4);
           const height = readInt(8);
-          console.log(`[GFX] PREPIMAGETARGETED: handle=${imgHandle} ${width}x${height}`);
+          if (perf.enabled) console.log(`[GFX] PREPIMAGETARGETED: handle=${imgHandle} ${width}x${height}`);
           if (len >= 16) {
             const strLen = readInt(12);
             if (strLen > 1) {
@@ -2069,7 +2082,7 @@ export class MiniClientConnection extends EventTarget {
           const imgHandle = this.handleCount++;
           const width = readInt(0);
           const height = readInt(4);
-          console.log(`[Connection] CREATESURFACE: handle=${imgHandle}, ${width}x${height}`);
+          if (perf.enabled) console.log(`[Connection] CREATESURFACE: handle=${imgHandle}, ${width}x${height}`);
           this.renderer.createSurface(imgHandle, width, height);
           hasret[0] = 1;
           return imgHandle;
@@ -2080,7 +2093,7 @@ export class MiniClientConnection extends EventTarget {
       case GFXCMD.SETTARGETSURFACE: {
         if (len === 4) {
           const handle = readInt(0);
-          console.log(`[Connection] SETTARGETSURFACE: handle=${handle}`);
+          if (perf.enabled) console.log(`[Connection] SETTARGETSURFACE: handle=${handle}`);
           this.renderer.setTargetSurface(handle);
         }
         break;
@@ -2607,6 +2620,7 @@ export class MiniClientConnection extends EventTarget {
    * @param {number} commandId - SageCommand.id value
    */
   sendCommand(commandId) {
+    perf.markInput('command', commandId);
     const payload = new Uint8Array(4);
     new DataView(payload.buffer).setInt32(0, commandId, false);
     this._sendEvent(EventType.SAGECOMMAND, payload);
@@ -2619,6 +2633,7 @@ export class MiniClientConnection extends EventTarget {
    * @param {number} modifiers - Java InputEvent modifier flags
    */
   sendKeystroke(keyCode, keyChar, modifiers) {
+    perf.markInput('key', keyCode);
     const payload = new Uint8Array(10);
     const dv = new DataView(payload.buffer);
     dv.setInt32(0, keyCode, false);

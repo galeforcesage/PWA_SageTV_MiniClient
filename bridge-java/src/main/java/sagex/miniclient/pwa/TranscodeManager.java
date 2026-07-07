@@ -33,7 +33,9 @@ public class TranscodeManager {
     public void kill(String sessionId) {
         Process existing = activeTranscodes.remove(sessionId);
         if (existing != null && existing.isAlive()) {
-            log.info("[Transcode] Killing session {} (pid={})", sessionId, existing.pid());
+            // NOTE: no Process.pid() — that's a Java 9 API and this plugin
+            // targets Java 8. isAlive()/destroyForcibly() are both Java 8.
+            log.info("[Transcode] Killing session {}", sessionId);
             existing.destroyForcibly();
         }
     }

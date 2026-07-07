@@ -187,15 +187,17 @@ public class ServerInfoServlet extends HttpServlet {
         List<String> encoders = new ArrayList<>();
         if (output == null) return encoders;
 
-        // Encoders we care about for transcoding decisions
-        Set<String> interesting = Set.of(
+        // Encoders we care about for transcoding decisions.
+        // NOTE: use Arrays.asList (not Set.of) — Set.of is a Java 9 API and this
+        // plugin targets Java 8 (SageTV V9 baseline / plugin-repo convention).
+        Set<String> interesting = new HashSet<String>(Arrays.asList(
                 "libx264", "libx265", "h264_nvenc", "hevc_nvenc",
                 "h264_vaapi", "hevc_vaapi", "h264_qsv", "hevc_qsv",
                 "h264_videotoolbox", "hevc_videotoolbox",
                 "libvpx", "libvpx-vp9", "libaom-av1", "libsvtav1",
                 "aac", "libfdk_aac", "libfaac", "libopus", "ac3", "eac3",
                 "libmp3lame", "libvorbis", "flac", "pcm_s16le"
-        );
+        ));
 
         for (String line : output.split("\n")) {
             line = line.trim();

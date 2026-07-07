@@ -39,7 +39,7 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
 
   <Dependency>
     <JVM/>
-    <MinVersion>11</MinVersion>
+    <MinVersion>1.8</MinVersion>
   </Dependency>
 
   <PluginType>Standard</PluginType>

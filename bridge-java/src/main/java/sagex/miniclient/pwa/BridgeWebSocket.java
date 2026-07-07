@@ -23,6 +23,25 @@ public class BridgeWebSocket implements WebSocketListener {
     private static final Logger log = LoggerFactory.getLogger(BridgeWebSocket.class);
     private static final int DEFAULT_SAGE_PORT = 31099;
 
+    // ── TCP→WS coalescing (BRIDGE1) ─────────────────────────────────────────
+    // During a SageTV GFX burst the server emits many small TCP writes. Sending
+    // one WebSocket binary frame per TCP read floods the browser with onmessage
+    // events — a measurable main-thread cost on iPad Safari and Samsung Tizen
+    // during menu repaint. Coalescing accumulates the burst into fewer, larger
+    // frames. It is a transparent byte-pipe optimization: payload bytes and
+    // order are never altered, so it needs no SageTV protocol cooperation.
+    //
+    // The batch is flushed when it reaches COALESCE_MAX_BYTES or when the socket
+    // has no more immediately-available data (end of burst). Flushing on drain
+    // means frame-boundary bytes (e.g. FLIPBUFFER) are never delayed — the
+    // coalescing adds zero latency, it only removes redundant tiny frames.
+    //
+    // Tunable via env var (preferred) or -D system property; set max bytes <= 0
+    // to disable and restore the original one-frame-per-read behavior.
+    private static final int COALESCE_MAX_BYTES =
+            cfgInt("WS_COALESCE_MAX_BYTES", "pwa.ws.coalesceMaxBytes", 262144);
+    private static final boolean COALESCE_ENABLED = COALESCE_MAX_BYTES > 0;
+
     private Session wsSession;
     private Socket tcpSocket;
     private OutputStream tcpOut;
@@ -31,6 +50,24 @@ public class BridgeWebSocket implements WebSocketListener {
     private String channel;
     private long bytesSentToTcp = 0;
     private long bytesRecvFromTcp = 0;
+    private long tcpReads = 0;
+    private long wsFramesOut = 0;
+
+    /** Resolve an int knob from env var, then -D system property, then default. */
+    private static int cfgInt(String envName, String propName, int defaultValue) {
+        String raw = System.getenv(envName);
+        if (raw == null || raw.trim().isEmpty()) {
+            raw = System.getProperty(propName);
+        }
+        if (raw != null && !raw.trim().isEmpty()) {
+            try {
+                return Integer.parseInt(raw.trim());
+            } catch (NumberFormatException e) {
+                log.warn("[Bridge] Invalid {}='{}', using default {}", envName, raw, defaultValue);
+            }
+        }
+        return defaultValue;
+    }
 
     @Override
     public void onWebSocketConnect(Session session) {
@@ -108,8 +145,10 @@ public class BridgeWebSocket implements WebSocketListener {
 
     @Override
     public void onWebSocketClose(int statusCode, String reason) {
-        log.info("[Bridge] WebSocket closed for {} (code={}, sent={}B, recv={}B)",
-                channel, statusCode, bytesSentToTcp, bytesRecvFromTcp);
+        // wsFramesOut vs tcpReads shows the coalescing ratio (lower frames =
+        // fewer browser onmessage events per GFX burst).
+        log.info("[Bridge] WebSocket closed for {} (code={}, sent={}B, recv={}B, tcpReads={}, wsFrames={})",
+                channel, statusCode, bytesSentToTcp, bytesRecvFromTcp, tcpReads, wsFramesOut);
         cleanup();
     }
 
@@ -121,23 +160,71 @@ public class BridgeWebSocket implements WebSocketListener {
 
     /**
      * Read loop: TCP socket -> WebSocket binary frames.
+     * <p>
+     * When coalescing is enabled, consecutive TCP reads that arrive back-to-back
+     * (a GFX burst) are merged into a single WebSocket binary frame, bounded by
+     * COALESCE_MAX_BYTES, and flushed as soon as the socket drains. Byte order
+     * and payload are preserved exactly.
+     * <p>
+     * Backpressure is inherent: {@code sendBytes} is a blocking call, so a slow
+     * browser stalls this reader, which in turn stops draining the SageTV TCP
+     * socket and lets TCP flow control push back on the server. There is no
+     * unbounded server-side send queue to guard.
      */
     private void readTcpLoop() {
-        byte[] buffer = new byte[65536];
+        final byte[] buffer = new byte[65536];
+        // Reusable batch accumulator (grows if a single read exceeds it). Wrapped
+        // without copying for the blocking send, then reset after the send returns.
+        byte[] batchBuf = new byte[COALESCE_ENABLED ? COALESCE_MAX_BYTES : 65536];
+        int batchLen = 0;
         try {
             InputStream in = tcpSocket.getInputStream();
             int bytesRead;
             while (!closed && (bytesRead = in.read(buffer)) != -1) {
                 bytesRecvFromTcp += bytesRead;
-                if (wsSession != null && wsSession.isOpen()) {
-                    wsSession.getRemote().sendBytes(ByteBuffer.wrap(buffer, 0, bytesRead));
-                } else {
+                tcpReads++;
+                if (wsSession == null || !wsSession.isOpen()) {
                     break;
+                }
+
+                if (!COALESCE_ENABLED) {
+                    // Original behavior: one WebSocket frame per TCP read.
+                    wsSession.getRemote().sendBytes(ByteBuffer.wrap(buffer, 0, bytesRead));
+                    wsFramesOut++;
+                    continue;
+                }
+
+                // Append this read to the pending batch (grow if needed).
+                if (batchLen + bytesRead > batchBuf.length) {
+                    int grown = Math.max(batchBuf.length * 2, batchLen + bytesRead);
+                    batchBuf = java.util.Arrays.copyOf(batchBuf, grown);
+                }
+                System.arraycopy(buffer, 0, batchBuf, batchLen, bytesRead);
+                batchLen += bytesRead;
+
+                // Flush when the batch is large enough, or when the socket has no
+                // more immediately-available data (end of the current burst).
+                boolean full = batchLen >= COALESCE_MAX_BYTES;
+                boolean drained = in.available() <= 0;
+                if (full || drained) {
+                    wsSession.getRemote().sendBytes(ByteBuffer.wrap(batchBuf, 0, batchLen));
+                    wsFramesOut++;
+                    batchLen = 0;
                 }
             }
         } catch (IOException e) {
             if (!closed) {
                 log.debug("[Bridge] TCP read ended for {}: {}", channel, e.getMessage());
+            }
+        } finally {
+            // Flush any residual batched bytes before the socket closes.
+            if (batchLen > 0 && wsSession != null && wsSession.isOpen()) {
+                try {
+                    wsSession.getRemote().sendBytes(ByteBuffer.wrap(batchBuf, 0, batchLen));
+                    wsFramesOut++;
+                } catch (IOException ignore) {
+                    // connection is going away anyway
+                }
             }
         }
 
