@@ -190,6 +190,10 @@ export class MiniClientConnection extends EventTarget {
     this._reconnecting = false;
     this._shortSessionCount = 0; // consecutive sessions < 30s
     this._exitRequested = false; // true after GFXCMD_DEINIT
+    // true once the server SETs SAGETV_NG_SERVER='1'. Gates per-server
+    // behavior for property advertisement (GFX_FIXED_PAR, PUSH_AV_CONTAINERS).
+    // Stays false on stock upstream Sage.
+    this.isNgServer = false;
     this._verboseGfxLog = false; // log every GFX cmd for diagnostics
 
     // Keepalive (ping the WebSocket bridge)
@@ -1229,13 +1233,17 @@ export class MiniClientConnection extends EventTarget {
         return res;
       }
       case 'GFX_FIXED_PAR':
-        // Returning a non-empty PAR sets iPhoneMode=true server-side, which
-        // routes ClientProfileManager.autoDetectProfile() to the `pwa_safe`
-        // profile (MP4/H.264/AAC only). Without this the server picks
-        // `desktop_hevc_optin`, whose whitelist includes MPEG2-VIDEO — that
-        // profile's authoritative override then force-pushes MPEG-PS as-is
-        // and our mux.js transmuxer (H.264-only) stalls. `1.0` = square
-        // pixels, correct for modern square-pixel displays.
+        // Sending '1.0' sets iPhoneMode=true on the server. On LEGACY Sage
+        // that's the only lever to get HLS via HTTPLSServer (the only
+        // browser-safe pull path stock Sage has). On NG the server
+        // negotiates from VIDEO_CODECS/PULL_AV_CONTAINERS directly, so we
+        // don't need the iPhone impersonation — and it has a real cost:
+        // iPhoneMode also triggers forced-HLS emission, which hls.js on
+        // Tizen handles poorly. On iOS we still send '1.0' because native
+        // HLS decode is exactly what iOS Safari wants.
+        if (this.isNgServer && !this.platformDetector?.isIOS?.()) {
+          return '';
+        }
         return '1.0';
       case 'GFX_SUPPORTED_RESOLUTIONS':
         return `${this.width}x${this.height}`;
@@ -1256,10 +1264,11 @@ export class MiniClientConnection extends EventTarget {
       case 'AUDIO_CODECS':
         return this._getSupportedAudioCodecs();
       case 'PUSH_AV_CONTAINERS':
-        // Push mode only works through the mux.js transmuxer, which requires
-        // MPEG-TS carrying H.264+AAC/MP3. Do not advertise any other push
-        // containers even if the <video> element could theoretically play them.
-        return 'MPEG2-TS';
+        // NG server negotiates via VIDEO_CODECS/AUDIO_CODECS intersection
+        // and pulls+transcodes as needed — no push capability required.
+        // Legacy Sage may fall back to push mode if it can't do pull; keep
+        // the mux.js H.264+AAC MPEG-TS path available there.
+        return this.isNgServer ? '' : 'MPEG2-TS';
       case 'PULL_AV_CONTAINERS':
         return this._getSupportedPullContainers();
       // Transcoding settings
@@ -1325,7 +1334,10 @@ export class MiniClientConnection extends EventTarget {
         return `container=mpegts;videocodec=${vcodec};videobitrate=${vbr};fps=${fps};resolution=${res};audiocodec=${acodec};audiobitrate=${abr};`;
       }
       case 'FIXED_PUSH_REMUX_FORMAT':
-        return 'container=mpegts;videocodec=COPY;audiocodec=COPY;';
+        // Upstream stock miniclient never advertises this. The COPY;COPY
+        // string was a workaround-turned-lie that the NG server had to add
+        // code to ignore. Empty = 'no override, server decides'.
+        return '';
       case 'PUSH_BUFFER_SEEKING':
         return 'TRUE';
       case 'DETAILED_BUFFER_STATS':
@@ -1344,6 +1356,10 @@ export class MiniClientConnection extends EventTarget {
    */
   _processSetProperty(name, value) {
     switch (name) {
+      case 'SAGETV_NG_SERVER':
+        this.isNgServer = (value === '1' || value === 'TRUE' || value === 'true');
+        console.log(`[Connection] Server is NG: ${this.isNgServer}`);
+        return 0;
       case 'ZLIB_COMM_XFER':
         if (value === 'TRUE' || value === 'true') {
           this.zipMode = true;
