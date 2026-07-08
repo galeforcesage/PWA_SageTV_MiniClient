@@ -878,6 +878,114 @@ export class MiniClientConnection extends EventTarget {
     return this._probedCaps;
   }
 
+  /**
+   * Playback Surface Capability Model, Protocol 2.1.
+   *
+   * Probes browser decoders TWO independent surfaces and returns per-surface
+   * capability. These are advertised to Protocol 2.1-aware servers via the
+   * PLAYBACK_SURFACE_* properties. Legacy v1 advertisements (VIDEO_CODECS,
+   * AUDIO_CODECS, PULL_AV_CONTAINERS, PUSH_AV_CONTAINERS) derive from pwa_mse
+   * per the spec's Legacy Compatibility Profile.
+   *
+   *   pwa_native = HTMLVideoElement.canPlayType() probe (native <video src>)
+   *   pwa_mse    = MediaSource.isTypeSupported() probe (fMP4 via MSE)
+   *
+   * The two sets are NEVER merged. Server evaluates each surface independently.
+   * Canonical codec/container names per Protocol 2.1 (H264, HEVC, MPEG2-TS,
+   * MPEG2-PS, MATROSKA, etc.). Sage server auto-aliases H264 <-> H.264 so
+   * either spelling works, but the spec pins the no-dot form as canonical.
+   */
+  _probePlaybackSurfaces() {
+    if (this._playbackSurfaces) return this._playbackSurfaces;
+
+    const v = document.createElement('video');
+    const MS = window.MediaSource || window.ManagedMediaSource || null;
+
+    const canNative = (mime) => {
+      try { return v.canPlayType(mime) === 'probably'; } catch { return false; }
+    };
+    const canMse = (mime) => {
+      try { return !!(MS && MS.isTypeSupported && MS.isTypeSupported(mime)); } catch { return false; }
+    };
+
+    // ── pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer ──
+    const mse = { video: [], audio: [], containers: [] };
+    if (canMse('video/mp4; codecs="avc1.42E01E"')) mse.video.push('H264');
+    if (canMse('video/mp4; codecs="hvc1.1.6.L120.90"') ||
+        canMse('video/mp4; codecs="hev1.1.6.L120.90"')) mse.video.push('HEVC');
+    if (canMse('video/mp4; codecs="vp09.00.10.08"')) mse.video.push('VP9');
+    if (canMse('video/mp4; codecs="av01.0.08M.08"')) mse.video.push('AV1');
+    if (canMse('audio/mp4; codecs="mp4a.40.2"')) mse.audio.push('AAC');
+    if (canMse('audio/mp4; codecs="mp4a.40.5"')) mse.audio.push('HE-AAC');
+    if (canMse('audio/mpeg')) mse.audio.push('MP3');
+    if (canMse('audio/mp4; codecs="ac-3"')) mse.audio.push('AC3');
+    if (canMse('audio/mp4; codecs="ec-3"')) mse.audio.push('EAC3');
+    if (canMse('audio/mp4; codecs="opus"')) mse.audio.push('OPUS');
+    // MSE ingestion is fMP4 only. Only advertise MP4 when the surface can
+    // decode anything at all.
+    if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+
+    // ── pwa_native: what <video src=...> can decode via native decoder ──
+    const native = { video: [], audio: [], containers: [] };
+    if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
+    if (canNative('video/mp4; codecs="hvc1"') || canNative('video/mp4; codecs="hev1"') ||
+        canNative('video/mp4; codecs="hvc1.1.6.L120.90"')) native.video.push('HEVC');
+    if (canNative('video/mp4; codecs="mp4v.20.8"') ||
+        canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
+    if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
+    if (canNative('video/webm; codecs="vp9"') ||
+        canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
+    if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
+    if (canNative('audio/mp4; codecs="mp4a.40.2"') || canNative('audio/mp4')) native.audio.push('AAC');
+    if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
+    if (canNative('audio/mpeg')) native.audio.push('MP3');
+    if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
+    if (canNative('audio/eac3') || canNative('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
+    if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
+        canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
+    if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
+    if (canNative('video/mp4')) native.containers.push('MP4');
+    if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
+    if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
+    if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
+    // HLS is a container-like delivery mode. Reported here as a container so
+    // the server can match .m3u8 sources; also declared as a delivery mode on
+    // the surface itself.
+    if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
+      // HLS carries MPEG2-TS segments; the mp2t container check above already
+      // covers native TS decode, but declare HLS explicitly so a Sage HLS URL
+      // resolves as a valid pull target.
+      if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
+    }
+
+    this._playbackSurfaces = {
+      // Higher priority = preferred. Native has zero server transcode cost when
+      // it can direct-play, so it wins ties over MSE.
+      pwa_native: {
+        route: 'native',
+        priority: 100,
+        deliveryModes: 'pull,hls',
+        videoCodecs: native.video,
+        audioCodecs: native.audio,
+        containers: native.containers,
+      },
+      pwa_mse: {
+        route: 'mse',
+        priority: 80,
+        // mux.js push transmux is being retired; MSE now consumes only
+        // fMP4 pulled from the bridge /transcode endpoint.
+        deliveryModes: 'pull',
+        videoCodecs: mse.video,
+        audioCodecs: mse.audio,
+        containers: mse.containers,
+      },
+    };
+
+    console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
+    console.log('[PlaybackSurfaces] pwa_mse:   ', JSON.stringify(this._playbackSurfaces.pwa_mse));
+    return this._playbackSurfaces;
+  }
+
   _getSupportedVideoCodecs() {
     return this._probeMediaCapabilities().video;
   }
@@ -1073,6 +1181,39 @@ export class MiniClientConnection extends EventTarget {
   _resolveProperty(name) {
     // Helper to read settings with fallback
     const pref = (key, def) => this.settings ? this.settings.get(key, def) : def;
+
+    // ── Protocol 2.1 Playback Surface advertisements ──
+    // Server enumerates surfaces via PLAYBACK_SURFACES then reads per-surface
+    // attributes as PLAYBACK_SURFACE_<id>_<attr>. Legacy servers ignore these.
+    if (name === 'PLAYBACK_SURFACES') {
+      this._probePlaybackSurfaces();
+      return 'pwa_native,pwa_mse';
+    }
+    if (name.startsWith('PLAYBACK_SURFACE_')) {
+      const surfaces = this._probePlaybackSurfaces();
+      const rest = name.substring('PLAYBACK_SURFACE_'.length);
+      let surface = null;
+      let attr = null;
+      for (const id of Object.keys(surfaces)) {
+        if (rest.startsWith(id + '_')) {
+          surface = surfaces[id];
+          attr = rest.substring(id.length + 1);
+          break;
+        }
+      }
+      if (!surface) return '';
+      switch (attr) {
+        case 'ROUTE': return surface.route;
+        case 'PRIORITY': return String(surface.priority);
+        case 'DELIVERY_MODES': return surface.deliveryModes;
+        case 'VIDEO_CODECS': return surface.videoCodecs.join(',');
+        case 'AUDIO_CODECS': return surface.audioCodecs.join(',');
+        case 'CONTAINERS': return surface.containers.join(',');
+        default:
+          console.warn(`[Connection] Unknown surface attribute: ${attr}`);
+          return '';
+      }
+    }
 
     switch (name) {
       // ── NG capability negotiation ──
