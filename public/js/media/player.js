@@ -274,7 +274,12 @@ export class MediaPlayer extends EventTarget {
       console.log(`[MediaPlayer] BRIDGE mode: ${bridgeFilePath}`);
       await this._loadBridgeMode(bridgeFilePath, hostname);
     } else if (url.startsWith('push:')) {
-      console.log(`[MediaPlayer] PUSH mode: ${url}`);
+      // Push mode retired: Protocol 2.1 pwa_mse deliveryModes='pull' only.
+      // mux.js (the previous H.264+AAC MPEG-TS transmuxer) was removed. If the
+      // server still requested push despite empty PUSH_AV_CONTAINERS and the
+      // pwa_mse surface's pull-only declaration, fail loudly so the mismatch
+      // is visible instead of stalling silently.
+      console.error(`[MediaPlayer] Server requested PUSH mode (${url}) but PWA client no longer accepts push. Server should route pwa_mse via pull (bridge /transcode) or use pwa_native.`);
       await this._loadPushMode(url, hostname);
     } else {
       await this._loadPullMode(url, hostname);
@@ -595,107 +600,28 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
-   * PUSH mode: server transcodes to H.264+AAC in MPEG-TS.
-   * Uses mux.js to transmux MPEG-TS → fMP4 → MSE SourceBuffer.
+   * PUSH mode is retired as of Protocol 2.1.
+   *
+   * Historical: server transcoded to H.264+AAC MPEG-TS and streamed via the
+   * MiniClient socket; mux.js transmuxed to fMP4 for MediaSource. That path is
+   * gone. pwa_mse now advertises deliveryModes='pull' only, so the server
+   * should never route us here. If it does anyway (misconfigured or legacy
+   * server ignoring our advertisement), emit a clear failure so the mismatch
+   * is visible.
    */
   async _loadPushMode(url, hostname) {
-    this.pushMode = true;
-    this._initSegmentSent = false;
-
-    // Load mux.js
-    await this._loadScript([
-      '/js/lib/mux.min.js',
-      'https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js',
-    ]);
-    if (!window.muxjs) {
-      console.error('[MediaPlayer] mux.js not available');
-      this.state = PlayerState.STOPPED;
-      this._emitCapabilityUpdate({
-        playbackHints: {
-          canTransmuxTsPush: false,
-        },
-      }, 'muxjs_unavailable');
-      this._emitPlaybackFailure('PUSH_TRANSMUXER_UNAVAILABLE', {
-        mode: 'push',
-      });
-      return;
-    }
-
-    // Set up MediaSource
-    const MSClass = this._getMediaSourceClass();
-    if (!MSClass) {
-      console.error('[MediaPlayer] MediaSource API not available');
-      this.state = PlayerState.STOPPED;
-      this._emitCapabilityUpdate({
-        playbackHints: {
-          canUseMediaSource: false,
-          canTransmuxTsPush: false,
-        },
-      }, 'push_media_source_unavailable');
-      this._emitPlaybackFailure('MEDIA_SOURCE_UNAVAILABLE', {
-        mode: 'push',
-      });
-      return;
-    }
-
-    await this._openMediaSource(MSClass);
-
-    // Create fMP4 source buffer
-    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
-    if (!MSClass.isTypeSupported(mimeType)) {
-      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
-      if (MSClass.isTypeSupported(videoOnly)) {
-        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
-      } else {
-        console.error('[MediaPlayer] No supported fMP4 MIME type');
-        this.state = PlayerState.STOPPED;
-        this._emitCapabilityUpdate({
-          playbackHints: {
-            canTransmuxTsPush: false,
-          },
-        }, 'push_fmp4_unsupported');
-        this._emitPlaybackFailure('UNSUPPORTED_PUSH_FORMAT', {
-          mode: 'push',
-          mimeType,
-        });
-        return;
-      }
-    } else {
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
-    }
-    this.sourceBuffer.mode = 'sequence';
-    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
-    this.sourceBuffer.addEventListener('error', (e) => {
-      console.error('[MediaPlayer] SourceBuffer error:', e);
+    this.state = PlayerState.STOPPED;
+    this._emitCapabilityUpdate({
+      playbackHints: {
+        // Advertise this so the bridge's client-feedback store records the
+        // capability change and future negotiation respects it.
+        canAcceptPush: false,
+      },
+    }, 'push_mode_retired');
+    this._emitPlaybackFailure('PUSH_MODE_UNSUPPORTED', {
+      mode: 'push',
+      details: 'PWA client no longer accepts push; server should use pull (bridge /transcode) for the pwa_mse surface',
     });
-
-    // Create mux.js transmuxer
-    this._transmuxer = new window.muxjs.mp4.Transmuxer({
-      keepOriginalTimestamps: true,
-      remux: true,
-    });
-
-    this._transmuxer.on('data', (segment) => {
-      if (!this._initSegmentSent) {
-        const initSegment = new Uint8Array(segment.initSegment.byteLength + segment.data.byteLength);
-        initSegment.set(segment.initSegment, 0);
-        initSegment.set(segment.data, segment.initSegment.byteLength);
-        this._pushQueue.push(initSegment);
-        this._initSegmentSent = true;
-        this._pushOutputBytes += initSegment.byteLength;
-        console.log(`[MediaPlayer] Init segment: ${segment.initSegment.byteLength}B + data: ${segment.data.byteLength}B`);
-      } else {
-        this._pushQueue.push(new Uint8Array(segment.data));
-        this._pushOutputBytes += segment.data.byteLength;
-      }
-    });
-
-    this._transmuxer.on('done', () => {
-      this._processPushQueue();
-    });
-
-    this.state = PlayerState.LOADED;
-    console.log('[MediaPlayer] Push mode ready with mux.js transmuxer (H.264 path)');
   }
 
   // ── MPEG-TS Codec Detection ───────────────────────────────
@@ -1145,109 +1071,16 @@ export class MediaPlayer extends EventTarget {
   // ── Push Mode ─────────────────────────────────────────────
 
   /**
-   * Push media data from the server (H.264+AAC in MPEG-TS, transcoded by server).
-   * @param {Uint8Array} data - MPEG-TS data chunk
-   * @param {number} flags - Push flags
+   * Push media data from the server. Retired as of Protocol 2.1 (mux.js
+   * removed); server should not push to the PWA. If bytes still arrive,
+   * warn once and discard.
    */
   pushData(data, flags) {
-    if (!this.pushMode || this.state === PlayerState.STOPPED) return;
-    this._totalPushed += data.length;
-
-    // Log first push to diagnose format
-    if (this._totalPushed === data.length) {
-      const hdr = Array.from(data.subarray(0, Math.min(16, data.length)))
-        .map(b => b.toString(16).padStart(2, '0')).join(' ');
-      console.log(`[MediaPlayer] First push: ${data.length}B, header=[${hdr}]`);
+    if (!this._pushDataWarned) {
+      this._pushDataWarned = true;
+      console.warn(`[MediaPlayer] Discarding pushed media data (${data.length}B). Push retired in Protocol 2.1; pwa_mse advertises pull-only. Server should route via bridge /transcode or advertise pwa_native for direct decode.`);
     }
-
-    // ── Codec detection on early push data ──
-    if (!this._pushCodecChecked) {
-      const codecs = this._detectPushCodecs(data);
-      if (codecs) {
-        this._pushCodecChecked = true;
-        console.log(`[MediaPlayer] Push stream codecs: video=${codecs.video} (0x${codecs.videoType.toString(16)}), audio=${codecs.audio} (0x${codecs.audioType.toString(16)}), supported=${codecs.supported}`);
-
-        if (!codecs.supported) {
-          const problems = [];
-          if (codecs.videoType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_VIDEO.has(codecs.videoType)) {
-            problems.push(`video codec ${codecs.video} not supported by browser transmuxer (only H.264)`);
-          }
-          if (codecs.audioType >= 0 && !MediaPlayer.MUXJS_SUPPORTED_AUDIO.has(codecs.audioType)) {
-            problems.push(`audio codec ${codecs.audio} not decoded by browser (only AAC/MP3)`);
-          }
-          console.error(`[MediaPlayer] PUSH CODEC MISMATCH: ${problems.join('; ')}. ` +
-            `Server should be transcoding to H.264+AAC but sent raw stream. ` +
-            `Check FIXED_PUSH_MEDIA_FORMAT and server FFmpeg availability.`);
-
-          // Dispatch event so UI can show a visible warning
-          this.dispatchEvent(new CustomEvent('codecerror', {
-            detail: {
-              video: codecs.video, audio: codecs.audio,
-              message: `Unsupported push codec: ${problems.join('; ')}`,
-            }
-          }));
-          this._emitCapabilityUpdate({
-            playbackHints: {
-              canTransmuxTsPush: false,
-            },
-          }, 'push_codec_mismatch');
-          this._emitPlaybackFailure('PUSH_CODEC_MISMATCH', {
-            mode: 'push',
-            video: codecs.video,
-            audio: codecs.audio,
-            message: problems.join('; '),
-          });
-        }
-      }
-    }
-
-    // ── Stall detection: mux.js produces no output ──
-    const prevOutput = this._pushOutputBytes;
-    this._pushStallBytes += data.length;
-
-    if (!this._transmuxer || !this.mediaSource || this.mediaSource.readyState !== 'open') return;
-
-    this._transmuxer.push(data);
-    this._transmuxer.flush();
-
-    // Check if mux.js produced any output from this push
-    if (this._pushOutputBytes === prevOutput) {
-      // No output produced — mux.js couldn't parse this data
-      if (this._pushStallBytes > 512 * 1024 && this._pushOutputBytes === 0) {
-        // 512KB pushed with zero output — confirmed stall
-        if (!this._pushStallWarned) {
-          this._pushStallWarned = true;
-          console.error(`[MediaPlayer] PUSH STALL: ${(this._pushStallBytes / 1024).toFixed(0)}KB received, 0B output from transmuxer. ` +
-            `Stream likely contains unsupported codecs (HEVC, MPEG2, AC3). ` +
-            `Server FFmpeg may not be transcoding to H.264+AAC.`);
-          this.dispatchEvent(new CustomEvent('codecerror', {
-            detail: { message: 'No playable video: server push stream not in H.264+AAC format' }
-          }));
-          this._emitCapabilityUpdate({
-            playbackHints: {
-              canTransmuxTsPush: false,
-            },
-          }, 'push_transmux_stall');
-          this._emitPlaybackFailure('PUSH_TRANSMUX_STALL', {
-            mode: 'push',
-            bytesReceived: this._pushStallBytes,
-          });
-        }
-      }
-    } else {
-      this._pushStallBytes = 0; // Reset stall counter on successful output
-    }
-
-    // Auto-play after receiving enough data
-    if (this._totalPushed > 256 * 1024 && this.state === PlayerState.LOADED) {
-      console.log(`[MediaPlayer] Auto-playing after ${(this._totalPushed / 1024).toFixed(0)}KB pushed`);
-      this.play();
-    }
-
-    // Log progress periodically
-    if (this._totalPushed > 0 && (this._totalPushed % (1024 * 1024)) < data.length) {
-      console.log(`[MediaPlayer] Pushed ${(this._totalPushed / 1024 / 1024).toFixed(1)}MB total, queue=${this._pushQueue.length}`);
-    }
+    // Discard silently for subsequent chunks to avoid log spam.
   }
 
   _processPushQueue() {
