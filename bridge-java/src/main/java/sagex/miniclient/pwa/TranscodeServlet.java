@@ -6,13 +6,16 @@ import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * HTTP servlet that spawns ffmpeg to transcode a media file and streams
@@ -78,10 +81,32 @@ public class TranscodeServlet extends HttpServlet {
         // Detect live/growing files (recordings in progress)
         boolean isLive = isFileGrowing(file);
 
-        log.info("[Transcode] Starting: file={} seek={}s session={} hwaccel={} live={} exists={} canRead={}",
-                filePath, seekSec, sessionId, hwAccel.name, isLive, file.exists(), file.canRead());
+        // Protocol 2.1 remux fast path: if source codecs are already fMP4-compatible
+        // (H.264 video + AAC audio), skip re-encoding and just repackage into fMP4.
+        // This mirrors the cheap-remux savings the old push+mux.js pipeline provided,
+        // without the client-side transmuxer. Skipped on live/growing files because
+        // ffprobe on a partial file is fragile; live paths take the full transcode
+        // route which streams via pipe:0 feeder.
+        String[] sourceCodecs = null;
+        boolean useRemux = false;
+        if (!isLive) {
+            sourceCodecs = probeSourceCodecs(filePath);
+            useRemux = canRemuxToFmp4(sourceCodecs);
+            if (useRemux) {
+                log.info("[Transcode] Fast path: source is H.264+{} - using -c copy remux",
+                        sourceCodecs[1] == null ? "<no audio>" : "AAC");
+            } else if (sourceCodecs != null) {
+                log.info("[Transcode] Source codecs (video={}, audio={}) require full transcode",
+                        sourceCodecs[0], sourceCodecs[1]);
+            }
+        }
 
-        List<String> ffmpegArgs = buildArgs(filePath, seekSec, hwAccel, isLive);
+        log.info("[Transcode] Starting: file={} seek={}s session={} hwaccel={} live={} exists={} canRead={} remux={}",
+                filePath, seekSec, sessionId, hwAccel.name, isLive, file.exists(), file.canRead(), useRemux);
+
+        List<String> ffmpegArgs = useRemux
+                ? buildRemuxArgs(filePath, seekSec)
+                : buildArgs(filePath, seekSec, hwAccel, isLive);
         log.info("[Transcode] ffmpeg command: {}", String.join(" ", ffmpegArgs));
 
         ProcessBuilder pb = new ProcessBuilder(ffmpegArgs);
@@ -303,6 +328,99 @@ public class TranscodeServlet extends HttpServlet {
             log.info("[Transcode] File is growing: {}B -> {}B (+{}B)", size1, size2, size2 - size1);
         }
         return growing;
+    }
+
+    /**
+     * Protocol 2.1 remux fast-path helpers.
+     *
+     * The pwa_mse surface consumes fMP4 via MediaSource. When the source's
+     * codecs are already MSE-compatible (H.264 video + AAC audio, or H.264
+     * video with no audio) we can skip the ffmpeg re-encode entirely and
+     * just repackage into fMP4 with -c copy. Cost is roughly disk+network
+     * I/O; no GPU/CPU decode+encode.
+     */
+    private String[] probeSourceCodecs(String filePath) {
+        String ffprobePath = deriveFfprobePath();
+        if (ffprobePath == null) {
+            log.debug("[Transcode] ffprobe not found next to ffmpeg; skipping remux fast path");
+            return null;
+        }
+        String video = runFfprobe(ffprobePath, filePath, "v:0");
+        String audio = runFfprobe(ffprobePath, filePath, "a:0");
+        return new String[]{video, audio};
+    }
+
+    private String deriveFfprobePath() {
+        File f = new File(ffmpegPath);
+        if (!f.isAbsolute()) {
+            // ffmpeg is on PATH; assume ffprobe is too
+            return "ffprobe";
+        }
+        File parent = f.getParentFile();
+        if (parent == null) return null;
+        for (String name : new String[]{"ffprobe", "ffprobe.exe"}) {
+            File probe = new File(parent, name);
+            if (probe.exists() && probe.canExecute()) return probe.getAbsolutePath();
+        }
+        return null;
+    }
+
+    private String runFfprobe(String ffprobePath, String file, String streamSelector) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(ffprobePath,
+                    "-v", "error",
+                    "-select_streams", streamSelector,
+                    "-show_entries", "stream=codec_name",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String line;
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                line = r.readLine();
+            }
+            if (!p.waitFor(3, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            if (line == null) return null;
+            String v = line.trim().toLowerCase(java.util.Locale.ROOT);
+            return v.isEmpty() ? null : v;
+        } catch (Exception e) {
+            log.debug("[Transcode] ffprobe {} on {} failed: {}", streamSelector, file, e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean canRemuxToFmp4(String[] codecs) {
+        if (codecs == null || codecs[0] == null) return false;
+        if (!"h264".equals(codecs[0])) return false;
+        // No audio stream OR AAC audio -> safe to -c copy.
+        return codecs[1] == null || "aac".equals(codecs[1]);
+    }
+
+    /**
+     * Build ffmpeg args for the remux fast path: -c copy on both streams,
+     * fMP4 output to stdout. No hwaccel needed (no decode/encode).
+     */
+    private List<String> buildRemuxArgs(String filePath, double seekSec) {
+        List<String> args = new ArrayList<>();
+        args.add(ffmpegPath);
+        args.addAll(java.util.Arrays.asList("-v", "warning", "-y"));
+        // -ss BEFORE -i = input seek (fast, no re-decode). Correct for -c copy.
+        if (seekSec > 0) {
+            args.add("-ss");
+            args.add(String.valueOf(seekSec));
+        }
+        args.addAll(java.util.Arrays.asList(
+                "-i", filePath,
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4",
+                "pipe:1"
+        ));
+        return args;
     }
 
     /**
