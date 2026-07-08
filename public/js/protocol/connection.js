@@ -986,16 +986,30 @@ export class MiniClientConnection extends EventTarget {
     return this._playbackSurfaces;
   }
 
+  /**
+   * Legacy compatibility profile per Protocol 2.1: base MiniClient properties
+   * (VIDEO_CODECS, AUDIO_CODECS, PULL_AV_CONTAINERS) are derived from pwa_mse,
+   * NOT the union of surfaces. Correctness over max direct-play.
+   *
+   * Also normalizes canonical Protocol 2.1 names to the spellings upstream
+   * google/SageTV expects (H264 -> H.264, HE-AAC -> AAC-HE). SageTV-mine
+   * aliases both spellings so either works there; upstream is stricter.
+   */
+  _legacyCompat(list) {
+    const map = { 'H264': 'H.264', 'HE-AAC': 'AAC-HE' };
+    return list.map((c) => map[c] || c).join(',');
+  }
+
   _getSupportedVideoCodecs() {
-    return this._probeMediaCapabilities().video;
+    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.videoCodecs);
   }
 
   _getSupportedAudioCodecs() {
-    return this._probeMediaCapabilities().audio;
+    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.audioCodecs);
   }
 
   _getSupportedPullContainers() {
-    return this._probeMediaCapabilities().pull;
+    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.containers);
   }
 
   /**
@@ -1397,10 +1411,10 @@ export class MiniClientConnection extends EventTarget {
       case 'AUDIO_CODECS':
         return this._getSupportedAudioCodecs();
       case 'PUSH_AV_CONTAINERS':
-        // Push mode only works through the mux.js transmuxer, which requires
-        // MPEG-TS carrying H.264+AAC/MP3. Do not advertise any other push
-        // containers even if the <video> element could theoretically play them.
-        return 'MPEG2-TS';
+        // Protocol 2.1: MSE has no push consumer after mux.js retirement, and
+        // pwa_mse advertises deliveryModes='pull' only. Legacy compat profile
+        // sends empty PUSH_AV_CONTAINERS so upstream SageTV always picks pull.
+        return '';
       case 'PULL_AV_CONTAINERS':
         return this._getSupportedPullContainers();
       // Transcoding settings
@@ -1466,7 +1480,11 @@ export class MiniClientConnection extends EventTarget {
         return `container=mpegts;videocodec=${vcodec};videobitrate=${vbr};fps=${fps};resolution=${res};audiocodec=${acodec};audiobitrate=${abr};`;
       }
       case 'FIXED_PUSH_REMUX_FORMAT':
-        return 'container=mpegts;videocodec=COPY;audiocodec=COPY;';
+        // Upstream google/SageTV miniclient never advertises this property.
+        // The hardcoded 'container=mpegts;videocodec=COPY;audiocodec=COPY;'
+        // was a lie SageTV-mine had to add code to ignore. Empty = 'no
+        // override, server decides.'
+        return '';
       case 'PUSH_BUFFER_SEEKING':
         return 'TRUE';
       case 'DETAILED_BUFFER_STATS':
