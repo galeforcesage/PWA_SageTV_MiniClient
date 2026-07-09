@@ -2941,11 +2941,16 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _onDisconnect(reason, closeCode) {
-    // Only an explicit exit request should hard-stop reconnect logic.
-    // Clean close codes (1000/1001) can occur during transient media
-    // restarts; treat those as reconnectable unless exit was requested.
-    if (this._exitRequested) {
-      console.log(`[Connection] Exit requested (code=${closeCode}) — skipping reconnect`);
+    // Skip reconnect for user-intentional exits. Two paths get us here:
+    //   1. Server sent GFXCMD_DEINIT before closing (sets _exitRequested).
+    //   2. Server closed the GFX socket cleanly (code 1000 or 1001) with no
+    //      DEINIT, which SageTV's "Exit" menu action does. The GFX socket
+    //      only closes cleanly on deliberate exits (media session churn
+    //      affects the MEDIA socket, not GFX), so treat both as user exit.
+    // If we ever need to distinguish, add a heuristic here.
+    const isUserExit = this._exitRequested || closeCode === 1000 || closeCode === 1001;
+    if (isUserExit) {
+      console.log(`[Connection] Exit (exitRequested=${this._exitRequested}, code=${closeCode}) — skipping reconnect`);
       this.alive = false;
       this._stopKeepalive();
       this._stopBandwidthTracking();
