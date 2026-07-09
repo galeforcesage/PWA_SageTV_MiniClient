@@ -157,6 +157,154 @@ function _resolveBridgeHttpBase() {
   return _resolveBridgeHttpBases()[0] || null;
 }
 
+// ── First-run LAN bootstrap (Tizen) ─────────────────────────
+//
+// Chicken-and-egg: on a freshly installed Tizen wgt there is no saved server
+// and no http(s) origin (the app loads from the local package), so
+// runDiscovery() has no bridge base to hit and no-ops. SageTV's own discovery
+// is a UDP broadcast the browser can't send. We break the deadlock using the
+// one platform capability a Tizen web app *does* have: tizen.systeminfo tells
+// us the TV's own LAN IP. From that we derive the /24 and probe each host's
+// cheap http://<host>:8100/api/server-info (the bridge's plain-HTTP port, no
+// TLS cert needed) until one answers. That host is a bridge; we then ask it
+// to run the real SageTV UDP discovery via /discover. LAN-scoped by design.
+
+function _isUsableIp(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  if (ip === '0.0.0.0' || ip.startsWith('127.')) return false;
+  const parts = ip.split('.');
+  return parts.length === 4 && parts.every((p) => {
+    const n = Number(p);
+    return Number.isInteger(n) && n >= 0 && n <= 255;
+  });
+}
+
+/** Resolve the TV's own LAN IPv4 via tizen.systeminfo (ethernet first, then Wi-Fi). */
+function _getTizenLanIp() {
+  return new Promise((resolve) => {
+    let tzsi = null;
+    try { tzsi = window.tizen && tizen.systeminfo; } catch { tzsi = null; }
+    if (!tzsi || typeof tzsi.getPropertyValue !== 'function') {
+      resolve(null);
+      return;
+    }
+    const tryProp = (prop) => new Promise((res) => {
+      try {
+        tzsi.getPropertyValue(prop,
+          (data) => res(_isUsableIp(data?.ipAddress) ? data.ipAddress : null),
+          () => res(null));
+      } catch { res(null); }
+    });
+    // TVs are usually wired; try ethernet first, then Wi-Fi.
+    tryProp('ETHERNET_NETWORK').then((eth) => {
+      if (eth) { resolve(eth); return; }
+      tryProp('WIFI_NETWORK').then((wifi) => resolve(wifi || null));
+    });
+  });
+}
+
+/**
+ * Scan the local /24 for a PWA bridge and, if found, run its SageTV discovery.
+ * Only meaningful when we have no bridge base yet (fresh Tizen install).
+ * Returns true if a bridge was found and discovery populated the grid.
+ */
+async function bootstrapLanDiscovery({ silent = true } = {}) {
+  if (_discoverInflight) return false;
+  if (_resolveBridgeHttpBases().length > 0) return false; // already have a base
+
+  const ip = await _getTizenLanIp();
+  if (!ip) return false;
+  const parts = ip.split('.');
+  const base = parts.slice(0, 3).join('.');
+  const ownLast = parseInt(parts[3], 10);
+
+  // Probe order: gateway (.1) first, then ascending, skipping our own address.
+  const order = [];
+  const push = (n) => {
+    if (n >= 1 && n <= 254 && n !== ownLast && !order.includes(n)) order.push(n);
+  };
+  push(1);
+  for (let n = 1; n <= 254; n++) push(n);
+
+  _discoverInflight = true;
+  const btn = document.getElementById('btn-discover');
+  const prevLabel = btn?.textContent;
+  if (!silent && btn) { btn.textContent = 'Scanning…'; btn.disabled = true; }
+  if (!silent) {
+    connectStatus.textContent = `Scanning ${base}.0/24 for a SageTV bridge…`;
+    connectStatus.hidden = false;
+    connectError.hidden = true;
+  }
+
+  const CONCURRENCY = 20;
+  const PROBE_TIMEOUT_MS = 900;
+  let foundBase = null;
+  let idx = 0;
+  const controllers = new Set();
+
+  const worker = async () => {
+    while (foundBase === null && idx < order.length) {
+      const n = order[idx++];
+      const host = `${base}.${n}`;
+      const ctrl = new AbortController();
+      controllers.add(ctrl);
+      const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+      try {
+        const resp = await fetch(`http://${host}:8100/api/server-info`,
+          { cache: 'no-store', signal: ctrl.signal });
+        if (resp.ok && foundBase === null) foundBase = `http://${host}:8100`;
+      } catch { /* refused / timeout / not a bridge */ }
+      finally { clearTimeout(timer); controllers.delete(ctrl); }
+    }
+  };
+
+  try {
+    const workers = [];
+    for (let i = 0; i < CONCURRENCY; i++) workers.push(worker());
+    await Promise.all(workers);
+  } finally {
+    for (const c of controllers) { try { c.abort(); } catch { /* ignore */ } }
+  }
+
+  if (!foundBase) {
+    _discoverInflight = false;
+    if (!silent && btn) { btn.textContent = prevLabel || 'Find on LAN'; btn.disabled = false; }
+    if (!silent) {
+      connectStatus.hidden = true;
+      connectError.textContent = 'No SageTV bridge found on the local network.';
+      connectError.hidden = false;
+    }
+    return false;
+  }
+
+  // Bridge found — ask it to run the real SageTV UDP discovery.
+  let ok = false;
+  try {
+    const resp = await fetch(`${foundBase}/discover?force=1`, { cache: 'no-store' });
+    const body = await resp.json();
+    const rawServers = Array.isArray(body?.servers) ? body.servers : [];
+    const bridgeWsUrl = foundBase.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
+    _discoveredServers = rawServers.map((s) => ({ ...s, _bridgeUrl: bridgeWsUrl }));
+    if (!silent) {
+      connectStatus.textContent = _discoveredServers.length
+        ? `Found ${_discoveredServers.length} SageTV server${_discoveredServers.length === 1 ? '' : 's'}.`
+        : 'Bridge found, but no SageTV servers responded.';
+    }
+    renderServerGrid();
+    ok = _discoveredServers.length > 0;
+  } catch (err) {
+    if (!silent) {
+      connectStatus.hidden = true;
+      connectError.textContent = `Bridge found but discovery failed: ${err?.message || err}`;
+      connectError.hidden = false;
+    }
+  } finally {
+    _discoverInflight = false;
+    if (!silent && btn) { btn.textContent = prevLabel || 'Find on LAN'; btn.disabled = false; }
+  }
+  return ok;
+}
+
 async function runDiscovery({ force = false, silent = false } = {}) {
   if (_discoverInflight) return;
   const bases = _resolveBridgeHttpBases();
@@ -277,6 +425,14 @@ async function init() {
   // servers into the grid. No-op if we don't yet know any bridge URL.
   runDiscovery({ silent: true });
 
+  // Fresh Tizen install: no saved server + no http origin means runDiscovery()
+  // above has nothing to hit. Bootstrap by scanning the LAN for a bridge using
+  // the TV's own IP (LAN-only; SageTV discovery is LAN-scoped). Runs silently
+  // in the background so the connect screen stays responsive.
+  if (_isTizen && (session.getSavedServers() || []).length === 0) {
+    bootstrapLanDiscovery({ silent: true });
+  }
+
   // Tizen TV hardware back/exit key.
   // Without this listener the WebView exits the app on Back. Route Back to
   // the client screen (SageTV BACK command) or to dialog/drawer close on
@@ -379,8 +535,14 @@ function setupEventHandlers() {
 
   // Find on LAN button — asks the bridge to broadcast SageTV locator probes
   // and renders any replies as discovered cards next to the saved ones.
+  // If we have no bridge base yet (fresh Tizen install), first scan the LAN
+  // for a bridge using the TV's own IP, then run discovery on it.
   document.getElementById('btn-discover')?.addEventListener('click', () => {
-    runDiscovery({ force: true });
+    if (_resolveBridgeHttpBases().length === 0) {
+      bootstrapLanDiscovery({ silent: false });
+    } else {
+      runDiscovery({ force: true });
+    }
   });
 
   // Add/Edit Server dialog — Save
