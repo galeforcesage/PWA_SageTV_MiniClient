@@ -82,6 +82,52 @@ export class CanvasRenderer {
     // Pending async image load tracking
     this._pendingImageLoads = 0;
     this.onImagesReady = null; // callback when all pending loads complete
+
+    // ── Frame-cache fast path ────────────────────────────────────────────
+    // On constrained GPUs (iPad, Tizen), each DRAWTEXTURED costs ~2 ms even
+    // for tiny quads. A typical SageTV menu frame issues 700-1200 of them,
+    // so a single arrow-key repaint takes 1.5-2.5 s. But most of those
+    // frames are BYTE-IDENTICAL to the previous one — SageTV re-sends the
+    // entire scene even when nothing visible changed (background scroller
+    // ticks, focus-rect fade animation, etc.).
+    //
+    // Strategy: intercept draw commands during startFrame..flipBuffer.
+    // Build a running hash of the (name, args) sequence AND queue them
+    // without executing. On flipBuffer, if the hash matches the previous
+    // frame's hash AND nothing invalidated the cache (image loads, surface
+    // changes), blit the previous frame's snapshot instead of replaying.
+    // Otherwise, replay from the queue and re-snapshot.
+    //
+    // Snapshot lives on a hidden canvas (~ 3.5 MB at 1280x720). Works per
+    // browser session — no bridge state, so it's safe for multiple
+    // simultaneous clients.
+    //
+    // Enabled everywhere by default: on Chromium the per-hit saving is only
+    // ~10 ms but that's still ~500 fewer drawImage calls per animation-tick
+    // frame, which cuts CPU / battery on laptops and reduces main-thread
+    // burn during menu bursts. Break-even is roughly 15% hit rate; typical
+    // idle repaints (background scrollers, focus fades) blow past that.
+    // Set options.frameCache = false to disable per instance.
+    this._frameCacheEnabled = options.frameCache !== undefined
+      ? !!options.frameCache
+      : true;
+    this._frameOps = null;
+    this._frameHash = 0;
+    this._frameInvalidated = false;
+    this._prevFrameHash = 0;
+    this._snapshotValid = false;
+    this._cacheHits = 0;
+    this._cacheMisses = 0;
+    this._cacheSkipped = 0;   // draws we would have queued had cache stayed valid
+    this._recording = false;  // true only between startFrame and flipBuffer
+    this._replaying = false;  // true while _executeOp replays queued ops
+    this._invalidateReasons = Object.create(null); // {reason: count}
+    if (this._frameCacheEnabled) {
+      this._snapshotCanvas = document.createElement('canvas');
+      this._snapshotCanvas.width = this.width;
+      this._snapshotCanvas.height = this.height;
+      this._snapshotCtx = this._configureCtx(this._snapshotCanvas.getContext('2d', { alpha: true }));
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────
@@ -127,6 +173,12 @@ export class CanvasRenderer {
     this.ctx = this._configureCtx(this.canvas.getContext('2d', { alpha: true }));
     this.backCtx = this._configureCtx(this.backCanvas.getContext('2d', { alpha: true }));
     this.activeCtx = this.backCtx;
+    if (this._frameCacheEnabled && this._snapshotCanvas) {
+      this._snapshotCanvas.width = width;
+      this._snapshotCanvas.height = height;
+      this._snapshotCtx = this._configureCtx(this._snapshotCanvas.getContext('2d', { alpha: true }));
+      this._snapshotValid = false; // invalidate on resize
+    }
     console.log(`[Renderer] Resized to ${width}x${height}`);
   }
 
@@ -136,9 +188,54 @@ export class CanvasRenderer {
     this.targetSurface = 0;
     this._frameDrawImage = 0;
     this._frameScaledDraw = 0;
+
+    // Frame-cache: begin recording draws for this frame.
+    if (this._frameCacheEnabled) {
+      this._frameOps = [];
+      this._frameHash = 0;
+      this._frameInvalidated = false;
+      this._recording = true;
+    }
   }
 
   flipBuffer() {
+    // Frame-cache fast path: decide hit or miss before touching the front canvas.
+    if (this._frameCacheEnabled && this._recording) {
+      this._recording = false;
+      const hit = !this._frameInvalidated
+        && this._snapshotValid
+        && this._frameOps.length > 0
+        && this._frameHash === this._prevFrameHash;
+
+      if (hit) {
+        // Skip ALL queued draws. Just blit the previous snapshot.
+        this.backCtx.globalCompositeOperation = 'copy';
+        this.backCtx.drawImage(this._snapshotCanvas, 0, 0);
+        this.backCtx.globalCompositeOperation = 'source-over';
+        this._cacheHits++;
+        this._cacheSkipped += this._frameOps.length;
+      } else {
+        // Miss: replay all queued ops now, then snapshot the result.
+        this._replaying = true;
+        try {
+          for (let i = 0; i < this._frameOps.length; i++) {
+            const op = this._frameOps[i];
+            this._executeOp(op.m, op.a);
+          }
+        } finally {
+          this._replaying = false;
+        }
+        // Snapshot back-canvas for the next frame's potential hit.
+        this._snapshotCtx.globalCompositeOperation = 'copy';
+        this._snapshotCtx.drawImage(this.backCanvas, 0, 0);
+        this._snapshotCtx.globalCompositeOperation = 'source-over';
+        this._snapshotValid = true;
+        this._cacheMisses++;
+      }
+      this._prevFrameHash = this._frameHash;
+      this._frameOps = null; // release memory
+    }
+
     // Use 'copy' compositing so transparent areas (video window) pass through
     // to the front canvas, allowing the <video> element to show beneath.
     this.ctx.globalCompositeOperation = 'copy';
@@ -149,6 +246,93 @@ export class CanvasRenderer {
 
   isFirstFrameRendered() {
     return this._firstFrameRendered;
+  }
+
+  // ── Frame-cache helpers ─────────────────────────────────────
+
+  /**
+   * If frame-cache is active AND currently recording, hash this draw and
+   * queue it. Returns true if the caller should skip its own execution.
+   * Non-main-surface draws force execution (surfaces have persistent state
+   * across frames that we can't easily snapshot).
+   */
+  _recordOp(name, args) {
+    if (this._replaying) return false;              // replay path executes normally
+    if (!this._frameCacheEnabled) return false;
+    if (!this._recording) return false;             // outside startFrame..flipBuffer
+    if (this._frameInvalidated) return false;
+    if (this.targetSurface !== 0) {
+      // Non-main-surface draws can't be safely cached: their persistent
+      // pixels are needed by later drawTexture(handle=surface) calls.
+      // Invalidate this frame and let the caller execute normally.
+      this._invalidateFrameCache('non-main-surface-draw');
+      return false;
+    }
+    this._hashOp(name, args);
+    this._frameOps.push({ m: name, a: args });
+    return true;
+  }
+
+  /** Cheap 32-bit rolling hash of (name, args). */
+  _hashOp(name, args) {
+    let h = this._frameHash | 0;
+    const M = Math.imul;
+    // Mix in the method name
+    for (let i = 0; i < name.length; i++) h = M(h, 31) + name.charCodeAt(i) | 0;
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      const t = typeof v;
+      if (t === 'number') {
+        // Fold 32-bit int and fractional bits
+        h = M(h, 31) + (v | 0) | 0;
+        h = M(h, 31) + ((v * 65536) | 0) | 0;
+      } else if (t === 'string') {
+        h = M(h, 31) + v.length | 0;
+        for (let j = 0; j < v.length; j++) h = M(h, 31) + v.charCodeAt(j) | 0;
+      } else if (v && t === 'object') {
+        // fontInfo etc. — cache the JSON per identity so we don't restringify per frame
+        let s = v.__perfHashJson;
+        if (!s) {
+          try { s = JSON.stringify(v); } catch { s = '?'; }
+          try { Object.defineProperty(v, '__perfHashJson', { value: s, enumerable: false }); }
+          catch { /* frozen object; fall through, will restringify next time */ }
+        }
+        for (let j = 0; j < s.length; j++) h = M(h, 31) + s.charCodeAt(j) | 0;
+      } else if (v === true) {
+        h = M(h, 31) + 1 | 0;
+      } else if (v === null || v === undefined || v === false) {
+        h = M(h, 31) + 0 | 0;
+      }
+    }
+    this._frameHash = h;
+  }
+
+  /** Mark the current frame's cache as invalid so its ops must be replayed on miss. */
+  _invalidateFrameCache(reason) {
+    if (!this._recording || this._replaying) return;
+    if (!this._frameInvalidated) {
+      this._frameInvalidated = true;
+      this._snapshotValid = false; // prev snapshot may no longer be a valid reference
+    }
+    this._invalidateReasons[reason] = (this._invalidateReasons[reason] || 0) + 1;
+  }
+
+  /** Replay one recorded op with the cache path bypassed. */
+  _executeOp(name, args) {
+    // Dispatch by name. Kept explicit (not this[name](...)) so we don't
+    // accidentally expose a non-drawing method to the queue.
+    switch (name) {
+      case 'drawRect':      return this.drawRect(...args);
+      case 'fillRect':      return this.fillRect(...args);
+      case 'clearRect':     return this.clearRect(...args);
+      case 'drawOval':      return this.drawOval(...args);
+      case 'fillOval':      return this.fillOval(...args);
+      case 'drawRoundRect': return this.drawRoundRect(...args);
+      case 'fillRoundRect': return this.fillRoundRect(...args);
+      case 'drawLine':      return this.drawLine(...args);
+      case 'drawText':      return this.drawText(...args);
+      case 'drawTexture':   return this.drawTexture(...args);
+    }
   }
 
   // ── Primitives ────────────────────────────────────────────
@@ -190,6 +374,7 @@ export class CanvasRenderer {
   }
 
   drawRect(x, y, width, height, thickness, argbTL, argbTR, argbBR, argbBL) {
+    if (this._recordOp('drawRect', arguments)) return;
     const ctx = this.activeCtx;
     ctx.lineWidth = thickness;
     this._setGradientStroke(ctx, x, y, width, height, argbTL, argbTR, argbBR, argbBL);
@@ -197,18 +382,21 @@ export class CanvasRenderer {
   }
 
   fillRect(x, y, width, height, argbTL, argbTR, argbBR, argbBL) {
+    // dirty-full hint runs at record time so cache-hit frames still get the metric
+    if (perf.enabled && !this._replaying &&
+        x <= 0 && y <= 0 &&
+        (x + width) >= this.width && (y + height) >= this.height) {
+      perf.noteFullClear();
+    }
+    if (this._recordOp('fillRect', arguments)) return;
     const ctx = this.activeCtx;
     this._setGradientFill(ctx, x, y, width, height, argbTL, argbTR, argbBR, argbBL);
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillRect(x, y, width, height);
-    // Phase 1 dirty-region hint: a full-canvas fill == full repaint.
-    if (perf.enabled && x <= 0 && y <= 0 &&
-        (x + width) >= this.width && (y + height) >= this.height) {
-      perf.noteFullClear();
-    }
   }
 
   clearRect(x, y, width, height, argbTL, argbTR, argbBR, argbBL) {
+    if (this._recordOp('clearRect', arguments)) return;
     const ctx = this.activeCtx;
     // Clear to transparent then fill with color
     ctx.clearRect(x, y, width, height);
@@ -219,6 +407,7 @@ export class CanvasRenderer {
   }
 
   drawOval(x, y, width, height, thickness, argbTL, argbTR, argbBR, argbBL, clipX, clipY, clipW, clipH) {
+    if (this._recordOp('drawOval', arguments)) return;
     const ctx = this.activeCtx;
     ctx.save();
     if (clipW > 0 && clipH > 0) {
@@ -235,6 +424,7 @@ export class CanvasRenderer {
   }
 
   fillOval(x, y, width, height, argbTL, argbTR, argbBR, argbBL, clipX, clipY, clipW, clipH) {
+    if (this._recordOp('fillOval', arguments)) return;
     const ctx = this.activeCtx;
     ctx.save();
     if (clipW > 0 && clipH > 0) {
@@ -250,6 +440,7 @@ export class CanvasRenderer {
   }
 
   drawRoundRect(x, y, width, height, thickness, arcRadius, argbTL, argbTR, argbBR, argbBL, clipX, clipY, clipW, clipH) {
+    if (this._recordOp('drawRoundRect', arguments)) return;
     const ctx = this.activeCtx;
     ctx.save();
     if (clipW > 0 && clipH > 0) {
@@ -265,6 +456,7 @@ export class CanvasRenderer {
   }
 
   fillRoundRect(x, y, width, height, arcRadius, argbTL, argbTR, argbBR, argbBL, clipX, clipY, clipW, clipH) {
+    if (this._recordOp('fillRoundRect', arguments)) return;
     const ctx = this.activeCtx;
     ctx.save();
     if (clipW > 0 && clipH > 0) {
@@ -294,6 +486,7 @@ export class CanvasRenderer {
   }
 
   drawLine(x1, y1, x2, y2, argb1, argb2) {
+    if (this._recordOp('drawLine', arguments)) return;
     const ctx = this.activeCtx;
     if (argb1 === argb2) {
       ctx.strokeStyle = argbToRgba(argb1);
@@ -323,7 +516,8 @@ export class CanvasRenderer {
    * @param {number} clipH
    */
   drawText(x, y, text, fontInfo, argb, clipX, clipY, clipW, clipH) {
-    if (perf.enabled) perf.bumpText();
+    if (perf.enabled && !this._replaying) perf.bumpText();
+    if (this._recordOp('drawText', arguments)) return;
     const ctx = this.activeCtx;
     const hasClip = clipW > 0 && clipH > 0;
 
@@ -361,6 +555,7 @@ export class CanvasRenderer {
    * Allocate an image slot.
    */
   loadImage(handle, width, height) {
+    this._invalidateFrameCache('loadImage');
     // Create a raw buffer for line-by-line accumulation.
     // Actual Canvas + putImageData is deferred until the image is first used
     // (drawTexture/xfmImage). This avoids expensive per-line putImageData
@@ -382,6 +577,7 @@ export class CanvasRenderer {
    * happens in bulk during _finalizeImage() using Uint32Array.
    */
   loadImageLine(handle, line, len, data) {
+    this._invalidateFrameCache('loadImageLine');
     const img = this.images.get(handle);
     if (!img || !img._rawBuffer) return;
 
@@ -509,6 +705,7 @@ export class CanvasRenderer {
    * matching Java's synchronous decode behavior.
    */
   loadCompressedImage(handle, data) {
+    this._invalidateFrameCache('loadCompressedImage');
     const blob = new Blob([data]);
     if (typeof createImageBitmap === 'function') {
       this._pendingImageLoads++;
@@ -540,6 +737,7 @@ export class CanvasRenderer {
    * Unload an image, freeing memory.
    */
   unloadImage(handle) {
+    this._invalidateFrameCache('unloadImage');
     const img = this.images.get(handle);
     if (img) {
       this._releaseImageResources(img);
@@ -578,6 +776,7 @@ export class CanvasRenderer {
    * Draw a textured rectangle (blit from image cache).
    */
   drawTexture(x, y, width, height, handle, srcx, srcy, srcw, srch, blend) {
+    if (this._recordOp('drawTexture', arguments)) return;
     const ctx = this.activeCtx;
     this._ensureFinalized(handle);
     const img = this.images.get(handle) || this.surfaces.get(handle);
@@ -657,6 +856,7 @@ export class CanvasRenderer {
    * Create an off-screen rendering surface.
    */
   createSurface(handle, width, height) {
+    this._invalidateFrameCache('createSurface');
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -672,6 +872,12 @@ export class CanvasRenderer {
    * handle=0 means the main (back) canvas.
    */
   setTargetSurface(handle) {
+    if (handle !== 0 && handle !== this.targetSurface) {
+      // Switching to a non-main surface within a frame: draws that follow
+      // will hit non-main and force invalidation via _recordOp. But also
+      // mark now so we don't have a half-recorded frame in the queue.
+      this._invalidateFrameCache('setTargetSurface');
+    }
     this.targetSurface = handle;
     if (handle === 0) {
       this.activeCtx = this.backCtx;
@@ -692,6 +898,7 @@ export class CanvasRenderer {
    * Transform an image (resize + optional corner mask).
    */
   xfmImage(srcHandle, destHandle, destWidth, destHeight, maskCornerArc) {
+    this._invalidateFrameCache('xfmImage');
     this._ensureFinalized(srcHandle);
     const srcImg = this.images.get(srcHandle);
     if (!srcImg) return;
@@ -970,6 +1177,11 @@ export class CanvasRenderer {
       scaledDrawsThisFrame: this._frameScaledDraw,
       evictionsThisFrame: 0,
       evictionsTotal: 0,
+      // Frame-cache stats (0 if disabled)
+      frameCacheEnabled: this._frameCacheEnabled,
+      frameCacheHits: this._cacheHits,
+      frameCacheMisses: this._cacheMisses,
+      frameCacheSkipped: this._cacheSkipped,
     };
   }
 }

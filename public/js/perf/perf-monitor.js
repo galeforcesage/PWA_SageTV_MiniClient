@@ -39,6 +39,11 @@ class PerfMonitor {
   }
 
   _detectEnabled() {
+    // TEMPORARY (Phase 1 diagnostics on Tizen/iPad, 2026-07-09):
+    // Force-on by default. Tizen and iPad have no easy way to set URL params
+    // or run console commands, and we need perf data on those clients. To
+    // disable, set localStorage 'sagetv.perf' = '0' or add '?perf=0' to the URL.
+    // Revert this block once Tizen perf is measured and Phase 2 begins.
     try {
       const params = new URLSearchParams(globalThis.location?.search || '');
       const q = params.get('perf');
@@ -46,10 +51,86 @@ class PerfMonitor {
       if (q === '0' || q === 'false') return false;
     } catch { /* no URL context */ }
     try {
-      return globalThis.localStorage?.getItem('sagetv.perf') === '1';
-    } catch {
-      return false;
+      const ls = globalThis.localStorage?.getItem('sagetv.perf');
+      if (ls === '0' || ls === 'false') return false;
+    } catch { /* ignore */ }
+    return true; // default ON (was: false)
+  }
+
+  /**
+   * On-screen overlay: pins the last N perf lines to the top-right of the
+   * viewport so devices without a devtools console (Tizen TVs, iPad standalone
+   * PWA) can still see the diagnostic output. Enabled whenever perf is on,
+   * unless localStorage 'sagetv.perfOverlay' === '0' or URL has '?perfoverlay=0'.
+   */
+  _overlayEnabled() {
+    try {
+      const params = new URLSearchParams(globalThis.location?.search || '');
+      const q = params.get('perfoverlay');
+      if (q === '1' || q === 'true') return true;
+      if (q === '0' || q === 'false') return false;
+    } catch { /* ignore */ }
+    try {
+      const ls = globalThis.localStorage?.getItem('sagetv.perfOverlay');
+      if (ls === '0' || ls === 'false') return false;
+    } catch { /* ignore */ }
+    return true; // default ON when perf is on
+  }
+
+  _ensureOverlay() {
+    if (this._overlay || typeof document === 'undefined') return this._overlay || null;
+    if (!this._overlayEnabled()) return null;
+    // Wait for body if the module loaded before DOMContentLoaded.
+    if (!document.body) {
+      document.addEventListener('DOMContentLoaded', () => this._ensureOverlay(), { once: true });
+      return null;
     }
+    const el = document.createElement('div');
+    el.id = 'sagetv-perf-overlay';
+    el.style.cssText = [
+      'position:fixed',
+      'top:4px',
+      'right:4px',
+      'z-index:2147483647',
+      'max-width:640px',
+      'max-height:60vh',
+      'overflow:hidden',
+      'padding:4px 6px',
+      'background:rgba(0,0,0,0.72)',
+      'color:#0f0',
+      'font:10px/1.25 ui-monospace,Consolas,Menlo,monospace',
+      'white-space:pre',
+      'pointer-events:none',
+      'border:1px solid rgba(0,255,0,0.4)',
+      'border-radius:4px',
+      'text-shadow:0 0 1px #000',
+    ].join(';');
+    document.body.appendChild(el);
+    this._overlay = el;
+    this._overlayLines = [];
+    return el;
+  }
+
+  _appendOverlay(line, sev) {
+    const el = this._ensureOverlay();
+    if (!el) return;
+    // Ring buffer of last N lines. Keep small enough that the overlay
+    // stays under ~60vh even on 1280x720 Tizen.
+    const MAX = 18;
+    // Color-code severity in the overlay.
+    const color = sev === 'error' ? '#f66' : sev === 'warn' ? '#fc0' : '#8f8';
+    const span = `<span style="color:${color}">${this._escapeHtml(line)}</span>`;
+    this._overlayLines.push(span);
+    if (this._overlayLines.length > MAX) this._overlayLines.shift();
+    el.innerHTML = this._overlayLines.join('\n');
+  }
+
+  _escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   get enabled() {
@@ -285,12 +366,22 @@ class PerfMonitor {
       const usedMiB = (fr.cache.usedBytes / 1048576).toFixed(1);
       bits.push(`cache=${fr.cache.imageCount}img/${usedMiB}MiB`);
       if (fr.cache.usedBytes >= fr.cache.budgetBytes) bits.push('CACHE-FULL');
+      // Frame-cache hit/miss/skipped totals (Phase 2 retained-mode fast path).
+      if (fr.cache.frameCacheEnabled) {
+        const hits = fr.cache.frameCacheHits | 0;
+        const miss = fr.cache.frameCacheMisses | 0;
+        const total = hits + miss;
+        const hitPct = total ? Math.round((hits * 100) / total) : 0;
+        bits.push(`fcache=${hits}h/${miss}m/${hitPct}%`);
+      }
     }
     if (Number.isFinite(fr.wsBufferedEnd) && fr.wsBufferedEnd > 0) bits.push(`wsBuf=${fr.wsBufferedEnd}`);
     const line = `${tag} ${bits.join(' ')}`;
     if (sev === 'log') console.log(line);
     else if (sev === 'warn') console.warn(`${line}  ${this._cmdBreakdown(fr)}`);
     else console.error(`${line}  ${this._cmdBreakdown(fr)}`);
+    // Also mirror to on-screen overlay for devices without devtools (Tizen, iPad standalone).
+    this._appendOverlay(line, sev);
   }
 
   _cmdBreakdown(fr) {
