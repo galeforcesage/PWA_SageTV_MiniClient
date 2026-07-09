@@ -214,3 +214,99 @@ comes from whatever jar is on the classpath at JVM start. This is fine
 for personal dev but drifts the state → forget to do a Plugin Manager
 install eventually and you'll be surprised what an "official" install
 reverts to. Use sparingly.
+
+
+---
+
+## Deploying from Windows: known traps
+
+### Trap: `Compress-Archive` writes zip entries with backslash separators
+
+PowerShell 5.1's `Compress-Archive` cmdlet on Windows writes zip entry names
+using **backslash** path separators (e.g. `js\perf\perf-monitor.js`). The
+ZIP spec requires forward slashes, but Windows tools tolerate both.
+
+**Linux Python's `zipfile.extractall()` (and stock `unzip`) treats the
+backslashes as literal characters in the filename**, not as directory
+separators. So the extraction silently creates a single file called
+`js\perf\perf-monitor.js` (with literal backslashes) at the extraction root
+instead of building the intended directory tree. Your "sync" then appears
+to succeed while leaving the real target files untouched.
+
+**Symptoms:**
+- `unzip -l` on Linux shows entries with `\` in the names.
+- After extraction, the target directory tree is unchanged.
+- `md5sum` of the file you were trying to update is still the old hash.
+- `find <dir> -name '*\\*'` finds stray backslash-named files.
+
+**Rules:**
+1. **Do NOT use `Compress-Archive` to build zips that will be extracted on
+   Linux.** Either:
+   - Use `scp -r <dir> user@host:<dest>` for a one-shot sync (preserves
+     proper paths natively).
+   - Use `tar -C <parent> -cf - <dir> | ssh user@host 'tar -xf -'` for a
+     streaming sync (also preserves proper paths).
+   - Or build the zip on Linux itself using `python3 -c "import zipfile,os;
+     ..."` with `arc = os.path.relpath(fp, root).replace(os.sep, '/')`.
+2. When you MUST produce a zip on Windows for Linux consumption, do it via
+   Python or 7-Zip — both write forward-slash entry names by default. Never
+   `Compress-Archive`.
+3. Any Windows-side "package + ship + extract on Linux" step deserves a
+   post-extract sanity check:
+   ```bash
+   md5sum <target-file>  # must match the intended source md5
+   wc -l  <target-file>
+   ```
+   If MD5 differs from expected, the extraction is broken — don't proceed.
+
+### Trap: PowerShell mangles nested quoting for `ssh 'bash -c "…"'`
+
+PowerShell 5.1 eats at least one layer of quoting when it hosts an ssh
+command containing embedded `bash -c "..."` with pipes/redirects/heredocs.
+Always write the bash to a local `.sh` file, `scp` it, then run it with
+`tr -d '\015'` to strip CRLF before executing:
+
+```powershell
+# Create locally, ship, run
+scp .\script.sh user@host:/tmp/script.sh
+ssh user@host "tr -d '\015' < /tmp/script.sh > /tmp/script.clean.sh && bash /tmp/script.clean.sh"
+```
+
+CRLF handling: use octal `\015` in the `tr` argument. `\r` inside a bash
+double-quoted string is a literal `r` and would strip that letter from your
+script. See `/memories/agent-command-style.md` in the user profile for the
+full rule.
+
+### Trap: SageTV plugin serves web assets from disk, not from the jar
+
+The PWA MiniClient bridge (and many other SageTV plugins) serves static
+web content from `/opt/sagetv/server/<respath>/public/` on disk, populated
+at plugin-install time from the `<PackageType>System</PackageType>` zip.
+Even though the jar embeds the same assets as classpath resources
+(`pwa-public/…`), the disk copy takes precedence at request time.
+
+**Consequence:** deploying a new jar alone is NOT enough. To ship JS / CSS
+/ HTML / icon changes you must also:
+1. Rebuild the System zip with the current `public/` tree (forward-slash
+   paths — see trap above).
+2. Update the `<MD5>` in `SageTVPluginsDev.xml` for the System package.
+3. Either click Plugin Manager → Update in the SageTV UI, OR sync
+   `public/` directly to `/opt/sagetv/server/<respath>/public/` with
+   `scp -r`.
+
+If you deploy the jar but skip the System-package refresh, the client will
+keep fetching pre-existing disk copies of your old JS. The bridge's Jetty
+handler does not fall back to the jar's classpath resources when a disk
+file exists.
+
+Verify after deploy by fetching one JS file via a distinctive substring
+you know is unique to the new build:
+
+```powershell
+Invoke-WebRequest "http://<sage-ip>:8099/js/perf/perf-monitor.js" -UseBasicParsing |
+  Select-Object -ExpandProperty Content |
+  Select-String 'noteServerBytes' -CaseSensitive
+```
+
+(Or, in the browser DevTools console after reload:
+`(await (await fetch('/js/perf/perf-monitor.js', {cache:'no-store'})).text()).includes('noteServerBytes')`.)

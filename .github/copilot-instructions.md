@@ -49,3 +49,33 @@ It documents:
 Any plan involving Plugin Manager Update, `SageTVPluginsDev.d/`, or the phrase
 "hot-swap the plugin without stopsage" must be validated against that doc
 first.
+
+
+## Deploying from Windows to Linux (traps)
+
+Windows → Linux deploy pitfalls that have bitten this repo repeatedly. Full
+detail in [docs/sagetv-plugin-dev-mode.md](../docs/sagetv-plugin-dev-mode.md)
+under "Deploying from Windows: known traps".
+
+- **NEVER use PowerShell `Compress-Archive`** to build a zip that will be
+  extracted on Linux. It writes entry names with backslash separators
+  (`js\perf\perf-monitor.js`). Linux Python `zipfile.extractall()` treats
+  those as literal filename characters — no directory tree, silent
+  extraction failure. Use `scp -r <dir>` or `tar | ssh 'tar -xf -'`
+  instead, or build the zip on Linux with Python `os.path.relpath(...).replace(os.sep,'/')`.
+
+- **Always sanity-check the deployed file's md5** matches the intended source
+  after any Windows→Linux "package + extract" step. If MD5 disagrees, the
+  transfer/extraction is broken; do not proceed.
+
+- **PWA MiniClient (and many SageTV plugins) serve web assets from disk**,
+  not from jar classpath resources. Deploying a new jar alone is NOT enough
+  for JS / CSS / HTML changes: you must also refresh
+  `/opt/sagetv/server/<respath>/public/` (either by clicking Plugin Manager
+  → Update after refreshing the System zip, or by `scp -r public/` directly).
+
+- **PowerShell mangles nested quoting for `ssh 'bash -c "…"'`**. Write any
+  non-trivial bash to a local `.sh` file, `scp` it, run with
+  `tr -d '\015' < script.sh > script.clean.sh && bash script.clean.sh`.
+  See the persistent user memory `agent-command-style.md` for the full
+  rule and the CRLF `\015` vs `\r` gotcha.
