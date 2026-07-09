@@ -357,6 +357,9 @@ class PerfMonitor {
     if (fr.textDraws) bits.push(`text=${fr.textDraws}`);
     bits.push(`dirty=${fr.dirty}`);
     bits.push(`flip=${fr.flipMs.toFixed(0)}ms`);
+    if (fr.cache && fr.cache.texBlitCount) {
+      bits.push(`blit=${fr.cache.texBlitMs.toFixed(0)}ms/${fr.cache.texBlitCount}`);
+    }
     if (fr.inputToPresentMs != null) {
       bits.push(`total=${fr.inputToPresentMs.toFixed(0)}ms`);
     } else {

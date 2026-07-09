@@ -188,6 +188,8 @@ export class CanvasRenderer {
     this.targetSurface = 0;
     this._frameDrawImage = 0;
     this._frameScaledDraw = 0;
+    this._texBlitMs = 0;      // isolated drawImage wall time this frame (perf only)
+    this._texBlitCount = 0;   // number of timed blits this frame
 
     // Frame-cache: begin recording draws for this frame.
     if (this._frameCacheEnabled) {
@@ -837,48 +839,82 @@ export class CanvasRenderer {
     const blendG = (blend >>> 8) & 0xFF;
     const blendB = blend & 0xFF;
 
-    ctx.save();
+    const wantComposite = opaqueOverwrite ? 'copy' : 'source-over';
+    const wantAlpha = opaqueOverwrite ? 1.0 : blendA;
+    const _timing = perf.enabled;
 
-    if (opaqueOverwrite) {
-      // Equivalent to GL_ONE, GL_ZERO: source replaces destination completely
-      ctx.globalCompositeOperation = 'copy';
-      ctx.globalAlpha = 1.0;
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = blendA;
+    if (blendR === 255 && blendG === 255 && blendB === 255) {
+      // ── Hot path: no color tint. Avoid ctx.save()/restore() entirely.
+      // save/restore push/pop the FULL graphics state and are dispro-
+      // portionately expensive on WebKit/Tizen. We only change two fields
+      // (globalCompositeOperation, globalAlpha), so track them per-ctx and
+      // reset to defaults after, which is far cheaper than a state stack op.
+      if (ctx._curComposite !== wantComposite) {
+        ctx.globalCompositeOperation = wantComposite;
+        ctx._curComposite = wantComposite;
+      }
+      if (ctx._curAlpha !== wantAlpha) {
+        ctx.globalAlpha = wantAlpha;
+        ctx._curAlpha = wantAlpha;
+      }
+      try {
+        if (_timing) {
+          const _b0 = perf.now();
+          ctx.drawImage(source, srcx, srcy, srcw, srch, x, y, absW, absH);
+          this._texBlitMs += perf.now() - _b0;
+          this._texBlitCount++;
+        } else {
+          ctx.drawImage(source, srcx, srcy, srcw, srch, x, y, absW, absH);
+        }
+      } catch (e) { /* image may not be loaded yet */ }
+      // Reset to the defaults every other draw method assumes.
+      if (ctx._curComposite !== 'source-over') {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx._curComposite = 'source-over';
+      }
+      if (ctx._curAlpha !== 1) {
+        ctx.globalAlpha = 1;
+        ctx._curAlpha = 1;
+      }
+      return;
     }
 
+    // ── Tint path (rare): needs a temp canvas + multiple composite ops.
+    // Keep save/restore here since it's infrequent and juggles more state.
+    ctx.save();
+    ctx.globalCompositeOperation = wantComposite;
+    ctx.globalAlpha = wantAlpha;
     try {
-      if (blendR === 255 && blendG === 255 && blendB === 255) {
-        // No color tint — just apply alpha and draw
-        ctx.drawImage(source, srcx, srcy, srcw, srch, x, y, absW, absH);
-      } else {
-        // Apply color tint via temporary canvas
-        if (!this._tintCanvas || this._tintCanvas.width < absW || this._tintCanvas.height < absH) {
-          this._tintCanvas = document.createElement('canvas');
-          this._tintCanvas.width = Math.max(absW, 256);
-          this._tintCanvas.height = Math.max(absH, 256);
-          this._tintCtx = this._configureCtx(this._tintCanvas.getContext('2d'));
-        }
-        const tc = this._tintCtx;
-        tc.globalCompositeOperation = 'source-over';
-        tc.clearRect(0, 0, absW, absH);
-        tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
-        // Multiply RGB with tint color
-        tc.globalCompositeOperation = 'multiply';
-        tc.fillStyle = `rgb(${blendR},${blendG},${blendB})`;
-        tc.fillRect(0, 0, absW, absH);
-        // Restore original alpha (multiply destroys it for translucent pixels)
-        tc.globalCompositeOperation = 'destination-in';
-        tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
-        // Draw tinted result onto target
-        ctx.drawImage(this._tintCanvas, 0, 0, absW, absH, x, y, absW, absH);
+      // Apply color tint via temporary canvas
+      if (!this._tintCanvas || this._tintCanvas.width < absW || this._tintCanvas.height < absH) {
+        this._tintCanvas = document.createElement('canvas');
+        this._tintCanvas.width = Math.max(absW, 256);
+        this._tintCanvas.height = Math.max(absH, 256);
+        this._tintCtx = this._configureCtx(this._tintCanvas.getContext('2d'));
       }
+      const tc = this._tintCtx;
+      tc.globalCompositeOperation = 'source-over';
+      tc.clearRect(0, 0, absW, absH);
+      tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
+      // Multiply RGB with tint color
+      tc.globalCompositeOperation = 'multiply';
+      tc.fillStyle = `rgb(${blendR},${blendG},${blendB})`;
+      tc.fillRect(0, 0, absW, absH);
+      // Restore original alpha (multiply destroys it for translucent pixels)
+      tc.globalCompositeOperation = 'destination-in';
+      tc.drawImage(source, srcx, srcy, srcw, srch, 0, 0, absW, absH);
+      // Draw tinted result onto target
+      const _b0 = _timing ? perf.now() : 0;
+      ctx.drawImage(this._tintCanvas, 0, 0, absW, absH, x, y, absW, absH);
+      if (_timing) { this._texBlitMs += perf.now() - _b0; this._texBlitCount++; }
     } catch (e) {
       // Image may not be loaded yet
     }
-
     ctx.restore();
+    // save/restore reset the tracked state; clear our shadow so the next
+    // fast-path draw re-asserts it.
+    ctx._curComposite = undefined;
+    ctx._curAlpha = undefined;
   }
 
   // ── Surfaces ──────────────────────────────────────────────
@@ -1213,6 +1249,10 @@ export class CanvasRenderer {
       frameCacheSkipped: this._cacheSkipped,
       // Top-2 invalidation reasons — helps explain "why is hit rate low?"
       frameCacheTopInvalidations: this._topInvalidationReasons(2),
+      // Isolated drawImage (blit) wall time this frame — tells us whether the
+      // per-texture blit itself dominates vs surrounding state/queue overhead.
+      texBlitMs: this._texBlitMs || 0,
+      texBlitCount: this._texBlitCount || 0,
     };
   }
 
