@@ -15,6 +15,7 @@
  */
 
 import { argbToRgba, argbComponents } from '../protocol/binary-utils.js';
+import { perf } from '../perf/perf-monitor.js';
 
 export class CanvasRenderer {
   /**
@@ -200,6 +201,11 @@ export class CanvasRenderer {
     this._setGradientFill(ctx, x, y, width, height, argbTL, argbTR, argbBR, argbBL);
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillRect(x, y, width, height);
+    // Phase 1 dirty-region hint: a full-canvas fill == full repaint.
+    if (perf.enabled && x <= 0 && y <= 0 &&
+        (x + width) >= this.width && (y + height) >= this.height) {
+      perf.noteFullClear();
+    }
   }
 
   clearRect(x, y, width, height, argbTL, argbTR, argbBR, argbBL) {
@@ -317,6 +323,7 @@ export class CanvasRenderer {
    * @param {number} clipH
    */
   drawText(x, y, text, fontInfo, argb, clipX, clipY, clipW, clipH) {
+    if (perf.enabled) perf.bumpText();
     const ctx = this.activeCtx;
     const hasClip = clipW > 0 && clipH > 0;
 
@@ -444,7 +451,9 @@ export class CanvasRenderer {
     // putImageData(canvas) + createImageBitmap(canvas) double conversion.
     if (typeof createImageBitmap === 'function') {
       this._pendingImageLoads++;
+      const _decT0 = perf.enabled ? perf.now() : 0;
       createImageBitmap(imageData).then((bitmap) => {
+        if (perf.enabled) perf.addImageDecodeMs(perf.now() - _decT0);
         const current = this.images.get(handle);
         if (!current) { bitmap.close?.(); return; }
         if (current.bitmap && current.bitmap !== bitmap && current.bitmap.close) {
@@ -503,7 +512,9 @@ export class CanvasRenderer {
     const blob = new Blob([data]);
     if (typeof createImageBitmap === 'function') {
       this._pendingImageLoads++;
+      const _decT0 = perf.enabled ? perf.now() : 0;
       return createImageBitmap(blob).then((bitmap) => {
+        if (perf.enabled) perf.addImageDecodeMs(perf.now() - _decT0);
         this.images.set(handle, {
           bitmap,
           canvas: null,

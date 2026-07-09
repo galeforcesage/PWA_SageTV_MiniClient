@@ -417,6 +417,9 @@ export class MiniClientConnection extends EventTarget {
     this._bytesReceivedGfx += rawLen;
     this._bytesReceivedWindow += rawLen;
 
+    // Perf: first-byte-from-server resolves serverRTT for the pending input.
+    if (perf.enabled) perf.noteServerBytes(rawLen);
+
     // If zlib is enabled, decompress the ENTIRE incoming stream
     // (Java wraps the socket with ZInputStream — all bytes are deflated)
     if (this.zipMode && this.inflater.enabled) {
@@ -469,6 +472,7 @@ export class MiniClientConnection extends EventTarget {
       let cmdCount = 0;
       const _nowFn = (typeof performance !== 'undefined' && performance.now) ? performance.now.bind(performance) : Date.now;
       const startTs = _nowFn();
+      const _perfOn = perf.enabled;
       const TIME_BUDGET_MS = 8;     // yield when this much wall-time has elapsed
       const HARD_CMD_CEILING = 500; // backstop so a tight cmd stream still flushes replies
       while (this.gfxBuffer.length >= 4) {
@@ -496,7 +500,13 @@ export class MiniClientConnection extends EventTarget {
         // Track whether ZLIB was just enabled by this message
         const wasZip = this.zipMode;
 
-        this._handleServerMessage(msgType, payload);
+        if (_perfOn) {
+          const t = _nowFn();
+          this._handleServerMessage(msgType, payload);
+          perf.addExecMs(_nowFn() - t);
+        } else {
+          this._handleServerMessage(msgType, payload);
+        }
 
         // If an image decode was started by this message, just clear it.
         // The decode runs async in the background — we don't block here
@@ -532,9 +542,11 @@ export class MiniClientConnection extends EventTarget {
         if (this.gfxBuffer.length >= 4 &&
             (cmdCount >= HARD_CMD_CEILING || (_nowFn() - startTs) >= TIME_BUDGET_MS)) {
           this._yieldChannel.port2.postMessage(null);
+          if (_perfOn) perf.addOuterMs(_nowFn() - startTs);
           return;
         }
       }
+      if (_perfOn) perf.addOuterMs(_nowFn() - startTs);
     } catch (err) {
       console.error(`[Connection] Error processing GFX buffer: ${err.message} | stack: ${err.stack}`);
     }
@@ -1892,7 +1904,13 @@ export class MiniClientConnection extends EventTarget {
 
       case GFXCMD.FLIPBUFFER: {
         hasret[0] = 1;
-        this.renderer.flipBuffer();
+        if (perf.enabled) {
+          const _t = performance.now();
+          this.renderer.flipBuffer();
+          perf.noteFlipMs(performance.now() - _t);
+        } else {
+          this.renderer.flipBuffer();
+        }
         // Frame-level perf summary — only when instrumentation is enabled.
         if (perf.enabled) {
           const cacheStats = this.renderer.getCacheStats ? this.renderer.getCacheStats() : null;

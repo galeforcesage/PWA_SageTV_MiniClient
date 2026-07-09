@@ -75,7 +75,19 @@ class PerfMonitor {
    */
   markInput(type, id) {
     if (!this._enabled) return;
-    this._pendingInput = { type, id, t: this._now() };
+    this._pendingInput = { type, id, t: this._now(), serverRttMs: null };
+  }
+
+  /**
+   * Called by connection layer whenever bytes arrive from the server. First
+   * call after markInput() resolves serverRTT (input→first server byte).
+   */
+  noteServerBytes(_n) {
+    if (!this._enabled) return;
+    const p = this._pendingInput;
+    if (p && p.serverRttMs == null) {
+      p.serverRttMs = this._now() - p.t;
+    }
   }
 
   /** Begin a frame (SageTV STARTFRAME). */
@@ -93,7 +105,48 @@ class PerfMonitor {
       loadCompressed: 0,
       xfmImage: 0,
       wsBufferedStart: 0,
+      // Phase 1 breakdown accumulators (ms)
+      outerMs: 0,        // total wall time in _processGfxBuffer while-loop
+      execMs: 0,         // wall time inside _executeGfxCommand for this frame
+      flipMs: 0,         // wall time of renderer.flipBuffer()
+      imageDecodeMs: 0,  // async createImageBitmap resolution time (this frame window)
+      imageDecodeCount: 0,
+      textDraws: 0,
+      fullClear: false,  // set if fillRect covered the whole canvas
     };
+  }
+
+  /** Accumulate outer buffer-parse wall time (includes exec time; subtract to get pure parse). */
+  addOuterMs(ms) {
+    if (this._frame && Number.isFinite(ms)) this._frame.outerMs += ms;
+  }
+
+  /** Accumulate time spent inside _executeGfxCommand (draw + flip + image handling). */
+  addExecMs(ms) {
+    if (this._frame && Number.isFinite(ms)) this._frame.execMs += ms;
+  }
+
+  /** Record the wall time of the FLIPBUFFER canvas blit. */
+  noteFlipMs(ms) {
+    if (this._frame && Number.isFinite(ms)) this._frame.flipMs = ms;
+  }
+
+  /** Tally a text-drawing operation (DRAWTEXT / DRAWTEXTEX). */
+  bumpText() {
+    if (this._frame) this._frame.textDraws++;
+  }
+
+  /** Record an image decode (createImageBitmap resolution) that completed. */
+  addImageDecodeMs(ms) {
+    if (this._frame && Number.isFinite(ms)) {
+      this._frame.imageDecodeMs += ms;
+      this._frame.imageDecodeCount++;
+    }
+  }
+
+  /** Hint from renderer: this frame did a full-canvas clear/fill. */
+  noteFullClear() {
+    if (this._frame) this._frame.fullClear = true;
   }
 
   /** Tally one GFX command by name. */
@@ -138,14 +191,21 @@ class PerfMonitor {
 
     let inputToFlipMs = null;
     let inputToPresentMs = null;
+    let inputType = null;
+    let inputId = null;
+    let serverRttMs = null;
     if (this._pendingInput) {
       inputToFlipMs = flip - this._pendingInput.t;
       inputToPresentMs = inputToFlipMs; // sync present
+      inputType = this._pendingInput.type;
+      inputId = this._pendingInput.id;
+      serverRttMs = this._pendingInput.serverRttMs;
       this._lastInput = {
-        type: this._pendingInput.type,
-        id: this._pendingInput.id,
+        type: inputType,
+        id: inputId,
         inputToFlipMs,
         inputToPresentMs,
+        serverRttMs,
       };
       this._pendingInput = null;
     }
@@ -156,6 +216,12 @@ class PerfMonitor {
     if (cacheStats && Number.isFinite(cacheStats.evictionsTotal)) {
       this._evictionsTotal = cacheStats.evictionsTotal;
     }
+
+    // Derived breakdowns
+    const execMs = f.execMs;
+    const flipMs = f.flipMs;
+    const drawMs = Math.max(0, execMs - flipMs);   // exec minus flip = pure draw/img work
+    const parseMs = Math.max(0, f.outerMs - execMs); // outer minus exec = pure parse/decompress
 
     this._lastFrame = {
       id: f.id,
@@ -169,8 +235,18 @@ class PerfMonitor {
       loadCompressed: f.loadCompressed,
       xfmImage: f.xfmImage,
       cache: cacheStats || null,
+      inputType,
+      inputId,
       inputToFlipMs,
       inputToPresentMs,
+      serverRttMs,
+      parseMs,
+      drawMs,
+      flipMs,
+      imageDecodeMs: f.imageDecodeMs,
+      imageDecodeCount: f.imageDecodeCount,
+      textDraws: f.textDraws,
+      dirty: f.fullClear ? 'full' : 'partial',
       wsBufferedStart: f.wsBufferedStart,
       wsBufferedEnd: Number.isFinite(wsBufferedEnd) ? wsBufferedEnd : null,
     };
@@ -181,23 +257,34 @@ class PerfMonitor {
 
   _log(fr) {
     const sev = fr.frameMs > 250 ? 'error' : fr.frameMs > 50 ? 'warn' : 'log';
-    const tag = fr.frameMs > 250 ? '[Perf!!]' : fr.frameMs > 50 ? '[Perf!]' : '[Perf]';
-    const bits = [
-      `f${fr.id}`,
-      `${fr.frameMs.toFixed(1)}ms`,
-      `cmds=${fr.cmdCount}`,
-    ];
-    if (fr.drawTexture) bits.push(`tex=${fr.drawTexture}`);
-    if (fr.loadImage || fr.loadCompressed) bits.push(`load=${fr.loadImage}/${fr.loadCompressed}c`);
-    if (fr.xfmImage) bits.push(`xfm=${fr.xfmImage}`);
-    if (fr.inputToPresentMs != null) bits.push(`in→present=${fr.inputToPresentMs.toFixed(1)}ms`);
+    const tag = fr.frameMs > 250 ? '[perf!!]' : fr.frameMs > 50 ? '[perf!]' : '[perf]';
+    const bits = [];
+    if (fr.inputType != null) {
+      bits.push(`${fr.inputType}=${fr.inputId}`);
+    } else {
+      bits.push(`f${fr.id}`);
+    }
+    if (fr.serverRttMs != null) bits.push(`serverRTT=${fr.serverRttMs.toFixed(0)}ms`);
+    bits.push(`cmds=${fr.cmdCount}`);
+    bits.push(`parse=${fr.parseMs.toFixed(0)}ms`);
+    bits.push(`draw=${fr.drawMs.toFixed(0)}ms`);
+    if (fr.imageDecodeCount) {
+      bits.push(`imagesDecoded=${fr.imageDecodeCount}/${fr.imageDecodeMs.toFixed(0)}ms`);
+    } else if (fr.loadImage || fr.loadCompressed) {
+      bits.push(`images=${fr.loadImage + fr.loadCompressed}`);
+    }
+    if (fr.textDraws) bits.push(`text=${fr.textDraws}`);
+    bits.push(`dirty=${fr.dirty}`);
+    bits.push(`flip=${fr.flipMs.toFixed(0)}ms`);
+    if (fr.inputToPresentMs != null) {
+      bits.push(`total=${fr.inputToPresentMs.toFixed(0)}ms`);
+    } else {
+      bits.push(`frame=${fr.frameMs.toFixed(0)}ms`);
+    }
     if (fr.cache) {
       const usedMiB = (fr.cache.usedBytes / 1048576).toFixed(1);
-      const budMiB = (fr.cache.budgetBytes / 1048576).toFixed(0);
-      bits.push(`img=${fr.cache.imageCount}/${usedMiB}MiB`);
-      bits.push(`surf=${fr.cache.surfaceCount}`);
+      bits.push(`cache=${fr.cache.imageCount}img/${usedMiB}MiB`);
       if (fr.cache.usedBytes >= fr.cache.budgetBytes) bits.push('CACHE-FULL');
-      bits.push(`bud=${budMiB}MiB`);
     }
     if (Number.isFinite(fr.wsBufferedEnd) && fr.wsBufferedEnd > 0) bits.push(`wsBuf=${fr.wsBufferedEnd}`);
     const line = `${tag} ${bits.join(' ')}`;
