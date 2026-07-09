@@ -197,6 +197,13 @@ export class CanvasRenderer {
       this._frameHash = 0;
       this._frameInvalidated = false;
       this._recording = true;
+      // Track handles that get modified this frame. drawTexture(handle) that
+      // references a dirty handle triggers invalidation. This avoids
+      // pessimistic "any load busts the cache" from the previous logic —
+      // if the freshly loaded handle isn't drawn, its content change is
+      // invisible to the composed frame and we can still cache.
+      if (this._dirtyHandles) this._dirtyHandles.clear();
+      else this._dirtyHandles = new Set();
     }
   }
 
@@ -278,6 +285,17 @@ export class CanvasRenderer {
       this._invalidateFrameCache('non-main-surface-draw');
       return false;
     }
+    // Smart dirty-handle check: drawTexture(handle) with a handle that got
+    // modified earlier this frame cannot be cached — a cache hit would
+    // produce stale pixels for that texture. Only drawTexture takes a
+    // handle argument (arg[4]).
+    if (name === 'drawTexture' && this._dirtyHandles && this._dirtyHandles.size > 0) {
+      const h = args[4];
+      if (this._dirtyHandles.has(h)) {
+        this._invalidateFrameCache('draw-of-dirty-handle');
+        return false;
+      }
+    }
     this._hashOp(name, args);
     this._frameOps.push({ m: name, a: args });
     return true;
@@ -348,6 +366,24 @@ export class CanvasRenderer {
       // Snapshot only becomes invalid on resize / init / deinit / setSize.
     }
     this._invalidateReasons[reason] = (this._invalidateReasons[reason] || 0) + 1;
+  }
+
+  /**
+   * Mark an image / surface handle as modified in this frame. Later, when a
+   * drawTexture references this handle, it will trigger _invalidateFrameCache
+   * because caching a frame whose pixels depend on newly-changed handle
+   * content would produce stale output on a hit.
+   *
+   * This replaces the previous blanket "any load/xfm invalidates" logic —
+   * SageTV's LOADIMAGELINE bursts stream ~288 lines per poster on scroll,
+   * and only a small subset of those loads are actually referenced by
+   * drawTexture in the same frame. Waiting to invalidate until we see the
+   * draw dramatically improves cache hit rate for idle animation frames
+   * that happen to overlap with a background image load.
+   */
+  _markHandleDirty(handle) {
+    if (!this._recording || this._replaying) return;
+    if (this._dirtyHandles) this._dirtyHandles.add(handle);
   }
 
   /** Replay one recorded op with the cache path bypassed. */
@@ -588,7 +624,7 @@ export class CanvasRenderer {
    * Allocate an image slot.
    */
   loadImage(handle, width, height) {
-    this._invalidateFrameCache('loadImage');
+    this._markHandleDirty(handle);
     // Create a raw buffer for line-by-line accumulation.
     // Actual Canvas + putImageData is deferred until the image is first used
     // (drawTexture/xfmImage). This avoids expensive per-line putImageData
@@ -610,7 +646,7 @@ export class CanvasRenderer {
    * happens in bulk during _finalizeImage() using Uint32Array.
    */
   loadImageLine(handle, line, len, data) {
-    this._invalidateFrameCache('loadImageLine');
+    this._markHandleDirty(handle);
     const img = this.images.get(handle);
     if (!img || !img._rawBuffer) return;
 
@@ -738,7 +774,7 @@ export class CanvasRenderer {
    * matching Java's synchronous decode behavior.
    */
   loadCompressedImage(handle, data) {
-    this._invalidateFrameCache('loadCompressedImage');
+    this._markHandleDirty(handle);
     const blob = new Blob([data]);
     if (typeof createImageBitmap === 'function') {
       this._pendingImageLoads++;
@@ -770,7 +806,7 @@ export class CanvasRenderer {
    * Unload an image, freeing memory.
    */
   unloadImage(handle) {
-    this._invalidateFrameCache('unloadImage');
+    this._markHandleDirty(handle);
     const img = this.images.get(handle);
     if (img) {
       this._releaseImageResources(img);
@@ -923,7 +959,7 @@ export class CanvasRenderer {
    * Create an off-screen rendering surface.
    */
   createSurface(handle, width, height) {
-    this._invalidateFrameCache('createSurface');
+    this._markHandleDirty(handle);
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -963,7 +999,8 @@ export class CanvasRenderer {
    * Transform an image (resize + optional corner mask).
    */
   xfmImage(srcHandle, destHandle, destWidth, destHeight, maskCornerArc) {
-    this._invalidateFrameCache('xfmImage');
+    // Only destHandle content changes; srcHandle is read-only.
+    this._markHandleDirty(destHandle);
     this._ensureFinalized(srcHandle);
     const srcImg = this.images.get(srcHandle);
     if (!srcImg) return;
