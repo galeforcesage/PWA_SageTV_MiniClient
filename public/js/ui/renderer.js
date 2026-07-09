@@ -215,15 +215,23 @@ export class CanvasRenderer {
         this._cacheHits++;
         this._cacheSkipped += this._frameOps.length;
       } else {
-        // Miss: replay all queued ops now, then snapshot the result.
-        this._replaying = true;
-        try {
-          for (let i = 0; i < this._frameOps.length; i++) {
-            const op = this._frameOps[i];
-            this._executeOp(op.m, op.a);
+        // Miss. Two sub-cases:
+        //  (a) invalidation happened mid-frame — queued main draws were
+        //      already flushed inside _invalidateFrameCache to preserve
+        //      order, and any subsequent draws executed immediately. Nothing
+        //      to replay here.
+        //  (b) no invalidation, but hash differs (or no prior snapshot yet)
+        //      — replay queued ops now.
+        if (!this._frameInvalidated && this._frameOps.length > 0) {
+          this._replaying = true;
+          try {
+            for (let i = 0; i < this._frameOps.length; i++) {
+              const op = this._frameOps[i];
+              this._executeOp(op.m, op.a);
+            }
+          } finally {
+            this._replaying = false;
           }
-        } finally {
-          this._replaying = false;
         }
         // Snapshot back-canvas for the next frame's potential hit.
         this._snapshotCtx.globalCompositeOperation = 'copy';
@@ -307,12 +315,35 @@ export class CanvasRenderer {
     this._frameHash = h;
   }
 
-  /** Mark the current frame's cache as invalid so its ops must be replayed on miss. */
+  /**
+   * Mark the current frame's cache as invalid so its ops must be replayed
+   * on the flip. IMPORTANT: also flush any already-queued main-canvas draws
+   * to the back canvas RIGHT NOW so that any immediate-mode draws that
+   * follow (e.g. off-screen surface renders) happen AFTER the earlier main
+   * draws — same execution order as if caching had never been active.
+   * Without this flush, mid-frame invalidations produce out-of-order
+   * rendering (queued main draws replay LAST, after off-screen work,
+   * causing visibly blank/wrong menus).
+   */
   _invalidateFrameCache(reason) {
     if (!this._recording || this._replaying) return;
     if (!this._frameInvalidated) {
+      // Flush queued ops NOW to preserve execution order.
+      if (this._frameOps && this._frameOps.length > 0) {
+        this._replaying = true;
+        try {
+          for (let i = 0; i < this._frameOps.length; i++) {
+            this._executeOp(this._frameOps[i].m, this._frameOps[i].a);
+          }
+        } finally {
+          this._replaying = false;
+        }
+        this._frameOps.length = 0;
+      }
       this._frameInvalidated = true;
-      this._snapshotValid = false; // prev snapshot may no longer be a valid reference
+      // NOTE: do NOT clear _snapshotValid here. The previous frame's snapshot
+      // is still a valid reference for FUTURE frames to compare against.
+      // Snapshot only becomes invalid on resize / init / deinit / setSize.
     }
     this._invalidateReasons[reason] = (this._invalidateReasons[reason] || 0) + 1;
   }
@@ -872,12 +903,10 @@ export class CanvasRenderer {
    * handle=0 means the main (back) canvas.
    */
   setTargetSurface(handle) {
-    if (handle !== 0 && handle !== this.targetSurface) {
-      // Switching to a non-main surface within a frame: draws that follow
-      // will hit non-main and force invalidation via _recordOp. But also
-      // mark now so we don't have a half-recorded frame in the queue.
-      this._invalidateFrameCache('setTargetSurface');
-    }
+    // Note: we don't invalidate the frame cache here just because the target
+    // changed. If the frame only SWITCHES targets without drawing to non-main,
+    // there's nothing to cache-bust. _recordOp handles the actual bust when
+    // a draw is issued to non-main.
     this.targetSurface = handle;
     if (handle === 0) {
       this.activeCtx = this.backCtx;
@@ -1182,6 +1211,16 @@ export class CanvasRenderer {
       frameCacheHits: this._cacheHits,
       frameCacheMisses: this._cacheMisses,
       frameCacheSkipped: this._cacheSkipped,
+      // Top-2 invalidation reasons — helps explain "why is hit rate low?"
+      frameCacheTopInvalidations: this._topInvalidationReasons(2),
     };
+  }
+
+  /** Return the top-N invalidation reasons as a "reason:count,reason:count" string. */
+  _topInvalidationReasons(n) {
+    const entries = Object.entries(this._invalidateReasons);
+    if (!entries.length) return '';
+    entries.sort((a, b) => b[1] - a[1]);
+    return entries.slice(0, n).map(([k, v]) => `${k}:${v}`).join(',');
   }
 }

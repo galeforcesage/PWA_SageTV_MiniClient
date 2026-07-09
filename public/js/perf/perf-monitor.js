@@ -373,6 +373,9 @@ class PerfMonitor {
         const total = hits + miss;
         const hitPct = total ? Math.round((hits * 100) / total) : 0;
         bits.push(`fcache=${hits}h/${miss}m/${hitPct}%`);
+        if (fr.cache.frameCacheTopInvalidations) {
+          bits.push(`inv=${fr.cache.frameCacheTopInvalidations}`);
+        }
       }
     }
     if (Number.isFinite(fr.wsBufferedEnd) && fr.wsBufferedEnd > 0) bits.push(`wsBuf=${fr.wsBufferedEnd}`);
