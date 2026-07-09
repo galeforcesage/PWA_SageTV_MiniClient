@@ -24,3 +24,28 @@ Android Chrome, desktop Chrome/Edge, or desktop Firefox.
    Regression on ANY non-iOS target blocks the merge.
 8. No new build step or bundler. This project ships hand-authored ES modules
    loaded directly; keep it that way. Vendored libs go in `public/js/lib/`.
+# SageTV plugin deploy / dev-mode rules
+
+Before deploying, modifying, or debugging any SageTV plugin (including this
+PWA MiniClient), read [docs/sagetv-plugin-dev-mode.md](../docs/sagetv-plugin-dev-mode.md).
+It documents:
+
+- The two dev-catalog paths (`SageTVPluginsDev.xml` vs `SageTVPluginsDev.d/`)
+  and why the `.d/` mechanism is broken since 2022 (int-overflow in
+  `compareVersions` throwing `NumberFormatException` on `yyMMddHHmm`
+  timestamps).
+- The recommended dev workflow: **single-file dev XML, manual `<Version>` bump
+  per build, no `SageTVPluginsDev.d/`**.
+- Classpath duplication trap (`JARs/*` picks any matching jar; always
+  `.prev-<ts>` old jars aside).
+- The rule that Java class hot-reload does not work — **jar changes require a
+  full Sage JVM restart** (`stopsage`/`startsage`). No Plugin Manager Update
+  workflow can avoid this.
+- Static resources (JS/CSS/HTML/images) served by a plugin from the filesystem
+  do NOT need a Sage restart; jar-embedded resources do.
+- Which `Sage.properties` keys are Sage-owned (`sagetv_core_plugins/<id>/*`,
+  `plugin/hidden/<id>`) and must NEVER be hand-edited.
+
+Any plan involving Plugin Manager Update, `SageTVPluginsDev.d/`, or the phrase
+"hot-swap the plugin without stopsage" must be validated against that doc
+first.
