@@ -419,6 +419,13 @@ function setupEventHandlers() {
 
   // Keyboard shortcuts for the Add/Edit Server dialog
   addServerDialog.addEventListener('keydown', (e) => {
+    // Do NOT intercept Enter on text inputs. On Tizen TV, pressing OK while
+    // an <input> is focused is what invokes the on-screen keyboard (IME).
+    // If we swallow it and click Save, the empty-required-field validator
+    // re-focuses the same input in a loop, and the user can never type.
+    if (e.key === 'Enter' && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
       document.getElementById('dlg-save').click();
@@ -761,10 +768,17 @@ function renderServerGrid() {
   serverGrid.innerHTML = html;
   if (_spatnav) _spatnav.refresh();
 
-  // Click card → connect (saved) or open Add dialog pre-filled (discovered)
+  // Click card → connect (saved) or open Add dialog pre-filled (discovered).
+  // Long-press (touch or remote OK) opens edit mode for saved cards.
   serverGrid.querySelectorAll('.server-card').forEach((card) => {
     card.addEventListener('click', (e) => {
       if (e.target.classList.contains('card-delete') || e.target.classList.contains('card-edit')) return;
+      // Suppress the connect action if the click was synthesized after a
+      // long-press (touch or remote OK-hold) that opened edit mode.
+      if (card.dataset.longPressFired === '1') {
+        delete card.dataset.longPressFired;
+        return;
+      }
       if (card.dataset.discovered === '1') {
         openAddServerDialogForDiscovered(card);
         return;
@@ -785,10 +799,32 @@ function renderServerGrid() {
     let lpTimer = null;
     card.addEventListener('touchstart', () => {
       if (card.dataset.discovered === '1') return;
-      lpTimer = setTimeout(() => { lpTimer = null; openEditServerDialog(card); }, 600);
+      lpTimer = setTimeout(() => {
+        lpTimer = null;
+        card.dataset.longPressFired = '1';
+        openEditServerDialog(card);
+      }, 600);
     }, { passive: true });
     card.addEventListener('touchend', () => { if (lpTimer) clearTimeout(lpTimer); });
     card.addEventListener('touchmove', () => { if (lpTimer) clearTimeout(lpTimer); });
+
+    // Long-press → edit (TV remote OK-hold, saved only). Tizen and other TV
+    // remotes lack right-click and touch; holding OK is the accepted TV
+    // equivalent for "contextual action". Uses the same 600ms threshold.
+    let kbLpTimer = null;
+    card.addEventListener('keydown', (e) => {
+      if (card.dataset.discovered === '1') return;
+      if (e.key !== 'Enter' || e.repeat || kbLpTimer) return;
+      kbLpTimer = setTimeout(() => {
+        kbLpTimer = null;
+        card.dataset.longPressFired = '1';
+        openEditServerDialog(card);
+      }, 600);
+    });
+    card.addEventListener('keyup', (e) => {
+      if (e.key !== 'Enter') return;
+      if (kbLpTimer) { clearTimeout(kbLpTimer); kbLpTimer = null; }
+    });
   });
 
   // Edit button
