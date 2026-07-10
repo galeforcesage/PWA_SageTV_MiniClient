@@ -1420,14 +1420,23 @@ export class MiniClientConnection extends EventTarget {
         return res;
       }
       case 'GFX_FIXED_PAR':
-        // Returning a non-empty PAR sets iPhoneMode=true server-side, which
-        // routes ClientProfileManager.autoDetectProfile() to the `pwa_safe`
-        // profile (MP4/H.264/AAC only). Without this the server picks
-        // `desktop_hevc_optin`, whose whitelist includes MPEG2-VIDEO — that
-        // profile's authoritative override then force-pushes MPEG-PS as-is
-        // and our mux.js transmuxer (H.264-only) stalls. `1.0` = square
-        // pixels, correct for modern square-pixel displays.
-        return '1.0';
+        // MUST return empty. A non-empty value sets iPhoneMode=true server-side
+        // (MiniClientSageRenderer.java ~L4102), and iPhoneMode forces
+        // clientDoesPull=httpls=true in MiniPlayer.load() (~L829) for all
+        // video/TV — routing the ENTIRE session through the legacy iOS HTTPLS
+        // subsystem (iosstream_*.m3u8) whose bandwidth tiers are hard-capped at
+        // 480x272. That is the root cause of low-res playback.
+        //
+        // Previously this returned '1.0' to force the `pwa_safe` profile back
+        // when the mux.js push transmuxer (H.264-only) would stall on MPEG-PS.
+        // mux.js is retired; we now use Protocol 2.1 surfaces + the bridge
+        // /transcode path. Returning empty keeps us OUT of iPhoneMode so the
+        // server delivers via normal pull (file path) — the client then
+        // direct-plays compatible content via the bridge /rawmedia endpoint and
+        // bridge-transcodes HEVC/etc. to HD fMP4, exactly like the Android
+        // client's pull path. Modern displays are square-pixel, so no forced
+        // PAR is needed.
+        return '';
       case 'GFX_SUPPORTED_RESOLUTIONS':
         return `${this.width}x${this.height}`;
       case 'GFX_OFFLINE_IMAGE_CACHE':
