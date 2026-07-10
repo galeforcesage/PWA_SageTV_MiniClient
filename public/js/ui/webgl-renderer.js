@@ -194,18 +194,33 @@ export class WebGLRenderer {
     gl.clearColor(0, 0, 0, 0);
     gl.viewport(0, 0, this.width, this.height);
 
-    // Offscreen "scene" framebuffer. All frame draws target this FBO, then we
-    // blit it to the visible canvas atomically in flipBuffer. This replicates
-    // the Canvas2D back-buffer: because GFX processing yields mid-frame, the
-    // compositor must never see a partially-drawn default framebuffer (that
-    // caused the flash-to-empty). The visible canvas only updates on flip.
-    this._createSceneFBO(this.width, this.height);
+    // Double-buffered offscreen "scene" framebuffers. SageTV draws into the
+    // BACK buffer; flipBuffer swaps it to FRONT; a requestAnimationFrame loop
+    // re-presents the FRONT (always-complete) buffer to the visible canvas
+    // every display refresh. This replicates a proper swap chain:
+    //  - No mid-frame flash: we never present the buffer being drawn into.
+    //  - No black background: the screen is repainted every rAF regardless of
+    //    what the browser compositor does to the default framebuffer between
+    //    SageTV frames.
+    this._sceneTex = [null, null];
+    this._sceneFBO = [null, null];
+    this._front = 0;
+    this._back = 1;
+    this._inFrame = false;
+    this._destroyed = false;
+    this._raf = 0;
+    this._createSceneFBOs(this.width, this.height);
+    this._startPresentLoop();
   }
 
-  _createSceneFBO(w, h) {
+  _createSceneFBOs(w, h) {
+    for (let i = 0; i < 2; i++) this._sceneTex[i] = this._makeSceneTarget(i, w, h);
+  }
+
+  _makeSceneTarget(i, w, h) {
     const gl = this.gl;
-    if (this._sceneTex) gl.deleteTexture(this._sceneTex);
-    if (this._sceneFBO) gl.deleteFramebuffer(this._sceneFBO);
+    if (this._sceneTex[i]) gl.deleteTexture(this._sceneTex[i]);
+    if (this._sceneFBO[i]) gl.deleteFramebuffer(this._sceneFBO[i]);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -216,9 +231,45 @@ export class WebGLRenderer {
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._sceneTex = tex;
-    this._sceneFBO = fbo;
+    this._sceneFBO[i] = fbo;
+    return tex;
+  }
+
+  _startPresentLoop() {
+    const loop = () => {
+      if (this._destroyed) return;
+      // Only present between frames; never mid-draw (front buffer is always
+      // complete, but skipping while _inFrame avoids clobbering GL state that
+      // an in-progress frame relies on).
+      if (!this._inFrame && !this.gl.isContextLost()) this._present();
+      this._raf = requestAnimationFrame(loop);
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  /** Blit the front (complete) scene buffer to the visible default framebuffer. */
+  _present() {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._targetW = this.width;
+    this._targetH = this.height;
+    gl.viewport(0, 0, this.width, this.height);
+    this._matrix = [1, 0, 0, 1, 0, 0];
+    // Opaque copy preserves scene alpha for <video> punch-through; flipV=true
+    // for the FBO's bottom-left origin.
+    this._drawTexQuad(this._sceneTex[this._front], 0, 0, this.width, this.height,
+      0, 0, this.width, this.height, this.width, this.height, [1, 1, 1, 1], true, true);
+    gl.flush();
+    // Re-bind the back buffer so any stray early draws land off-screen.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO[this._back]);
+  }
+
+  destroy() {
+    this._destroyed = true;
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
   }
 
   _buildProgram(vsSrc, fsSrc) {
@@ -284,7 +335,7 @@ export class WebGLRenderer {
     this.height = height;
     this.canvas.width = width;
     this.canvas.height = height;
-    this._createSceneFBO(width, height);
+    this._createSceneFBOs(width, height);
     if (this.targetSurface === 0) {
       this._targetW = width;
       this._targetH = height;
@@ -294,6 +345,7 @@ export class WebGLRenderer {
   }
 
   startFrame() {
+    this._inFrame = true;
     this.targetSurface = 0;
     this._matrix = [1, 0, 0, 1, 0, 0];
     this._matrixStack.length = 0;
@@ -301,30 +353,18 @@ export class WebGLRenderer {
     this._frameScaledDraw = 0;
     this._texBlitMs = 0;
     this._texBlitCount = 0;
-    this._bindTarget(0);
+    this._bindTarget(0); // binds the BACK scene buffer
     const gl = this.gl;
     gl.clear(gl.COLOR_BUFFER_BIT); // transparent -> video shows through unpainted regions
   }
 
   flipBuffer() {
-    const gl = this.gl;
-    // Present the completed scene FBO to the visible default framebuffer in a
-    // single atomic blit. The screen therefore only ever shows a fully-drawn
-    // frame, never a mid-frame partial (which caused the flashing).
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._targetW = this.width;
-    this._targetH = this.height;
-    gl.viewport(0, 0, this.width, this.height);
-    this._matrix = [1, 0, 0, 1, 0, 0];
-    // Opaque copy (ONE,ZERO) preserves the scene's alpha exactly so the
-    // <video> still shows through transparent regions. flipV=true because the
-    // scene FBO texture has GL's bottom-left origin.
-    this._drawTexQuad(this._sceneTex, 0, 0, this.width, this.height,
-      0, 0, this.width, this.height, this.width, this.height, [1, 1, 1, 1], true, true);
-    gl.flush();
-    // Re-bind the scene FBO so the next frame's early draws (before startFrame)
-    // don't accidentally hit the default buffer.
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO);
+    // Swap: the buffer we just drew (back) becomes the front (complete) buffer.
+    const t = this._front; this._front = this._back; this._back = t;
+    this._inFrame = false;
+    // Present immediately for lowest latency; the rAF loop also re-presents to
+    // survive compositor clears between frames (fixes intermittent black bg).
+    this._present();
     this._firstFrameRendered = true;
   }
 
@@ -337,14 +377,14 @@ export class WebGLRenderer {
   _bindTarget(handle) {
     const gl = this.gl;
     if (handle === 0) {
-      // Target 0 = the offscreen scene FBO (not the visible default buffer).
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO);
+      // Target 0 = the offscreen BACK scene FBO (not the visible default buffer).
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO[this._back]);
       this._targetW = this.width;
       this._targetH = this.height;
       gl.viewport(0, 0, this.width, this.height);
     } else {
       const s = this.surfaces.get(handle);
-      if (!s) { gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO); return; }
+      if (!s) { gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO[this._back]); return; }
       gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo);
       this._targetW = s.width;
       this._targetH = s.height;

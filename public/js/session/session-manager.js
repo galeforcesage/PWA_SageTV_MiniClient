@@ -121,6 +121,9 @@ export class SessionManager extends EventTarget {
       rendererPref = urlPref || this.settings.get('renderer', 'auto');
     } catch { /* ignore */ }
 
+    // Tear down any prior renderer (e.g. reconnect) so its present loop / GL
+    // resources don't leak or fight the new one for the canvas.
+    if (this.renderer?.destroy) { try { this.renderer.destroy(); } catch { /* ignore */ } }
     this.renderer = null;
     if (rendererPref !== 'canvas2d' && rendererPref !== 'canvas') {
       try {
@@ -132,6 +135,7 @@ export class SessionManager extends EventTarget {
         }
       } catch (e) {
         console.warn('[Session] WebGL renderer init failed, falling back to Canvas2D:', e?.message || e);
+        if (this.renderer?.destroy) { try { this.renderer.destroy(); } catch { /* ignore */ } }
         this.renderer = null;
       }
     }
