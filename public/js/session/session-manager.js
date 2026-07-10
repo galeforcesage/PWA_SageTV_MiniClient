@@ -13,6 +13,7 @@
 
 import { MiniClientConnection } from '../protocol/connection.js';
 import { CanvasRenderer } from '../ui/renderer.js';
+import { WebGLRenderer } from '../ui/webgl-renderer.js';
 import { MediaPlayer } from '../media/player.js';
 import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';
@@ -105,12 +106,39 @@ export class SessionManager extends EventTarget {
         ? Math.min(configuredImageCacheMB, 96)
         : configuredImageCacheMB;
 
-    // Create renderer
-    this.renderer = new CanvasRenderer(canvas, {
+    // Create renderer. Prefer WebGL (drop-in, ~200x faster blits on Tizen/iPad
+    // Canvas2D); fall back to Canvas2D if WebGL is unavailable, the context
+    // can't be created, or the user forces it via ?renderer=canvas2d /
+    // settings 'renderer' = 'canvas2d'.
+    const rendererOpts = {
       isIOS: this.platformDetector.isIOS(),
       isTizen: this.platformDetector.isTizen(),
       maxCacheMB: rendererCacheMB,
-    });
+    };
+    let rendererPref = 'auto';
+    try {
+      const urlPref = new URLSearchParams(window.location?.search || '').get('renderer');
+      rendererPref = urlPref || this.settings.get('renderer', 'auto');
+    } catch { /* ignore */ }
+
+    this.renderer = null;
+    if (rendererPref !== 'canvas2d' && rendererPref !== 'canvas') {
+      try {
+        if (WebGLRenderer.isSupported()) {
+          this.renderer = new WebGLRenderer(canvas, rendererOpts);
+          console.log('[Session] Using WebGL renderer');
+        } else if (rendererPref === 'webgl') {
+          console.warn('[Session] renderer=webgl forced but WebGL unsupported; using Canvas2D');
+        }
+      } catch (e) {
+        console.warn('[Session] WebGL renderer init failed, falling back to Canvas2D:', e?.message || e);
+        this.renderer = null;
+      }
+    }
+    if (!this.renderer) {
+      this.renderer = new CanvasRenderer(canvas, rendererOpts);
+      console.log('[Session] Using Canvas2D renderer');
+    }
 
     // Create media player
     this.mediaPlayer = new MediaPlayer(videoElement, container, {
