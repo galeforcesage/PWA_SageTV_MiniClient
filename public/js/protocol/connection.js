@@ -2553,11 +2553,25 @@ export class MiniClientConnection extends EventTarget {
           const isAbsPath = urlString.startsWith('/');
           console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
 
-          // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
-          // via the bridge's /rawmedia byte-range endpoint — matches the fork's
-          // stv:// pull data source (browser-safe HTTP equivalent). Don't route
-          // through the transcoder: DIRECT_PLAY should preserve original bitstream.
-          this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+          // Option B: this server always delivers PWA media as an HTTPLS
+          // "iosstream" HLS URL (the legacy iOS Placeshifter subsystem, capped
+          // at 480x272). Rather than follow it, extract the SageTV MediaFile ID
+          // and route to the bridge /transcode endpoint, which resolves the ID
+          // to the on-disk file and remuxes/transcodes to HD fMP4 for MSE —
+          // bypassing HTTPLS entirely. Falls through to normal load() for any
+          // non-iosstream URL (direct pull paths, push, etc.).
+          const iosMatch = urlString.match(/iosstream_[0-9a-fA-F]+_(\d+)_\d+_list\.m3u8/i);
+          if (iosMatch) {
+            const mfid = parseInt(iosMatch[1], 10);
+            console.log(`[Media] Server HLS (iosstream) detected for mfid=${mfid}; routing to bridge transcode (HD, bypass HTTPLS)`);
+            this.mediaPlayer.loadBridgeMfid(mfid, this.serverHost, 0);
+          } else {
+            // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
+            // via the bridge's /rawmedia byte-range endpoint — matches the fork's
+            // stv:// pull data source (browser-safe HTTP equivalent). Don't route
+            // through the transcoder: DIRECT_PLAY should preserve original bitstream.
+            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+          }
         }
         this._sendMediaReturn(1);
         break;

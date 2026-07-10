@@ -42,9 +42,36 @@ public class TranscodeServlet extends HttpServlet {
         log.info("[Transcode] Hardware acceleration changed: {} ({})", hwAccel.name, hwAccel.description);
     }
 
+    /**
+     * Resolve a SageTV MediaFile ID to its on-disk absolute path using the
+     * in-process SageTV core. Reflection is used so the bridge doesn't need
+     * compile-time stubs for sage.Wizard / sage.MediaFile (only sage.Sage is
+     * stubbed); the real classes are always present at runtime because the
+     * bridge runs as a SageTV plugin inside the server JVM.
+     *
+     * sage.Wizard.getInstance().getFileForID(id).getFile(0).getAbsolutePath()
+     */
+    private static String resolveMediaFilePath(int mfid) {
+        try {
+            Class<?> wizardCls = Class.forName("sage.Wizard");
+            Object wizard = wizardCls.getMethod("getInstance").invoke(null);
+            Object mf = wizardCls.getMethod("getFileForID", int.class).invoke(wizard, mfid);
+            if (mf == null) return null;
+            Object f = mf.getClass().getMethod("getFile", int.class).invoke(mf, 0);
+            if (f instanceof File) {
+                File file = (File) f;
+                return file.getAbsolutePath();
+            }
+        } catch (Throwable t) {
+            log.warn("[Transcode] MFID {} resolution failed: {}", mfid, t.toString());
+        }
+        return null;
+    }
+
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String filePath = req.getParameter("file");
+        String mfidStr = req.getParameter("mfid");
         String seekStr = req.getParameter("seek");
         String sessionId = req.getParameter("session");
 
@@ -58,8 +85,28 @@ public class TranscodeServlet extends HttpServlet {
             }
         }
 
+        // Preferred path (Protocol 2.1 / Option B): the client passes a SageTV
+        // MediaFile ID instead of a raw path. We resolve it to the on-disk file
+        // via the in-process SageTV core, then transcode/remux to HD fMP4 —
+        // completely bypassing the legacy HTTPLS/iosstream 480x272 subsystem.
+        if ((filePath == null || filePath.isEmpty()) && mfidStr != null && !mfidStr.isEmpty()) {
+            int mfid;
+            try {
+                mfid = Integer.parseInt(mfidStr.trim());
+            } catch (NumberFormatException e) {
+                resp.sendError(400, "Invalid mfid");
+                return;
+            }
+            filePath = resolveMediaFilePath(mfid);
+            if (filePath == null) {
+                resp.sendError(404, "MediaFile " + mfid + " not found or has no file");
+                return;
+            }
+            log.info("[Transcode] Resolved mfid {} -> {}", mfid, filePath);
+        }
+
         if (filePath == null || filePath.isEmpty()) {
-            resp.sendError(400, "Missing file parameter");
+            resp.sendError(400, "Missing file or mfid parameter");
             return;
         }
 

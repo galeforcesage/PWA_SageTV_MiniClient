@@ -33,6 +33,7 @@ export class MediaPlayer extends EventTarget {
     this.serverEOS = false;
     this.lastServerStartTime = 0;
     this._bridgeFilePath = null;
+    this._bridgeMfid = null; // SageTV MediaFile ID for bridge transcode (Option B)
     this._bridgeAbortController = null;
     this._bridgeSessionId = 'pwa-' + Date.now();
     // When pull-mode falls back to bridge transcode after a native decode
@@ -351,14 +352,39 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
+   * Option B entry point: play a recording by SageTV MediaFile ID via the
+   * bridge transcode endpoint. The bridge resolves the MFID to the on-disk
+   * file and remuxes (H.264+AAC) or transcodes (HEVC/etc.) to HD fMP4 for MSE,
+   * completely bypassing the server's legacy HTTPLS/iosstream 480x272 path.
+   * @param {number} mfid - SageTV MediaFile ID
+   * @param {string} hostname - SageTV server hostname
+   * @param {number} [seekSec=0] - initial seek position
+   */
+  async loadBridgeMfid(mfid, hostname, seekSec = 0) {
+    this.stop();
+    this.serverEOS = false;
+    this._totalPushed = 0;
+    this._pullFilePath = null;
+    this._pullFallbackTried = false;
+    this._hlsFatalFallbackTried = false;
+    console.log(`[MediaPlayer] BRIDGE-MFID mode: mfid=${mfid} seek=${seekSec}s`);
+    await this._loadBridgeMode(null, hostname, mfid);
+    if (seekSec > 0 && this.bridgeMode) {
+      // Restart at the requested position once the initial stream is set up.
+      this._flushAndRestart(null, seekSec);
+    }
+  }
+
+  /**
    * BRIDGE mode: fetch transcoded H.264+AAC fragmented MP4 from bridge's ffmpeg.
    * Bridge runs on same machine as SageTV, reads file directly, transcodes with system ffmpeg.
    * ffmpeg outputs fMP4 (frag_keyframe+empty_moov) which feeds directly into MSE — no transmuxing.
    */
-  async _loadBridgeMode(filePath, hostname) {
+  async _loadBridgeMode(filePath, hostname, mfid = null) {
     this.pushMode = false;
     this.bridgeMode = true;
     this._bridgeFilePath = filePath;
+    this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
 
     // Set up MSE
@@ -426,7 +452,12 @@ export class MediaPlayer extends EventTarget {
 
     // Build bridge URL — absolute path against the resolved bridge base so
     // the fetch works from non-http origins (Tizen wgt file://, etc).
-    const bridgeUrl = `${this._bridgeBase}/transcode?file=${encodeURIComponent(filePath)}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    // Prefer the MediaFile ID (Option B: bridge resolves it server-side and
+    // bypasses HTTPLS) when present; otherwise fall back to an absolute path.
+    const src = (this._bridgeMfid !== null && this._bridgeMfid !== undefined)
+      ? `mfid=${encodeURIComponent(this._bridgeMfid)}`
+      : `file=${encodeURIComponent(filePath)}`;
+    const bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}`;
     console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
 
     try {
