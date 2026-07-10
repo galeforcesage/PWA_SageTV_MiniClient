@@ -407,7 +407,10 @@ export class WebGLRenderer {
     const [x3, y3] = this._tx(dx, dy + dh);
     let u0 = sx / texW, u1 = (sx + sw) / texW;
     let v0 = sy / texH, v1 = (sy + sh) / texH;
-    if (flipV) { const t = v0; v0 = 1 - v1; v1 = 1 - t; }
+    // FBO-sourced textures (scene, surfaces, xfm) are stored bottom-up relative
+    // to our top-left coordinate convention. Invert each V (NOT swap the range)
+    // so the top dst vertex (which uses v0) samples the content's top row.
+    if (flipV) { v0 = 1 - v0; v1 = 1 - v1; }
 
     const a = this._texArr;
     // tri 1: TL, TR, BR
