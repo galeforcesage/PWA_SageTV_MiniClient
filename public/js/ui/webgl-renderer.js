@@ -97,7 +97,7 @@ export class WebGLRenderer {
       antialias: false,
       depth: false,
       stencil: false,
-      preserveDrawingBuffer: false, // SageTV sends full frames; we clear each one
+      preserveDrawingBuffer: true, // keep last frame between composites (no inter-frame flash)
       powerPreference: 'high-performance',
     };
     const gl = canvas.getContext('webgl', attrs) ||
@@ -193,6 +193,32 @@ export class WebGLRenderer {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.clearColor(0, 0, 0, 0);
     gl.viewport(0, 0, this.width, this.height);
+
+    // Offscreen "scene" framebuffer. All frame draws target this FBO, then we
+    // blit it to the visible canvas atomically in flipBuffer. This replicates
+    // the Canvas2D back-buffer: because GFX processing yields mid-frame, the
+    // compositor must never see a partially-drawn default framebuffer (that
+    // caused the flash-to-empty). The visible canvas only updates on flip.
+    this._createSceneFBO(this.width, this.height);
+  }
+
+  _createSceneFBO(w, h) {
+    const gl = this.gl;
+    if (this._sceneTex) gl.deleteTexture(this._sceneTex);
+    if (this._sceneFBO) gl.deleteFramebuffer(this._sceneFBO);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._sceneTex = tex;
+    this._sceneFBO = fbo;
   }
 
   _buildProgram(vsSrc, fsSrc) {
@@ -258,6 +284,7 @@ export class WebGLRenderer {
     this.height = height;
     this.canvas.width = width;
     this.canvas.height = height;
+    this._createSceneFBO(width, height);
     if (this.targetSurface === 0) {
       this._targetW = width;
       this._targetH = height;
@@ -280,7 +307,24 @@ export class WebGLRenderer {
   }
 
   flipBuffer() {
-    this.gl.flush(); // presentation is handled by the compositor
+    const gl = this.gl;
+    // Present the completed scene FBO to the visible default framebuffer in a
+    // single atomic blit. The screen therefore only ever shows a fully-drawn
+    // frame, never a mid-frame partial (which caused the flashing).
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._targetW = this.width;
+    this._targetH = this.height;
+    gl.viewport(0, 0, this.width, this.height);
+    this._matrix = [1, 0, 0, 1, 0, 0];
+    // Opaque copy (ONE,ZERO) preserves the scene's alpha exactly so the
+    // <video> still shows through transparent regions. flipV=true because the
+    // scene FBO texture has GL's bottom-left origin.
+    this._drawTexQuad(this._sceneTex, 0, 0, this.width, this.height,
+      0, 0, this.width, this.height, this.width, this.height, [1, 1, 1, 1], true, true);
+    gl.flush();
+    // Re-bind the scene FBO so the next frame's early draws (before startFrame)
+    // don't accidentally hit the default buffer.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO);
     this._firstFrameRendered = true;
   }
 
@@ -293,13 +337,14 @@ export class WebGLRenderer {
   _bindTarget(handle) {
     const gl = this.gl;
     if (handle === 0) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // Target 0 = the offscreen scene FBO (not the visible default buffer).
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO);
       this._targetW = this.width;
       this._targetH = this.height;
       gl.viewport(0, 0, this.width, this.height);
     } else {
       const s = this.surfaces.get(handle);
-      if (!s) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); return; }
+      if (!s) { gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFBO); return; }
       gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo);
       this._targetW = s.width;
       this._targetH = s.height;

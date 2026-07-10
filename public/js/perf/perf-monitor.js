@@ -92,8 +92,8 @@ class PerfMonitor {
       'top:4px',
       'right:4px',
       'z-index:2147483647',
-      'max-width:640px',
-      'max-height:60vh',
+      'max-width:760px',
+      'max-height:88vh',
       'overflow:hidden',
       'padding:4px 6px',
       'background:rgba(0,0,0,0.72)',
@@ -116,7 +116,7 @@ class PerfMonitor {
     if (!el) return;
     // Ring buffer of last N lines. Keep small enough that the overlay
     // stays under ~60vh even on 1280x720 Tizen.
-    const MAX = 18;
+    const MAX = 40;
     // Color-code severity in the overlay.
     const color = sev === 'error' ? '#f66' : sev === 'warn' ? '#fc0' : '#8f8';
     const span = `<span style="color:${color}">${this._escapeHtml(line)}</span>`;
