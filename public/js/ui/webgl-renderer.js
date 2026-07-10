@@ -97,7 +97,11 @@ export class WebGLRenderer {
       antialias: false,
       depth: false,
       stencil: false,
-      preserveDrawingBuffer: true, // keep last frame between composites (no inter-frame flash)
+      // false: the rAF present loop repaints the visible canvas every frame,
+      // so we don't need (and don't want) the browser to keep a copy of the
+      // drawing buffer - preserveDrawingBuffer:true is very slow on some
+      // drivers (it was causing the ~10s first paint).
+      preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
     };
     const gl = canvas.getContext('webgl', attrs) ||
