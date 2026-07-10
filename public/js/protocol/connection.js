@@ -1003,15 +1003,23 @@ export class MiniClientConnection extends EventTarget {
     };
 
     // Legacy-compat base properties (VIDEO_CODECS / AUDIO_CODECS /
-    // PULL_AV_CONTAINERS) must stay HONEST about what the client can decode
-    // WITHOUT the bridge — a non-Protocol-2.1 server has no surface routing and
-    // would try to direct-play whatever we list here. So keep the real
-    // MSE-decodable probe result for that path, separate from the broad
-    // bridge-transcode declaration on the pwa_mse surface above.
+    // PULL_AV_CONTAINERS) are what the server's isSupportedVideoCodec/
+    // isSupportedPullContainerFormat checks read (MiniClientSageRenderer
+    // ~L7138). They drive clientDoesPull in MiniPlayer.load(): if the source
+    // codec/container is "supported" here, the server hands us a PULL url (real
+    // file path); otherwise it pushes (which we retired).
+    //
+    // Because the PWA ALWAYS has the bridge, it can genuinely play ANYTHING the
+    // bridge's ffmpeg can read — by direct-playing compatible content via
+    // /rawmedia and bridge-transcoding the rest to HD fMP4. So we declare the
+    // BROAD bridge-transcodable set here (same as the pwa_mse surface), which
+    // makes the server always choose pull. This is server-agnostic: it works on
+    // Protocol 2.1 servers AND legacy servers, because the client-side pull->
+    // bridge fallback handles the actual decode/transcode regardless.
     this._legacyDecodable = {
-      video: mse.video.slice(),
-      audio: mse.audio.slice(),
-      containers: mse.containers.slice(),
+      video: this._playbackSurfaces.pwa_mse.videoCodecs.slice(),
+      audio: this._playbackSurfaces.pwa_mse.audioCodecs.slice(),
+      containers: this._playbackSurfaces.pwa_mse.containers.slice(),
     };
 
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
