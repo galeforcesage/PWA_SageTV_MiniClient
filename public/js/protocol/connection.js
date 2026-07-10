@@ -976,7 +976,11 @@ export class MiniClientConnection extends EventTarget {
       pwa_native: {
         route: 'native',
         priority: 100,
-        deliveryModes: 'pull,hls',
+        // Pull only. We deliberately do NOT advertise 'hls': the server's HLS
+        // path routes through the legacy iOS HTTPLS subsystem (480x272 stale
+        // tiers). Non-natively-decodable content goes to pwa_mse (bridge
+        // transcode) instead, which produces proper HD fMP4.
+        deliveryModes: 'pull',
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
@@ -984,13 +988,30 @@ export class MiniClientConnection extends EventTarget {
       pwa_mse: {
         route: 'mse',
         priority: 80,
-        // mux.js push transmux is being retired; MSE now consumes only
-        // fMP4 pulled from the bridge /transcode endpoint.
+        // pwa_mse is fed by the bridge /transcode endpoint, whose ffmpeg can
+        // DECODE virtually any source codec/container and re-encode to the
+        // H.264+AAC fMP4 that MediaSource plays. So this surface's true
+        // capability is "whatever ffmpeg can read", NOT "what MSE natively
+        // decodes". Declare the broad source set so the server routes
+        // non-natively-decodable recordings here via a pull URL (abs path),
+        // and the client bridge-transcodes them to HD — bypassing HTTPLS/HLS.
         deliveryModes: 'pull',
-        videoCodecs: mse.video,
-        audioCodecs: mse.audio,
-        containers: mse.containers,
+        videoCodecs: ['H264', 'HEVC', 'MPEG2-VIDEO', 'MPEG4-VIDEO', 'VP9', 'AV1'],
+        audioCodecs: ['AAC', 'HE-AAC', 'AC3', 'EAC3', 'MP2', 'MP3', 'OPUS', 'FLAC', 'DTS'],
+        containers: ['MP4', 'MATROSKA', 'MPEG2-TS', 'MPEG2-PS', 'AVI', 'MOV'],
       },
+    };
+
+    // Legacy-compat base properties (VIDEO_CODECS / AUDIO_CODECS /
+    // PULL_AV_CONTAINERS) must stay HONEST about what the client can decode
+    // WITHOUT the bridge — a non-Protocol-2.1 server has no surface routing and
+    // would try to direct-play whatever we list here. So keep the real
+    // MSE-decodable probe result for that path, separate from the broad
+    // bridge-transcode declaration on the pwa_mse surface above.
+    this._legacyDecodable = {
+      video: mse.video.slice(),
+      audio: mse.audio.slice(),
+      containers: mse.containers.slice(),
     };
 
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
@@ -1013,15 +1034,18 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _getSupportedVideoCodecs() {
-    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.videoCodecs);
+    this._probePlaybackSurfaces();
+    return this._legacyCompat(this._legacyDecodable.video);
   }
 
   _getSupportedAudioCodecs() {
-    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.audioCodecs);
+    this._probePlaybackSurfaces();
+    return this._legacyCompat(this._legacyDecodable.audio);
   }
 
   _getSupportedPullContainers() {
-    return this._legacyCompat(this._probePlaybackSurfaces().pwa_mse.containers);
+    this._probePlaybackSurfaces();
+    return this._legacyCompat(this._legacyDecodable.containers);
   }
 
   /**
