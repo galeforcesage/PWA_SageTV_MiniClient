@@ -28,6 +28,17 @@ The Java bridge runs as a SageTV plugin (shadow JAR in `JARs/`). It embeds a rel
 
 > **Note:** An earlier Node.js bridge implementation (`bridge/ws-bridge.js`) is preserved in the repository for historical reference. It is no longer maintained — use the Java bridge for all deployments.
 
+## Deployment Requirement: the bridge must be co-located with SageTV's media
+
+The bridge does two distinct jobs, and they have different placement rules:
+
+- **Protocol relay** (menu/UI, input): connects to SageTV's MiniClient TCP port (`:31099`) **over the network**. This alone can work from any host.
+- **Media delivery** (`/rawmedia`, `/transcode`): the client rewrites the server's pull URL (`stv://…/abs/path`) into `<bridge>/rawmedia?path=<abs path>`, and the bridge opens that path **directly on the local filesystem** (byte-range HTTP for direct-play; ffmpeg against the same path for HD transcode of HEVC/AC-3/etc.).
+
+Because the media endpoints read recordings **by absolute path**, the bridge **must have filesystem access to SageTV's recording directories** — i.e. it must run **on the SageTV host** (or a host that mounts the recording storage at the *identical* paths SageTV uses). The default deployment satisfies this automatically: the bridge ships as an in-process SageTV plugin (`<ServerOnly>true</ServerOnly>`), so it always runs alongside the storage.
+
+> ⚠️ **The Standalone mode below is menu-only unless recordings are mounted at identical paths.** A bridge running on a *different* host than SageTV will relay the UI fine, but every `/rawmedia` and `/transcode` request will fail (file not found) because the recording paths don't exist locally. Use it for UI/protocol development, not media playback, unless you replicate SageTV's storage mounts.
+
 ## Quick Start (SageTV Plugin)
 
 ### Prerequisites
@@ -74,6 +85,8 @@ When both are set, browsers will prompt for credentials before loading the PWA. 
 ## Quick Start (Standalone)
 
 The bridge can also run outside SageTV for development:
+
+> ⚠️ **Menu-only unless co-located with SageTV's storage.** A standalone bridge on a different host relays the UI/input fine, but `/rawmedia` and `/transcode` read recordings by absolute path — those requests fail unless the SageTV recording directories are mounted locally at the *identical* paths. See [Deployment Requirement](#deployment-requirement-the-bridge-must-be-co-located-with-sagetvs-media) above. For media playback, deploy the bridge as the in-process SageTV plugin.
 
 ```bash
 cd bridge-java
