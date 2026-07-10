@@ -39,11 +39,8 @@ class PerfMonitor {
   }
 
   _detectEnabled() {
-    // TEMPORARY (Phase 1 diagnostics on Tizen/iPad, 2026-07-09):
-    // Force-on by default. Tizen and iPad have no easy way to set URL params
-    // or run console commands, and we need perf data on those clients. To
-    // disable, set localStorage 'sagetv.perf' = '0' or add '?perf=0' to the URL.
-    // Revert this block once Tizen perf is measured and Phase 2 begins.
+    // Opt-in only. Enable via ?perf=1 (URL) or localStorage 'sagetv.perf'='1'.
+    // (?perf=0 / localStorage '0' force off.)
     try {
       const params = new URLSearchParams(globalThis.location?.search || '');
       const q = params.get('perf');
@@ -51,10 +48,10 @@ class PerfMonitor {
       if (q === '0' || q === 'false') return false;
     } catch { /* no URL context */ }
     try {
-      const ls = globalThis.localStorage?.getItem('sagetv.perf');
-      if (ls === '0' || ls === 'false') return false;
-    } catch { /* ignore */ }
-    return true; // default ON (was: false)
+      return globalThis.localStorage?.getItem('sagetv.perf') === '1';
+    } catch {
+      return false;
+    }
   }
 
   /**
