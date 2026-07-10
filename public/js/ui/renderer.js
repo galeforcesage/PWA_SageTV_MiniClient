@@ -122,6 +122,23 @@ export class CanvasRenderer {
     this._recording = false;  // true only between startFrame and flipBuffer
     this._replaying = false;  // true while _executeOp replays queued ops
     this._invalidateReasons = Object.create(null); // {reason: count}
+
+    // Adaptive gate: the whole-frame cache only helps when consecutive frames
+    // are pixel-identical. On menus with an animated element (a scaling/fading
+    // poster re-uploaded + redrawn every frame) the hit rate collapses and the
+    // per-frame overhead (op queue + hashing + full-screen snapshot blit on
+    // every miss) becomes net-negative. So we measure the hit rate over a
+    // rolling window and auto-disable recording when it's too low, re-probing
+    // periodically (menu transitions often return to static content).
+    this._fcActive = this._frameCacheEnabled; // currently recording?
+    this._fcFrameCounter = 0;
+    this._fcWinFrames = 0;    // frames counted in current measurement window
+    this._fcWinHits = 0;      // hits in current measurement window
+    this._fcReprobeAt = 0;    // frame index at which to re-activate after disable
+    this._FC_WINDOW = 30;         // frames per measurement window
+    this._FC_MIN_HITRATE = 0.15;  // below this -> disable
+    this._FC_REPROBE_FRAMES = 240; // re-probe cadence when disabled (~few seconds)
+
     if (this._frameCacheEnabled) {
       this._snapshotCanvas = document.createElement('canvas');
       this._snapshotCanvas.width = this.width;
@@ -193,6 +210,15 @@ export class CanvasRenderer {
 
     // Frame-cache: begin recording draws for this frame.
     if (this._frameCacheEnabled) {
+      this._fcFrameCounter++;
+      // If disabled and it's time to re-probe, reactivate for a fresh window.
+      if (!this._fcActive && this._fcFrameCounter >= this._fcReprobeAt) {
+        this._fcActive = true;
+        this._fcWinFrames = 0;
+        this._fcWinHits = 0;
+      }
+    }
+    if (this._frameCacheEnabled && this._fcActive) {
       this._frameOps = [];
       this._frameHash = 0;
       this._frameInvalidated = false;
@@ -204,6 +230,9 @@ export class CanvasRenderer {
       // invisible to the composed frame and we can still cache.
       if (this._dirtyHandles) this._dirtyHandles.clear();
       else this._dirtyHandles = new Set();
+    } else {
+      this._recording = false;
+      this._frameOps = null;
     }
   }
 
@@ -251,6 +280,21 @@ export class CanvasRenderer {
       }
       this._prevFrameHash = this._frameHash;
       this._frameOps = null; // release memory
+
+      // Adaptive accounting: measure hit rate over a rolling window and
+      // disable recording if it's too low (net-negative overhead on
+      // animated menus). Re-probe after a cadence so static menus recover.
+      this._fcWinFrames++;
+      if (hit) this._fcWinHits++;
+      if (this._fcWinFrames >= this._FC_WINDOW) {
+        const rate = this._fcWinHits / this._fcWinFrames;
+        if (rate < this._FC_MIN_HITRATE) {
+          this._fcActive = false;
+          this._fcReprobeAt = this._fcFrameCounter + this._FC_REPROBE_FRAMES;
+        }
+        this._fcWinFrames = 0;
+        this._fcWinHits = 0;
+      }
     }
 
     // Use 'copy' compositing so transparent areas (video window) pass through
@@ -1281,6 +1325,7 @@ export class CanvasRenderer {
       evictionsTotal: 0,
       // Frame-cache stats (0 if disabled)
       frameCacheEnabled: this._frameCacheEnabled,
+      frameCacheActive: this._fcActive,
       frameCacheHits: this._cacheHits,
       frameCacheMisses: this._cacheMisses,
       frameCacheSkipped: this._cacheSkipped,
