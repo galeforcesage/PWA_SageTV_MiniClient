@@ -292,10 +292,22 @@ public class TranscodeServlet extends HttpServlet {
         // Hardware-specific input flags (hwaccel device, output format)
         args.addAll(accel.inputFlags);
 
-        // For live pipe input, don't use -ss (feeder thread handles position)
-        if (!isLive && seekSec > 0) {
-            args.add("-ss");
-            args.add(String.valueOf(seekSec));
+        // Seek: for VOD we do a TWO-STAGE seek so audio and video land at the
+        // SAME timestamp. A single input -ss on MPEG-2 lands audio and video at
+        // slightly different points (no accurate seek) -> A/V drift. Coarse
+        // input -ss lands a few seconds BEFORE the target keyframe (fast); a
+        // fine OUTPUT -ss after -i then trims to the exact point with A/V
+        // aligned. Live uses the feeder thread for positioning, no -ss.
+        final double PREROLL_SEC = 10.0;
+        boolean doSeek = !isLive && seekSec > 0;
+        double fineSs = 0;
+        if (doSeek) {
+            double coarseSs = Math.max(0, seekSec - PREROLL_SEC);
+            fineSs = seekSec - coarseSs;
+            if (coarseSs > 0) {
+                args.add("-ss");
+                args.add(String.valueOf(coarseSs));
+            }
         }
 
         // For live pipe input, specify input format explicitly since ffmpeg can't seek to probe
@@ -315,13 +327,24 @@ public class TranscodeServlet extends HttpServlet {
                 "-y",
                 "-threads", "4",
                 "-sn",
-                "-i", isLive ? "pipe:0" : filePath,
-                "-f", "mp4"
+                "-i", isLive ? "pipe:0" : filePath
         ));
 
-        // Video encoder and its flags
+        // Fine OUTPUT seek (accurate, A/V-aligned) — see the two-stage seek note
+        // above. Placed after -i so it decodes from the coarse keyframe and
+        // discards up to the exact target, keeping audio and video together.
+        if (doSeek && fineSs > 0) {
+            args.add("-ss");
+            args.add(String.valueOf(fineSs));
+        }
+
+        args.addAll(java.util.Arrays.asList("-f", "mp4"));
+
+        // Video encoder and its flags. For VOD, drop latency tuning
+        // (-tune zerolatency / -tune ll): it strips the buffering/lookahead
+        // that keeps A/V aligned and is only appropriate for live streaming.
         args.addAll(java.util.Arrays.asList("-c:v", accel.videoEncoder));
-        args.addAll(accel.encoderFlags);
+        args.addAll(isLive ? accel.encoderFlags : stripTune(accel.encoderFlags));
 
         // Scaling: hardware filter or software -s flag
         if (accel.scaleFilter != null) {
@@ -340,6 +363,7 @@ public class TranscodeServlet extends HttpServlet {
                 "-maxrate", "2500000",
                 "-bufsize", "4000000",
                 "-r", "30",
+                "-vsync", "1",
                 "-g", "60",
                 "-bf", "0"
         ));
@@ -347,6 +371,11 @@ public class TranscodeServlet extends HttpServlet {
         // Audio + container
         args.addAll(java.util.Arrays.asList(
                 "-acodec", "aac",
+                // Correct gradual audio drift: resample audio to follow the
+                // video timeline (async=1) and pin the first sample to pts 0.
+                // Without this MPEG-2 AC3 slowly slips out of sync, worsening
+                // after each seek-driven transcode restart.
+                "-af", "aresample=async=1:first_pts=0",
                 "-b:a", "128000",
                 "-ar", "48000",
                 "-ac", "2",
@@ -355,6 +384,19 @@ public class TranscodeServlet extends HttpServlet {
         ));
 
         return args;
+    }
+
+    /**
+     * Remove a latency-oriented "-tune X" pair (e.g. zerolatency / ll) from an
+     * encoder-flags list. Used for VOD, where such tunes hurt A/V sync.
+     */
+    private static List<String> stripTune(List<String> flags) {
+        List<String> out = new ArrayList<>(flags.size());
+        for (int i = 0; i < flags.size(); i++) {
+            if ("-tune".equals(flags.get(i))) { i++; continue; } // skip flag + value
+            out.add(flags.get(i));
+        }
+        return out;
     }
 
     /**
