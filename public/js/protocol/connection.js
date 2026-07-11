@@ -22,6 +22,7 @@ import {
 } from './constants.js';
 import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
+import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
@@ -988,6 +989,33 @@ export class MiniClientConnection extends EventTarget {
       // resolves as a valid pull target.
       if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
     }
+
+    // Native surface capability pipeline:  (query ∪ whitelist) − blacklist
+    //   query      = canPlayType() results already in `native.*` above
+    //   ∪ whitelist = curated Tizen Profile 4 (restores canPlayType's false
+    //                 negatives for the TV's hardware broadcast decoders)
+    //   − blacklist = drop codecs no <video> / Samsung decodes (e.g. DTS)
+    if (this.platformDetector?.isTizen?.()) {
+      const caps = getTizenNativeCapabilities();
+      // Validation log: what the runtime probe MISSED vs the whitelist. A
+      // non-empty list proves canPlayType under-reported (whitelist earning it).
+      const missed = (white, probed) => white.filter((c) => !probed.includes(c));
+      console.log('[PlaybackSurfaces] Tizen ' + caps.profileId + ' probe-missed'
+        + ' video=[' + missed(caps.video, native.video).join(',') + ']'
+        + ' audio=[' + missed(caps.audio, native.audio).join(',') + ']'
+        + ' containers=[' + missed(caps.containers, native.containers).join(',') + ']');
+      const merge = (arr, extra) => { for (const v of extra) if (!arr.includes(v)) arr.push(v); };
+      merge(native.video, caps.video);
+      merge(native.audio, caps.audio);
+      merge(native.containers, caps.containers);
+    }
+
+    // Final blacklist filter for the NATIVE surface (all platforms; a no-op
+    // where the probe never added a blacklisted codec). The bridge surface
+    // (pwa_mse) keeps e.g. DTS because it transcodes such sources to AAC.
+    native.video = filterNativeBlacklist('video', native.video);
+    native.audio = filterNativeBlacklist('audio', native.audio);
+    native.containers = filterNativeBlacklist('containers', native.containers);
 
     this._playbackSurfaces = {
       // Higher priority = preferred. Native has zero server transcode cost when
