@@ -30,6 +30,8 @@ const statusSignal = document.getElementById('status-signal');
 const touchNav = document.getElementById('touch-nav');
 const playOverlay = document.getElementById('play-overlay');
 const seekingOverlay = document.getElementById('seeking-overlay');
+const loadingOverlay = document.getElementById('loading-overlay');
+const startupOverlay = document.getElementById('startup-overlay');
 const reconnectBanner = document.getElementById('reconnect-banner');
 const reconnectText = document.getElementById('reconnect-text');
 
@@ -438,12 +440,28 @@ async function init() {
   // the client screen (SageTV BACK command) or to dialog/drawer close on
   // the connect screen. Fall through to app exit only when nothing is open.
   if (_isTizen) {
+    // On a TV the floating buttons are unreachable by the D-pad remote, and
+    // every one of their functions is available elsewhere on Tizen:
+    //   ⛶ fullscreen — useless (the app is always full-screen)
+    //   ☰ nav-menu   — opens the popup, which long-press OK already does
+    //   ⏻ power      — disconnect, now in the popup's "Session" section
+    // Hide all three so the TV UI only shows remote-reachable controls.
+    for (const id of ['btn-fullscreen', 'btn-nav-menu', 'btn-disconnect']) {
+      document.getElementById(id)?.setAttribute('hidden', '');
+    }
+
     document.addEventListener('tizenhwkey', (e) => {
       const name = String(e.keyName || '').toLowerCase();
       if (name !== 'back') return;
-      if (handleTizenBack()) {
-        e.preventDefault();
-        e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
+      // handleTizenBack unwinds open UI (drawer, dialogs) or sends BACK to
+      // SageTV. When it returns false there is nothing left to unwind — we're
+      // at the connect screen with no dialogs — so quit the app. With
+      // hwkey-event="enable" the WebView does NOT auto-exit on Back, so we must
+      // call exit() explicitly or the user is stranded with no way out.
+      if (!handleTizenBack()) {
+        exitTizenApp();
       }
     });
   }
@@ -741,6 +759,11 @@ function setupEventHandlers() {
   session.addEventListener('connected', () => {
     hadActiveSession = true;
     showScreen('client');
+    // Cover the black canvas with a branded loading screen until the server
+    // sends its first frame. connect-status lives on the (now hidden) connect
+    // screen, so without this the user would see pure black for several
+    // seconds while SageTV builds the menu server-side.
+    startupOverlay.hidden = false;
     canvas.focus();
     startStatusBar();
     refreshWakeLock().catch(() => {});
@@ -751,12 +774,14 @@ function setupEventHandlers() {
 
   session.addEventListener('firstframe', () => {
     connectStatus.hidden = true;
+    startupOverlay.hidden = true;
     session._onResize();
   });
 
   session.addEventListener('disconnected', (e) => {
     stopStatusBar();
     refreshWakeLock(true).catch(() => {});
+    startupOverlay.hidden = true;
     const reason = e.detail?.reason;
     if (reason === 'user' || reason === 'exit') {
       // User clicked disconnect or SageTV exit — return to connect screen cleanly
@@ -771,6 +796,7 @@ function setupEventHandlers() {
 
   session.addEventListener('error', (e) => {
     showScreen('connect');
+    startupOverlay.hidden = true;
     connectError.textContent = `Connection failed: ${e.detail?.error?.message || 'unknown error'}`;
     connectError.hidden = false;
     connectStatus.hidden = true;
@@ -839,14 +865,24 @@ function setupEventHandlers() {
     if (session.mediaPlayer.video) {
       session.mediaPlayer.video.addEventListener('playing', () => {
         playOverlay.hidden = true;
+        loadingOverlay.hidden = true;
       });
     }
+    // Show a deliberate loading spinner while the opening of a stream buffers
+    // (or during a mid-stream rebuffer), so the user never sees the frozen
+    // first frame. Cleared by 'playing' above.
+    session.mediaPlayer.addEventListener('buffering', () => {
+      loadingOverlay.hidden = false;
+    });
     session.mediaPlayer.addEventListener('seeking', () => {
       seekingOverlay.hidden = false;
     });
     session.mediaPlayer.addEventListener('seeked', () => {
       seekingOverlay.hidden = true;
     });
+    // Safety: ensure the loading spinner is cleared when playback ends/stops.
+    session.mediaPlayer.addEventListener('eos', () => { loadingOverlay.hidden = true; });
+    session.mediaPlayer.addEventListener('stopped', () => { loadingOverlay.hidden = true; });
   }
 
   // Window beforeunload
@@ -1033,6 +1069,21 @@ async function handleConnect(host, port) {
 function handleDisconnect() {
   session.disconnect();
   showScreen('connect');
+}
+
+/**
+ * Quit the Tizen app to the TV home. Requires no special privilege. No-op off
+ * Tizen (browsers close via their own chrome).
+ */
+function exitTizenApp() {
+  try {
+    if (typeof tizen !== 'undefined' && tizen.application) {
+      console.log('[App] Exiting Tizen application');
+      tizen.application.getCurrentApplication().exit();
+    }
+  } catch (e) {
+    console.warn('[App] tizen.application exit failed:', e?.message || e);
+  }
 }
 
 /**
@@ -1437,10 +1488,19 @@ function initNavDrawer() {
   // Use `click` so both pointer taps and remote/keyboard Enter (via
   // SpatialNavigation .click() on the focused button) trigger the action.
   const playPauseBtn = document.getElementById('btn-play-pause');
+  const disconnectBtn = document.getElementById('nav-drawer-disconnect');
   drawer.querySelectorAll('.nav-drawer-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
+      if (btn === disconnectBtn) {
+        // Client action, NOT a SageCommand: leave the server and return to the
+        // connect screen. This is the remote-reachable equivalent of the
+        // floating power button, which a D-pad cannot focus.
+        closeDrawer();
+        handleDisconnect();
+        return;
+      }
       if (btn === playPauseBtn) {
         // Toggle play/pause based on current media state
         const mp = session.mediaPlayer;

@@ -4,10 +4,11 @@
  * Opt-in, zero-cost-when-disabled instrumentation for diagnosing slow menu
  * navigation on constrained clients (iPad Safari/PWA, Samsung Tizen).
  *
- * Enable via any of:
- *   - URL param   ?perf=1        (…&perf=0 forces off)
- *   - localStorage sagetv.perf = "1"
- *   - console      __SAGETV_PERF__.setEnabled(true)   (persists to localStorage)
+ * Enable ONLY via the URL param ?perf=1 (…&perf=0 or omitting it = off). This
+ * is deliberately not sticky: it is never persisted to localStorage, so perf
+ * and its on-screen overlay are off on any normal load and only appear when
+ * the operator explicitly appends ?perf=1. __SAGETV_PERF__.setEnabled(true)
+ * can still flip it on for the current session (not persisted).
  *
  * When disabled every method is a cheap early-return, so call sites can invoke
  * these unconditionally without measurable overhead.
@@ -39,16 +40,14 @@ class PerfMonitor {
   }
 
   _detectEnabled() {
-    // Opt-in only. Enable via ?perf=1 (URL) or localStorage 'sagetv.perf'='1'.
-    // (?perf=0 / localStorage '0' force off.)
+    // Strictly URL-gated: on only when ?perf=1 is present. Never sticky.
+    // Proactively clear any legacy persisted flag so old sessions that set
+    // 'sagetv.perf' can't keep perf/overlay on after this change ships.
+    try { globalThis.localStorage?.removeItem('sagetv.perf'); } catch { /* ignore */ }
     try {
       const params = new URLSearchParams(globalThis.location?.search || '');
       const q = params.get('perf');
-      if (q === '1' || q === 'true') return true;
-      if (q === '0' || q === 'false') return false;
-    } catch { /* no URL context */ }
-    try {
-      return globalThis.localStorage?.getItem('sagetv.perf') === '1';
+      return q === '1' || q === 'true';
     } catch {
       return false;
     }
@@ -138,10 +137,9 @@ class PerfMonitor {
     return this._now();
   }
 
-  /** Persist and apply an enable/disable toggle at runtime. */
+  /** Apply an enable/disable toggle for the current session (not persisted). */
   setEnabled(on) {
     this._enabled = !!on;
-    try { globalThis.localStorage?.setItem('sagetv.perf', on ? '1' : '0'); } catch { /* ignore */ }
     this._publish();
     return this._enabled;
   }

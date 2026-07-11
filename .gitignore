@@ -17,3 +17,8 @@ deploy/tizen/signature*.xml
 deploy/tizen/public/
 deploy/tizen/icons/icon-512.png
 
+# Local Tizen deploy config (real TV IP / device name / signing profile) and
+# stray backups — never commit these.
+deploy/tizen/tizen.local.json
+deploy/tizen/**/*.original-backup
+

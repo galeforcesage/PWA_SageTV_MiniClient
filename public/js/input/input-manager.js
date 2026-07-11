@@ -10,7 +10,7 @@
  * Port of: android-shared input handling + SageCommand.java mappings
  */
 
-import { SageCommand, EventType } from '../protocol/constants.js';
+import { SageCommand, EventType, PlayerState } from '../protocol/constants.js';
 import { TizenInputAdapter } from './tizen-input-adapter.js';
 
 // ── Keyboard → SageCommand mapping ─────────────────────────
@@ -156,6 +156,10 @@ export class InputManager {
     this._tizenSelectTimer = null;
     this._tizenSelectSuppress = false;
     this._TIZEN_LONGPRESS_MS = 550;
+    // Context-aware arrow tap/hold: hold threshold (ms) + active-hold state.
+    this._ARROW_HOLD_MS = 450;
+    this._arrowHold = null;
+    this._arrowHoldTimer = null;
 
     // Hidden text input for soft keyboard on mobile/iPad
     this._textInput = document.getElementById('sage-text-input');
@@ -317,6 +321,26 @@ export class InputManager {
         return;
       }
 
+      // Context-aware arrow keys (all platforms, in-session): TAP = one step,
+      // HOLD = a bigger step. In menus HOLD pages in that direction; during
+      // video playback Left/Right become REW/FF (tap) and boundary jumps
+      // REW_2/FF_2 (hold). Resolved on keyup / the hold timer so we never send
+      // both the tap and the hold action.
+      const arrowSpec = (this.connection && this.connection.alive)
+        ? this._arrowTransport(cmd) : null;
+      if (arrowSpec) {
+        this._arrowHold = { key: effectiveCode, tap: arrowSpec.tap, hold: arrowSpec.hold, fired: false };
+        if (this._arrowHoldTimer) clearTimeout(this._arrowHoldTimer);
+        this._arrowHoldTimer = setTimeout(() => {
+          this._arrowHoldTimer = null;
+          if (this._arrowHold) {
+            this._arrowHold.fired = true;
+            this.connection.sendCommand(this._arrowHold.hold);
+          }
+        }, this._ARROW_HOLD_MS);
+        return;
+      }
+
       this.connection.sendCommand(cmd.id);
       return;
     }
@@ -331,24 +355,68 @@ export class InputManager {
   }
 
   _onKeyUp(event) {
+    const tizenNorm = this._tizenAdapter.isEnabled() ? this._tizenAdapter.normalize(event) : null;
+    const effectiveCode = tizenNorm?.code || event.code;
+    const effectiveKey = tizenNorm?.key || event.key;
     this._heldKeys.delete(event.code);
-    // Tizen deferred-SELECT: fire SELECT on release if the long-press timer
-    // is still pending (short tap); otherwise the timer already triggered
-    // the nav drawer and we suppress the SELECT.
-    if (this._tizenAdapter.isEnabled()) {
-      const tizenNorm = this._tizenAdapter.normalize(event);
-      const effectiveKey = tizenNorm?.key || event.key;
-      if (effectiveKey === 'Enter') {
-        this._heldKeys.delete(tizenNorm?.code || event.code);
-        if (this._tizenSelectTimer) {
-          clearTimeout(this._tizenSelectTimer);
-          this._tizenSelectTimer = null;
-          if (!this._tizenSelectSuppress) {
-            this.connection.sendCommand(SageCommand.SELECT.id);
-          }
+    this._heldKeys.delete(effectiveCode);
+
+    // Context-aware arrow tap/hold release: if the hold timer is still pending
+    // this was a short TAP → send the tap command. If the hold already fired we
+    // did the bigger action (page / boundary jump) and must not also tap.
+    if (this._arrowHold &&
+        (this._arrowHold.key === effectiveCode || this._arrowHold.key === event.code)) {
+      if (this._arrowHoldTimer) { clearTimeout(this._arrowHoldTimer); this._arrowHoldTimer = null; }
+      if (!this._arrowHold.fired) this.connection.sendCommand(this._arrowHold.tap);
+      this._arrowHold = null;
+    }
+
+    // Tizen deferred-SELECT: fire SELECT on release if the long-press timer is
+    // still pending (short tap); otherwise the timer already opened the nav
+    // drawer and we suppress the SELECT.
+    if (this._tizenAdapter.isEnabled() && effectiveKey === 'Enter') {
+      if (this._tizenSelectTimer) {
+        clearTimeout(this._tizenSelectTimer);
+        this._tizenSelectTimer = null;
+        if (!this._tizenSelectSuppress) {
+          this.connection.sendCommand(SageCommand.SELECT.id);
         }
-        this._tizenSelectSuppress = false;
       }
+      this._tizenSelectSuppress = false;
+    }
+  }
+
+  /** True when a media file is actively loaded/playing/paused (video context). */
+  _inPlayback() {
+    const mp = this.connection && this.connection.mediaPlayer;
+    if (!mp) return false;
+    const s = mp.state;
+    return s === PlayerState.LOADED || s === PlayerState.PLAY || s === PlayerState.PAUSE;
+  }
+
+  /**
+   * Map an arrow SageCommand to its { tap, hold } command ids for the current
+   * context, or null for non-arrow commands (which send immediately).
+   *   Menu:     Up/Down/Left/Right  → tap = step,   hold = Page in that direction
+   *   Playback: Left/Right          → tap = REW/FF, hold = REW_2/FF_2 (jump)
+   *   Playback: Up/Down             → same as menu (step / page)
+   */
+  _arrowTransport(cmd) {
+    switch (cmd) {
+      case SageCommand.UP:
+        return { tap: SageCommand.UP.id, hold: SageCommand.PAGE_UP.id };
+      case SageCommand.DOWN:
+        return { tap: SageCommand.DOWN.id, hold: SageCommand.PAGE_DOWN.id };
+      case SageCommand.LEFT:
+        return this._inPlayback()
+          ? { tap: SageCommand.REW.id, hold: SageCommand.REW_2.id }
+          : { tap: SageCommand.LEFT.id, hold: SageCommand.PAGE_LEFT.id };
+      case SageCommand.RIGHT:
+        return this._inPlayback()
+          ? { tap: SageCommand.FF.id, hold: SageCommand.FF_2.id }
+          : { tap: SageCommand.RIGHT.id, hold: SageCommand.PAGE_RIGHT.id };
+      default:
+        return null;
     }
   }
 

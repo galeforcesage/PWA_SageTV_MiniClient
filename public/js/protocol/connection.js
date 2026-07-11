@@ -126,6 +126,16 @@ export class MiniClientConnection extends EventTarget {
     this.serverHost = options.serverHost;
     this.serverPort = options.serverPort || DEFAULT_PORT;
     this.renderer = options.renderer;
+    // Late-image repaint: async image decodes (compressed images such as the
+    // menu background) can finish AFTER the frame that drew them already
+    // flipped, leaving that image blank until the next input event triggers a
+    // server repaint. That's the classic "black menu background until you move
+    // the mouse". Hook the renderer's "all pending decodes done" callback to
+    // proactively request a repaint so late images appear immediately. Works
+    // for both the WebGL and Canvas2D renderers (both expose onImagesReady).
+    if (this.renderer) {
+      this.renderer.onImagesReady = () => this._onLateImagesReady();
+    }
     this.mediaPlayer = options.mediaPlayer;
     this.width = options.width || 1280;
     this.height = options.height || 720;
@@ -175,6 +185,10 @@ export class MiniClientConnection extends EventTarget {
     this._propertyResolve = null;
     this._pendingPropertyResponse = null;
     this._advancedImageCaching = false;
+    // Protocol 2.1 §7 return path: server's per-stream surface decision,
+    // set via CAP_EFFECTIVE_SURFACE just before each MEDIACMD_OPENURL.
+    this._effectiveSurface = '';
+    this._effectivePlayer = '';
 
     // Offline image cache tracking
     this._offlineCacheChanges = [];
@@ -266,8 +280,13 @@ export class MiniClientConnection extends EventTarget {
     await initCompression();
     this._connectTime = Date.now();
 
-    // Fetch server capabilities from bridge before connecting
-    await this._fetchServerInfo();
+    // Fetch server capabilities from the bridge in the BACKGROUND. This was
+    // previously awaited here, adding up to 5s (its fetch timeout) of dead time
+    // BEFORE the GFX socket even opened — a big chunk of the startup black
+    // screen when the bridge/server-info endpoint is slow. The profile is only
+    // needed later for transcode decisions, so let it resolve in parallel with
+    // the handshake and first frame instead of blocking the connect.
+    this._fetchServerInfo().catch(() => { /* non-fatal; fall back to defaults */ });
 
     const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
     console.log(`[Connection] Connecting via ${this.bridgeUrl} to ${this.serverHost}:${this.serverPort}, MAC=${this.macAddress}`);
@@ -984,6 +1003,20 @@ export class MiniClientConnection extends EventTarget {
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
+        // Audio track-access (Protocol 2.1.0006, §3 fields 7-9). Declared
+        // conservatively and TRUTHFULLY: an HTML5 <video> element cannot
+        // reliably switch audio tracks — the HTMLMediaElement.audioTracks
+        // selection API is unsupported/inert in Chromium and spotty on Tizen —
+        // so native playback only ever renders the container's DEFAULT track.
+        //   default_only : we can only reach the container default track.
+        //   server       : we can't pick a track, so the server must preselect
+        //                  our CLIENT_AUDIO_LANGUAGE track (AUDIO_TRANSCODE/
+        //                  REMUX) before handing us the stream.
+        // Over-declaring 'all' here would silently give users the wrong audio
+        // language on multi-track sources, so we don't.
+        audioTrackAccess: 'default_only',
+        audioTrackSelectionMode: 'server',
+        audioContainerRules: '',
       },
       pwa_mse: {
         route: 'mse',
@@ -999,6 +1032,16 @@ export class MiniClientConnection extends EventTarget {
         videoCodecs: ['H264', 'HEVC', 'MPEG2-VIDEO', 'MPEG4-VIDEO', 'VP9', 'AV1'],
         audioCodecs: ['AAC', 'HE-AAC', 'AC3', 'EAC3', 'MP2', 'MP3', 'OPUS', 'FLAC', 'DTS'],
         containers: ['MP4', 'MATROSKA', 'MPEG2-TS', 'MPEG2-PS', 'AVI', 'MOV'],
+        // Audio track-access (Protocol 2.1.0006, §3 fields 7-9). The bridge
+        // /transcode (ffmpeg) COULD map any audio track, but it does not yet
+        // select by language — it emits ffmpeg's default stream. So today the
+        // MSE surface, like native, effectively delivers only the default
+        // track. Declare that truthfully: default_only + server preselection.
+        // When the bridge learns to `-map` a chosen language track, upgrade
+        // this to access='all' + selection='client'.
+        audioTrackAccess: 'default_only',
+        audioTrackSelectionMode: 'server',
+        audioContainerRules: '',
       },
     };
 
@@ -1025,6 +1068,50 @@ export class MiniClientConnection extends EventTarget {
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
     console.log('[PlaybackSurfaces] pwa_mse:   ', JSON.stringify(this._playbackSurfaces.pwa_mse));
     return this._playbackSurfaces;
+  }
+
+  /**
+   * Resolve the client's preferred audio language as an ISO 639-2 3-letter
+   * lowercase code for CLIENT_AUDIO_LANGUAGE (Protocol 2.1.0007, §2).
+   *
+   * The server compares this against broadcast/DVB audio-track language tags
+   * with an EXACT case-insensitive match — it does NOT convert 2<->3 letter
+   * codes — so we must emit the 3-letter form the tags use.
+   *
+   * Sources, in priority order:
+   *   1. explicit setting 'audio.language' (verbatim; lets the operator match
+   *      an unusual broadcast tag, e.g. bibliographic 'fre'/'ger' vs the
+   *      terminological 'fra'/'deu' the map below emits).
+   *   2. navigator.languages[0] / navigator.language 2-letter prefix, mapped
+   *      to 3-letter via the table below (forms chosen to match the spec's
+   *      examples: eng, spa, fra, deu, jpn).
+   * Returns '' when unknown/unset — the server then falls back to its own
+   * userLocale, then the first available track.
+   */
+  _resolveClientAudioLanguage() {
+    const pref = this.settings ? this.settings.get('audio.language', '') : '';
+    if (pref && typeof pref === 'string') {
+      return pref.trim().toLowerCase();
+    }
+    // ISO 639-1 (2-letter) -> ISO 639-2 (3-letter). Ambiguous B/T codes use
+    // the terminological form to match the spec examples (fra, deu).
+    const MAP = {
+      en: 'eng', es: 'spa', fr: 'fra', de: 'deu', ja: 'jpn', it: 'ita',
+      pt: 'por', ru: 'rus', zh: 'zho', ko: 'kor', nl: 'nld', sv: 'swe',
+      no: 'nor', da: 'dan', fi: 'fin', pl: 'pol', tr: 'tur', ar: 'ara',
+      hi: 'hin', el: 'ell', cs: 'ces', hu: 'hun', ro: 'ron', th: 'tha',
+      vi: 'vie', id: 'ind', he: 'heb', uk: 'ukr',
+    };
+    let tag = '';
+    try {
+      tag = (navigator.languages && navigator.languages[0]) || navigator.language || '';
+    } catch { /* no navigator */ }
+    if (!tag) return '';
+    const lower = tag.toLowerCase();
+    // Already a 3-letter code (e.g. 'eng', 'eng-US')?
+    const first = lower.split(/[-_]/)[0];
+    if (first.length === 3) return first;
+    return MAP[first] || '';
   }
 
   /**
@@ -1267,6 +1354,11 @@ export class MiniClientConnection extends EventTarget {
         case 'VIDEO_CODECS': return surface.videoCodecs.join(',');
         case 'AUDIO_CODECS': return surface.audioCodecs.join(',');
         case 'CONTAINERS': return surface.containers.join(',');
+        // Protocol 2.1.0006 §3 fields 7-9 (optional). Empty string is a valid
+        // reply and yields the server's conservative defaults.
+        case 'AUDIO_TRACK_ACCESS': return surface.audioTrackAccess || '';
+        case 'AUDIO_TRACK_SELECTION_MODE': return surface.audioTrackSelectionMode || '';
+        case 'AUDIO_CONTAINER_RULES': return surface.audioContainerRules || '';
         default:
           console.warn(`[Connection] Unknown surface attribute: ${attr}`);
           return '';
@@ -1290,6 +1382,12 @@ export class MiniClientConnection extends EventTarget {
       case 'CLIENT_PLATFORM':
         this._markNgNegotiated(name);
         return this.platformDetector?.isTizen?.() ? 'tizen' : 'browser';
+      // Session-level preferred audio language (Protocol 2.1.0007 §2). 3-letter
+      // ISO 639-2 lowercase; empty = no preference (server uses its own
+      // userLocale, then first track). Same value for every surface.
+      case 'CLIENT_AUDIO_LANGUAGE':
+        this._markNgNegotiated(name);
+        return this._resolveClientAudioLanguage();
       case 'DEVICE_MANUFACTURER':
         this._markNgNegotiated(name);
         return this.platformDetector?.isTizen?.() ? 'Samsung' : 'Browser';
@@ -1522,15 +1620,15 @@ export class MiniClientConnection extends EventTarget {
       case 'MEDIA_PLAYER_BUFFER_DELAY':
         return '0';
       case 'FIXED_PUSH_MEDIA_FORMAT': {
-        // Tell server to transcode push content for MSE playback.
-        // videocodec can be H.264 (all servers) or H.265 (modern SageTVffmpeg only)
-        const vcodec = pref('fixed_encoding/video_codec', 'H.264');
-        const vbr = parseInt(pref('fixed_encoding/video_bitrate_kbps', '4000')) * 1000;
-        const abr = parseInt(pref('fixed_encoding/audio_bitrate_kbps', '128')) * 1000;
-        const acodec = pref('fixed_encoding/audio_codec', 'aac');
-        const res = pref('fixed_encoding/video_resolution', 'SOURCE');
-        const fps = pref('fixed_encoding/video_fps', 'SOURCE');
-        return `container=mpegts;videocodec=${vcodec};videobitrate=${vbr};fps=${fps};resolution=${res};audiocodec=${acodec};audiobitrate=${abr};`;
+        // Push was retired in Protocol 2.1 (mux.js transmuxer removed) and both
+        // PWA surfaces advertise deliveryModes='pull'. Advertising a concrete
+        // push transcode recipe here is a lie the client can no longer honor —
+        // and it invites the server to PUSH (which the client then discards,
+        // tearing the session down). Return empty so the story is consistently
+        // pull-only, matching PUSH_AV_CONTAINERS and FIXED_PUSH_REMUX_FORMAT.
+        // (The old fixed_encoding/* prefs now only feed the bridge /transcode
+        // pull pipeline, not a server push.)
+        return '';
       }
       case 'FIXED_PUSH_REMUX_FORMAT':
         // Upstream google/SageTV miniclient never advertises this property.
@@ -1598,6 +1696,23 @@ export class MiniClientConnection extends EventTarget {
       case 'RECONNECT_SUPPORTED':
         this.reconnectAllowed = (value === 'TRUE' || value === 'true');
         console.log(`[Connection] Reconnect allowed: ${this.reconnectAllowed}`);
+        return 0;
+      case 'CAP_EFFECTIVE_SURFACE':
+        // Protocol 2.1 §7 return path: the surface the server chose for the
+        // stream it is about to open. Consumed by the next MEDIACMD_OPENURL to
+        // route the stream into the matching client pipeline:
+        //   pwa_native -> native <video> pull (/rawmedia)
+        //   pwa_mse    -> bridge /transcode -> MSE
+        // Session-sticky: the server emits this once per OPENURL, so the value
+        // read at OPENURL is always fresh; we don't re-decide on seek/trick.
+        this._effectiveSurface = value ? value.trim() : '';
+        console.log(`[Connection] CAP_EFFECTIVE_SURFACE = ${this._effectiveSurface || '(none)'}`);
+        return 0;
+      case 'CAP_EFFECTIVE_PLAYER':
+        // Legacy compatibility tag; recorded for diagnostics only. We honor
+        // CAP_EFFECTIVE_SURFACE for routing (§7).
+        this._effectivePlayer = value ? value.trim() : '';
+        console.log(`[Connection] CAP_EFFECTIVE_PLAYER = ${this._effectivePlayer || '(none)'} (informational)`);
         return 0;
       case 'MENU_HINT': {
         // Parse "menuName:X,popupName:Y,hasTextInput:true"
@@ -2583,11 +2698,27 @@ export class MiniClientConnection extends EventTarget {
             console.log(`[Media] Server HLS (iosstream) detected for mfid=${mfid}; routing to bridge transcode (HD, bypass HTTPLS)`);
             this.mediaPlayer.loadBridgeMfid(mfid, this.serverHost, 0);
           } else {
-            // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
-            // via the bridge's /rawmedia byte-range endpoint — matches the fork's
-            // stv:// pull data source (browser-safe HTTP equivalent). Don't route
-            // through the transcoder: DIRECT_PLAY should preserve original bitstream.
-            this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+            // Protocol 2.1 §7: honor the server's per-stream surface decision
+            // (CAP_EFFECTIVE_SURFACE, set just before this OPENURL). If the
+            // server chose pwa_mse for a pull abs-path source, route it through
+            // the bridge /transcode pipeline (pass urlString as bridgeFilePath)
+            // rather than feeding raw bytes to a native <video> that may not
+            // decode this codec (e.g. HEVC). pwa_native (or no decision) keeps
+            // the native /rawmedia pull path, preserving the original bitstream
+            // for DIRECT_PLAY.
+            const surface = this._effectiveSurface;
+            const routeToBridge = surface === 'pwa_mse' && isAbsPath && !isPush;
+            if (routeToBridge) {
+              console.log(`[Media] CAP_EFFECTIVE_SURFACE=pwa_mse — routing pull source to bridge transcode: ${urlString}`);
+              this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0, urlString);
+            } else {
+              // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
+              // via the bridge's /rawmedia byte-range endpoint — matches the fork's
+              // stv:// pull data source (browser-safe HTTP equivalent). Don't route
+              // through the transcoder: DIRECT_PLAY should preserve original bitstream.
+              if (surface) console.log(`[Media] CAP_EFFECTIVE_SURFACE=${surface} — native pull path`);
+              this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
+            }
           }
         }
         this._sendMediaReturn(1);
@@ -2930,6 +3061,33 @@ export class MiniClientConnection extends EventTarget {
     dv.setInt32(8, w, false);
     dv.setInt32(12, h, false);
     this._sendEvent(EventType.UI_REPAINT, payload);
+  }
+
+  /**
+   * Called by the renderer when all pending async image decodes have completed.
+   * If images finished after their frame already flipped they'd stay blank
+   * until the next input-triggered server repaint (the "black menu background
+   * until you move the mouse" bug). Request a coalesced repaint so they appear
+   * right away.
+   *
+   * A well-behaved server does NOT re-send image data for already-cached
+   * handles on repaint, so our own repaint won't re-fire this callback. The
+   * rate cap is a defensive backstop in case a server does re-send.
+   */
+  _onLateImagesReady() {
+    if (!this.firstFrameStarted || !this.alive) return;
+    if (this._lateImageRepaintTimer) return;
+    const now = Date.now();
+    if (!this._lateRepaintWindowStart || now - this._lateRepaintWindowStart > 1000) {
+      this._lateRepaintWindowStart = now;
+      this._lateRepaintCount = 0;
+    }
+    if (this._lateRepaintCount >= 5) return; // suspected loop — stop repainting
+    this._lateImageRepaintTimer = setTimeout(() => {
+      this._lateImageRepaintTimer = null;
+      this._lateRepaintCount = (this._lateRepaintCount || 0) + 1;
+      try { this.sendRepaint(); } catch { /* ignore */ }
+    }, 16);
   }
 
   // ── FS Commands ─────────────────────────────────────────

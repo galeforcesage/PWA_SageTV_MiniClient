@@ -17,6 +17,29 @@ App logic stays in `public/`; this folder only contains Tizen wrapper/config fil
 4. A Samsung certificate profile configured in Tizen Studio
 5. Node.js installed (for prepare script)
 
+## Quick Build & Deploy (recommended)
+
+One command does prepare + package + the space-free rename (and optionally
+install/launch on the TV):
+
+```powershell
+npm run tizen:build              # prepare + package -> deploy/tizen/SageTVMiniClient.wgt
+npm run tizen:deploy             # also sdb connect + install + run on the TV
+```
+
+The `.wgt` is always written as `SageTVMiniClient.wgt` (no space), avoiding the
+`tizen install` failure described in the manual steps below.
+
+Configure your TV / cert / tool paths **without committing them**: copy
+[`tizen.local.example.json`](tizen.local.example.json) to `tizen.local.json`
+(gitignored) and fill in your values, or set the equivalent env vars
+(`TIZEN_CLI`, `TIZEN_SDB`, `TIZEN_CERT`, `TIZEN_TARGET`, `TIZEN_SERIAL`,
+`TIZEN_APPID`). Precedence: env var > `tizen.local.json` > placeholder default.
+`tizen:deploy` requires `serial` (`<TV_IP>:26101`) and `target` (the `sdb`
+device name).
+
+The manual steps below remain valid if you prefer to run each stage yourself.
+
 ## 1) Enable Developer Mode On The TV
 
 1. Open Apps on the TV.

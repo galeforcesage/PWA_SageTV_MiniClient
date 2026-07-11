@@ -1060,6 +1060,33 @@ html, body {
   pointer-events: none;
 }
 
+/* ── Startup Overlay (connect → first server frame) ── */
+
+.startup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  background: radial-gradient(ellipse at center, #12161c 0%, #05070a 100%);
+  color: #fff;
+}
+.startup-logo {
+  width: 128px;
+  height: auto;
+  opacity: 0.95;
+}
+.startup-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  color: rgba(255,255,255,0.85);
+}
+
 /* ── Reconnect Banner ────────────────────────────────── */
 
 .reconnect-banner {

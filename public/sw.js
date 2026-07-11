@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.11.0-optionb-mfid';
+const CACHE_NAME = 'sagetv-miniclient-8.22.0-arrow-transport';
 
 // During development, use network-first strategy
 const DEV_MODE = true;

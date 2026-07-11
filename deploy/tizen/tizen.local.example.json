@@ -1,0 +1,14 @@
+{
+  "//": "Copy this file to tizen.local.json (gitignored) and fill in your own",
+  "//tools": "Paths to your Tizen Studio CLI + sdb (defaults assume a standard Windows install)",
+  "cli": "C:\\tizen-studio\\tools\\ide\\bin\\tizen.bat",
+  "sdb": "C:\\tizen-studio\\tools\\sdb.exe",
+  "//cert": "Your Samsung signing profile name (from Tizen Studio Certificate Manager)",
+  "cert": "YOUR_CERT_PROFILE",
+  "//serial": "sdb connect target: <TV_IP>:26101",
+  "serial": "TV_IP_ADDRESS:26101",
+  "//target": "sdb device NAME (3rd column of `sdb devices`), NOT the IP",
+  "target": "YOUR_TV_DEVICE_NAME",
+  "//appid": "Tizen application id (matches config.xml)",
+  "appid": "Pwasagetvm.SageTVMiniClient"
+}

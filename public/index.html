@@ -427,6 +427,12 @@
           <button data-cmd="13" class="nav-drawer-btn" title="Vol Up">🔊</button>
         </div>
       </div>
+      <div class="nav-drawer-section">
+        <div class="nav-drawer-label">Session</div>
+        <div class="nav-drawer-row">
+          <button id="nav-drawer-disconnect" class="nav-drawer-btn" title="Disconnect (back to server list)">⏻</button>
+        </div>
+      </div>
     </div>
 
     <!-- Status bar (Placeshifter-style) -->
@@ -446,6 +452,21 @@
     <!-- Seeking spinner overlay -->
     <div id="seeking-overlay" class="seeking-overlay" hidden>
       <span class="spinner"></span> <span>Seeking...</span>
+    </div>
+
+    <!-- Loading spinner overlay (shown while the opening of a stream buffers,
+         so the user sees a deliberate loading state instead of a frozen frame) -->
+    <div id="loading-overlay" class="seeking-overlay" hidden>
+      <span class="spinner"></span> <span>Loading...</span>
+    </div>
+
+    <!-- Startup screen: covers the (black) canvas from connect until the first
+         server frame arrives. SageTV builds the menu server-side per connection,
+         which can take several seconds; without this the user stares at black.
+         Shown on 'connected', hidden on the 'firstframe' event. -->
+    <div id="startup-overlay" class="startup-overlay" hidden>
+      <img src="icons/sage_logo_256.png" alt="SageTV" class="startup-logo" />
+      <div class="startup-status"><span class="spinner"></span> <span>Connecting to SageTV…</span></div>
     </div>
 
     <!-- Reconnecting banner -->

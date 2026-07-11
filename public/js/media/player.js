@@ -460,6 +460,11 @@ export class MediaPlayer extends EventTarget {
     const bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}`;
     console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
 
+    // Signal that we're buffering the opening of the stream so the UI can show
+    // a loading spinner instead of exposing the (not-yet-moving) first frame
+    // during the prebuffer window. Cleared by the 'playing' event.
+    this.dispatchEvent(new CustomEvent('buffering'));
+
     try {
       const response = await fetch(bridgeUrl, {
         signal: this._bridgeAbortController.signal,
@@ -524,14 +529,26 @@ export class MediaPlayer extends EventTarget {
           }
         }
 
-        // Auto-play after enough data (initial load or after seek)
-        // Reduced threshold to 16KB to bypass browser play overlay
-        if (!autoPlayed && totalBytes > 16 * 1024 &&
-            (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
-          console.log(`[MediaPlayer] Bridge auto-playing after ${(totalBytes / 1024).toFixed(0)}KB`);
-          this._wasPlayingBeforeSeek = false;
-          this.play();
-          autoPlayed = true;
+        // Auto-play once we have a HEALTHY PREBUFFER, not just one frame.
+        // Playing after ~16KB decoded frame 1 and then immediately ran dry,
+        // stalling 2-3s on the frozen opening frame before the transcode/
+        // buffer caught up. Instead wait until the SourceBuffer holds
+        // ~PREBUFFER_SEC of media (or the element reports it can play through),
+        // so playback starts AND continues smoothly. The byte ceiling is a
+        // safety net so odd/short sources never hang waiting for the target.
+        if (!autoPlayed && (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
+          const PREBUFFER_SEC = this._prebufferSec ?? 1.2;
+          const br = this.sourceBuffer && this.sourceBuffer.buffered;
+          const bufferedSec = (br && br.length) ? (br.end(br.length - 1) - br.start(0)) : 0;
+          const ready = bufferedSec >= PREBUFFER_SEC ||
+                        this.video.readyState >= 4 /* HAVE_ENOUGH_DATA */ ||
+                        totalBytes > 4 * 1024 * 1024;
+          if (ready) {
+            console.log(`[MediaPlayer] Bridge auto-playing: buffered=${bufferedSec.toFixed(2)}s bytes=${(totalBytes / 1024).toFixed(0)}KB readyState=${this.video.readyState}`);
+            this._wasPlayingBeforeSeek = false;
+            this.play();
+            autoPlayed = true;
+          }
         }
 
         // Log progress
@@ -953,32 +970,81 @@ export class MediaPlayer extends EventTarget {
     if (!isFinite(timeSec) || timeSec < 0) return;
 
     if (this.bridgeMode && this._bridgeFilePath) {
-      // Debounce rapid seeks — only restart the stream after user stops pressing FF
-      console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s`);
-      this.seeking = true;
-      this._wasPlayingBeforeSeek = (this.state === PlayerState.PLAY);
-      this.dispatchEvent(new CustomEvent('seeking'));
-      this._bridgeTimeOffsetMs = timeMS;
-      this._bridgeNeedTimeReset = true;
-
-      // Immediately abort any in-flight stream so playback doesn't keep going at the old position
-      if (this._bridgeAbortController) {
-        this._bridgeAbortController.abort();
-        this._bridgeAbortController = null;
+      // ── A) IN-BUFFER FAST PATH ──
+      // If the target is already transcoded into the SourceBuffer, jump there
+      // INSTANTLY (like a native/ExoPlayer seekTo) with NO ffmpeg restart. This
+      // is what makes small forward FF / REW skips smooth on the transcode
+      // lane. Uses the CURRENT segment offset (from the last restart), so it
+      // must run BEFORE _scheduleBridgeRestartSeek() mutates _bridgeTimeOffsetMs.
+      const curOffsetMs = this._bridgeTimeOffsetMs || 0;
+      const relSec = (timeMS - curOffsetMs) / 1000;
+      if (relSec >= 0 && this._isWithinBuffered(relSec)) {
+        if (this._seekDebounceTimer) { clearTimeout(this._seekDebounceTimer); this._seekDebounceTimer = null; }
+        try {
+          this.video.currentTime = relSec;
+          this.seeking = false;
+          this.dispatchEvent(new CustomEvent('seeked'));
+          console.log(`[MediaPlayer] Bridge in-buffer seek to ${timeSec.toFixed(1)}s (rel ${relSec.toFixed(1)}s) — no restart`);
+          return;
+        } catch (e) {
+          console.warn('[MediaPlayer] In-buffer seek failed; falling back to restart:', e?.message);
+        }
       }
 
-      // Debounce: reset timer on each press, only fire after 300ms of no new seeks
-      if (this._seekDebounceTimer) clearTimeout(this._seekDebounceTimer);
-      this._seekDebounceTimer = setTimeout(() => {
-        this._seekDebounceTimer = null;
-        this._flushAndRestart(this._bridgeFilePath, timeSec);
-      }, 300);
+      // ── Out of buffer → heavy path: debounced flush + ffmpeg restart ──
+      console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s (out of buffer — restart)`);
+      this._scheduleBridgeRestartSeek(timeMS, timeSec);
     } else {
       this.video.currentTime = timeSec;
     }
   }
 
   /**
+   * True when a segment-relative time (seconds) is inside the SourceBuffer's
+   * currently-buffered range — i.e. we can satisfy the seek instantly without
+   * re-running the transcode.
+   */
+  _isWithinBuffered(relSec) {
+    const b = this.sourceBuffer && this.sourceBuffer.buffered;
+    if (!b || !b.length) return false;
+    for (let i = 0; i < b.length; i++) {
+      // Small guard at the trailing edge so we don't land on an un-appended
+      // boundary and immediately stall waiting for the next segment.
+      if (relSec >= b.start(i) && relSec <= b.end(i) - 0.25) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Heavy bridge seek: abort the current transcode and restart ffmpeg at the
+   * target, debounced so a burst of FF/REW presses only triggers ONE restart
+   * at the settled position (not one per press).
+   */
+  _scheduleBridgeRestartSeek(timeMS, timeSec) {
+    this.seeking = true;
+    this._wasPlayingBeforeSeek = (this.state === PlayerState.PLAY);
+    this.dispatchEvent(new CustomEvent('seeking'));
+    this._bridgeTimeOffsetMs = timeMS;
+    this._bridgeNeedTimeReset = true;
+
+    // Immediately abort any in-flight stream so playback doesn't keep going at
+    // the old position while we wait out the debounce.
+    if (this._bridgeAbortController) {
+      this._bridgeAbortController.abort();
+      this._bridgeAbortController = null;
+    }
+
+    // Debounce: reset on each press, only fire after 300ms of no new seeks so a
+    // fast FF scrub coalesces into a single restart at the final position.
+    if (this._seekDebounceTimer) clearTimeout(this._seekDebounceTimer);
+    this._seekDebounceTimer = setTimeout(() => {
+      this._seekDebounceTimer = null;
+      this._flushAndRestart(this._bridgeFilePath, timeSec);
+    }, 300);
+  }
+
+  /**
+
    * Flush SourceBuffer and wait for removal to complete before restarting bridge stream.
    * Tears down and recreates MediaSource + SourceBuffer to ensure a clean init segment state.
    */
