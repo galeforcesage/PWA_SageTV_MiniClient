@@ -144,10 +144,25 @@ export class SessionManager extends EventTarget {
       console.log('[Session] Using Canvas2D renderer');
     }
 
-    // Create media player
-    this.mediaPlayer = new MediaPlayer(videoElement, container, {
-      platformDetector: this.platformDetector,
-    });
+    // Create media player. Samsung Tizen TVs use the native AVPlay player
+    // (hardware demux+decode of MPEG2-TS/PS, MPEG-2/HEVC/AC-3/AC-4 that the
+    // WebView <video> element cannot handle); all other clients use the
+    // <video>/MSE MediaPlayer.
+    const useAvplay = this.platformDetector.isTizen()
+      && !!(window.webapis && window.webapis.avplay);
+    if (useAvplay) {
+      // Dynamic import: the AVPlay module is fetched ONLY on Tizen, so browser /
+      // iPad clients never download it — keeps the web PWA footprint minimal.
+      const { AVPlayPlayer } = await import('../media/avplay-player.js');
+      this.mediaPlayer = new AVPlayPlayer(videoElement, container, {
+        platformDetector: this.platformDetector,
+      });
+      console.log('[Session] Using AVPlay player (Tizen native)');
+    } else {
+      this.mediaPlayer = new MediaPlayer(videoElement, container, {
+        platformDetector: this.platformDetector,
+      });
+    }
 
     // Forward codec errors to session listeners for UI display
     this.mediaPlayer.addEventListener('codecerror', (e) => {

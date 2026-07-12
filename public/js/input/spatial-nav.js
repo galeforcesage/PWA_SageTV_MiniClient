@@ -152,36 +152,9 @@ export class SpatialNavigation {
         return;
       }
       const from = activeInScope ? active : this._lastFocused;
-      let next = this._findNeighbor(from, dir, scope);
-      // Fallback: when going up/down inside an overlay scope (settings/add-
-      // server dialogs), if no directional neighbor was found but the modal
-      // has a fixed action row at the bottom (Save/Cancel), route the arrow
-      // there so those buttons are always reachable via D-pad. Same in
-      // reverse: going up from a modal action button falls back to the last
-      // focusable in the scroll area above it.
-      if (!next && isOverlayScope && (dir === 'up' || dir === 'down')) {
-        const buttons = Array.from(scope.querySelectorAll('.modal-buttons'))
-          .flatMap((b) => this._focusableIn(b));
-        if (buttons.length) {
-          const inButtons = buttons.includes(from);
-          if (dir === 'down' && !inButtons) {
-            next = buttons[0];
-          } else if (dir === 'up' && inButtons) {
-            const scroll = scope.querySelector('.settings-scroll, .modal-card');
-            const above = scroll ? this._focusableIn(scroll) : [];
-            if (above.length) next = above[above.length - 1];
-          }
-        }
-      }
+      const next = this._findNeighbor(from, dir, scope);
       if (next) {
         next.focus({ preventScroll: false });
-        // Belt-and-braces: some older TV WebViews (Tizen 5/6) don't fire
-        // the automatic scroll on focus() when the element is inside a
-        // scrollable container. Force it so the newly focused row is
-        // guaranteed visible.
-        if (typeof next.scrollIntoView === 'function') {
-          try { next.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
-        }
         ev.preventDefault();
         ev.stopPropagation();
         if (this._debug) console.log('[Spatnav]', dir, '->', next);

@@ -160,6 +160,9 @@ export class InputManager {
     this._ARROW_HOLD_MS = 450;
     this._arrowHold = null;
     this._arrowHoldTimer = null;
+    // Tracks the menu<->playback context so we can self-heal stuck keys: a lost
+    // keyup on the transition would otherwise leave a key "held" and ignored.
+    this._lastInPlayback = false;
 
     // Hidden text input for soft keyboard on mobile/iPad
     this._textInput = document.getElementById('sage-text-input');
@@ -302,6 +305,16 @@ export class InputManager {
     const cmd = KEY_TO_COMMAND[effectiveKey] || KEY_TO_COMMAND[effectiveCode];
     if (cmd) {
       event.preventDefault();
+      // Self-heal stuck keys across the menu<->playback transition: a keyup can
+      // be dropped when the AVPlay object takes/releases focus (or on a socket
+      // hiccup), leaving the key stuck in _heldKeys so Right/OK look dead in the
+      // menu while Up/Down still work. When the context flips, clear that state
+      // so the first press after the transition is honored.
+      const inPb = this._inPlayback();
+      if (inPb !== this._lastInPlayback) {
+        this._lastInPlayback = inPb;
+        this._clearTransientInput();
+      }
       if (this._heldKeys.has(effectiveCode)) return;
       this._heldKeys.add(effectiveCode);
 
@@ -379,11 +392,26 @@ export class InputManager {
         clearTimeout(this._tizenSelectTimer);
         this._tizenSelectTimer = null;
         if (!this._tizenSelectSuppress) {
-          this.connection.sendCommand(SageCommand.SELECT.id);
+          // Context-sensitive OK tap: during video playback toggle pause/play;
+          // in menus select/open the focused item. (Long-press OK still opens
+          // the nav drawer via the _tizenSelectTimer path above.)
+          this.connection.sendCommand(
+            this._inPlayback() ? SageCommand.PLAY_PAUSE.id : SageCommand.SELECT.id
+          );
         }
       }
       this._tizenSelectSuppress = false;
     }
+  }
+
+  /** Clear held-key + hold-timer state; recovers from a lost keyup so a
+   * previously-"stuck" key (ignored as an unreleased repeat) is honored again. */
+  _clearTransientInput() {
+    this._heldKeys.clear();
+    if (this._tizenSelectTimer) { clearTimeout(this._tizenSelectTimer); this._tizenSelectTimer = null; }
+    if (this._arrowHoldTimer) { clearTimeout(this._arrowHoldTimer); this._arrowHoldTimer = null; }
+    this._arrowHold = null;
+    this._tizenSelectSuppress = false;
   }
 
   /** True when a media file is actively loaded/playing/paused (video context). */

@@ -53,13 +53,13 @@ import java.util.concurrent.TimeUnit;
  * Query params:
  * <pre>
  *   force=1       Bypass the cache and rescan now.
- *   timeout=2000  How long to wait for replies (ms, clamped 500–5000).
+ *   timeout=2000  How long to wait for replies (ms, clamped 500–6000).
  * </pre>
  * Response (same shape as Node bridge):
  * <pre>
  * {
  *   "servers": [
- *     { "host":"192.0.2.10","port":31099,"name":"SageTV-CL",
+ *     { "host":"192.0.2.10","port":31099,"name":"MySageTV",
  *       "guid":"0000000000000000","sageVersion":"10.0.16",
  *       "sagePort":42024,"sources":["fat","mini"] }
  *   ],
@@ -130,7 +130,7 @@ public class DiscoveryServlet extends HttpServlet {
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         boolean force = "1".equals(req.getParameter("force"));
-        int timeoutMs = parseClampedInt(req.getParameter("timeout"), 2000, 500, 5000);
+        int timeoutMs = parseClampedInt(req.getParameter("timeout"), 2000, 500, 6000);
 
         resp.setContentType("application/json");
         resp.setCharacterEncoding("UTF-8");

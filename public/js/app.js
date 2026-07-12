@@ -279,10 +279,12 @@ async function bootstrapLanDiscovery({ silent = true } = {}) {
     return false;
   }
 
-  // Bridge found — ask it to run the real SageTV UDP discovery.
+  // Bridge found — ask it to run the real SageTV UDP discovery (bounded window:
+  // 3s for the silent on-open scan, 5s for an explicit Find-on-LAN).
   let ok = false;
   try {
-    const resp = await fetch(`${foundBase}/discover?force=1`, { cache: 'no-store' });
+    const scanMs = silent ? 3000 : 5000;
+    const resp = await fetch(`${foundBase}/discover?force=1&timeout=${scanMs}`, { cache: 'no-store' });
     const body = await resp.json();
     const rawServers = Array.isArray(body?.servers) ? body.servers : [];
     const bridgeWsUrl = foundBase.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
@@ -307,8 +309,10 @@ async function bootstrapLanDiscovery({ silent = true } = {}) {
   return ok;
 }
 
-async function runDiscovery({ force = false, silent = false } = {}) {
+async function runDiscovery({ force = false, silent = false, timeout = 0 } = {}) {
   if (_discoverInflight) return;
+  // Bounded, on-demand scan window: silent (on-open) = 3s, explicit Find-on-LAN = 5s.
+  const scanMs = timeout || (silent ? 3000 : 5000);
   const bases = _resolveBridgeHttpBases();
   if (bases.length === 0) {
     if (!silent) {
@@ -332,7 +336,7 @@ async function runDiscovery({ force = false, silent = false } = {}) {
   try {
     for (const base of bases) {
       try {
-        const url = `${base}/discover${force ? '?force=1' : ''}`;
+        const url = `${base}/discover?timeout=${scanMs}${force ? '&force=1' : ''}`;
         const resp = await fetch(url, { cache: 'no-store' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const body = await resp.json();
@@ -740,6 +744,11 @@ function setupEventHandlers() {
   // Status bar update interval
   let statusBarInterval = null;
   function startStatusBar() {
+    // The Placeshifter-style status bar (bitrate + buffer gauge) is a windowed-
+    // browser HUD. On Tizen it adds no value and AVPlay doesn't expose the
+    // per-second bitrate/buffer the MSE player does (would show "undefined
+    // Kbps"), so keep it hidden and don't poll on TV.
+    if (_isTizen) { if (statusBar) statusBar.hidden = true; return; }
     initStatusBarGauge();
     if (statusBar) statusBar.hidden = !!document.fullscreenElement;
     statusBarInterval = setInterval(updateStatusBar, 1000);
@@ -873,6 +882,18 @@ function setupEventHandlers() {
     // first frame. Cleared by 'playing' above.
     session.mediaPlayer.addEventListener('buffering', () => {
       loadingOverlay.hidden = false;
+    });
+    // AVPlay (Tizen) has no <video> element, so the `video.addEventListener
+    // ('playing')` handler above never attaches. Hide the loading/play overlays
+    // on the player's own 'playing'/'firstframe' events (dispatched by both the
+    // MSE and AVPlay backends), otherwise the "Loading..." box lingers forever.
+    session.mediaPlayer.addEventListener('playing', () => {
+      loadingOverlay.hidden = true;
+      playOverlay.hidden = true;
+    });
+    session.mediaPlayer.addEventListener('firstframe', () => {
+      loadingOverlay.hidden = true;
+      playOverlay.hidden = true;
     });
     session.mediaPlayer.addEventListener('seeking', () => {
       seekingOverlay.hidden = false;
@@ -1412,7 +1433,7 @@ function updateStatusBar() {
   if (!conn || !statusBitrate) return;
 
   const mp = session.mediaPlayer;
-  const kbps = mp ? mp.bandwidthKbps : 0;
+  const kbps = (mp && typeof mp.bandwidthKbps === 'number') ? mp.bandwidthKbps : 0;
   statusBitrate.textContent = kbps >= 1000
     ? `${(kbps / 1000).toFixed(1)} Mbps`
     : `${kbps} Kbps`;

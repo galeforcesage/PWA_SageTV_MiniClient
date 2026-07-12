@@ -138,10 +138,11 @@ public class BridgeServer {
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
 
         // LAN discovery — broadcasts SageTV locator probes so the PWA can
-        // populate its server picker without needing UDP itself. A background
-        // scanner keeps the cache warm so /discover returns instantly.
+        // populate its server picker without needing UDP itself. Purely
+        // ON-DEMAND: the bridge scans only when a client calls /discover, and
+        // the client bounds the window (~3s on open, ~5s on Find-on-LAN). No
+        // perpetual background scanning when nobody is asking.
         DiscoveryServlet discoveryServlet = new DiscoveryServlet();
-        discoveryServlet.startBackgroundScanner();
         this.discoveryServlet = discoveryServlet;
         context.addServlet(new ServletHolder("discover", discoveryServlet), "/discover");
 

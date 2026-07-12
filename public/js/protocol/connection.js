@@ -142,6 +142,7 @@ export class MiniClientConnection extends EventTarget {
     this.height = options.height || 720;
     this._originalWidth = this.width;
     this._originalHeight = this.height;
+    this._uiResizeAsserts = 0;
     this.settings = options.settings || null;
     this.platformDetector = options.platformDetector || null;
 
@@ -337,6 +338,16 @@ export class MiniClientConnection extends EventTarget {
 
     this.dispatchEvent(new CustomEvent('connected'));
     console.log('[Connection] Connected to SageTV server');
+
+    // Assert our real render resolution to the server via UI_RESIZE. Without
+    // this the STV renders at its default 720x480 (SD) and we passively follow
+    // it down — producing blurry, side-letterboxed menus on an HD/16:9 panel.
+    // Telling the server our actual size makes it render the UI at HD. (This
+    // does NOT affect video quality: AVPlay/<video> decode on their own plane
+    // at full panel resolution regardless of the UI render size.)
+    this._uiResizeAsserts = 0;
+    this.sendResize(this._originalWidth, this._originalHeight);
+    console.log(`[Connection] Asserted UI resolution ${this._originalWidth}x${this._originalHeight} via UI_RESIZE`);
 
     // Start keepalive pings
     this._startKeepalive();
@@ -2261,6 +2272,14 @@ export class MiniClientConnection extends EventTarget {
               this.dispatchEvent(new CustomEvent('resolutionchange', { detail: { width: absDw, height: absDh } }));
             }
             this._serverResDetected = true;
+            // If the server rendered BELOW our real (desired) resolution, it
+            // ignored or hadn't yet processed our UI_RESIZE — re-assert (bounded)
+            // so it re-renders the UI at HD instead of leaving us blurry/SD.
+            if ((absDw < this._originalWidth || absDh < this._originalHeight) && this._uiResizeAsserts < 3) {
+              this._uiResizeAsserts++;
+              console.log(`[Connection] Server ${absDw}x${absDh} < desired ${this._originalWidth}x${this._originalHeight}; re-asserting UI_RESIZE (#${this._uiResizeAsserts})`);
+              this.sendResize(this._originalWidth, this._originalHeight);
+            }
           }
           // One-shot DRAWTEXTURED diagnostic — perf-gated so it doesn't rebuild
           // every frame when instrumentation is off (_firstFrameLogged only
@@ -3071,6 +3090,9 @@ export class MiniClientConnection extends EventTarget {
   sendResize(width, height) {
     this.width = width;
     this.height = height;
+    // Allow the next server full-screen background draw to be re-detected, so we
+    // follow the server's re-render at the newly-requested size.
+    this._serverResDetected = false;
     const payload = new Uint8Array(8);
     const dv = new DataView(payload.buffer);
     dv.setInt32(0, width, false);
