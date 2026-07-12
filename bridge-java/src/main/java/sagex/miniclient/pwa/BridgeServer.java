@@ -127,6 +127,13 @@ public class BridgeServer {
         // equivalent of SageTV's port 7818 pull socket protocol used by fork clients.
         context.addServlet(new ServletHolder("rawmedia", new RawMediaServlet()), "/rawmedia");
 
+        // Thin proxy over SageTV's MediaServer :7818 pull protocol — server-side
+        // remux/transcode (legacy + NG), zero bridge ffmpeg. Handles live
+        // (in-progress) recordings by following SIZE growth. On NG this carries
+        // the server's per-stream verdict (server-authoritative); on legacy the
+        // client picks the mode (client-authoritative).
+        context.addServlet(new ServletHolder("msproxy", new MediaServerProxyServlet()), "/msproxy");
+
         // Server info API — probes ffmpeg capabilities for profile auto-detection
         context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
 
