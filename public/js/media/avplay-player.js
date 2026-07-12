@@ -200,6 +200,22 @@ export class AVPlayPlayer extends EventTarget {
     return this.load(0, 0, '', url, hostname, false, 0, null);
   }
 
+  /**
+   * MSPROXY mode (server-authoritative, NG): play through the bridge's /msproxy
+   * thin proxy over MediaServer :7818. AVPlay natively demuxes raw TS/PS
+   * (direct/remux) and plays server fMP4 (xcode) — it just needs the HTTP URL.
+   * @param {string} absPath  absolute media path on the server
+   * @param {string} mode     /msproxy mode token (direct | remux:ts | xcode:<q>)
+   * @param {string} hostname SageTV host
+   * @param {number} [seekSec=0]
+   */
+  async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
+    const base = (this._bridgeBase || '').replace(/\/$/, '');
+    const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}`;
+    console.log(`[AVPlay] loadMsProxy mode=${mode}: ${url}`);
+    return this.load(0, 0, '', url, hostname, false, 0, null);
+  }
+
   _installListener() {
     const av = this._avplay;
     av.setListener({

@@ -9,13 +9,28 @@
 
 ## TL;DR
 
-NG already has ~90% of this. The one real gap: the decision engine treats
-`pull` as "raw file only" and routes every REMUX/TRANSCODE decision to
-`push`/`hls`. The PWA is **pull-only**, `push` is extender-only, and `hls` is
-the 480×272 `iosstream`. So today a browser that needs a transform has **no
-first-class NG path** — only the bridge's own ffmpeg. The `:7818` MediaServer
-pull protocol *can* serve transformed bytes (`XCODE_SETUP` before `OPEN`); the
-bridge proves it. NG just needs to recognize that as a servable delivery mode.
+This is the **NG build** — there is no "make it work now" path here (that's
+legacy 9.2.16, already fixed via the bridge's existing `/transcode` fallback).
+So NG does it right: **NG owns 100% of conditioning; the bridge/proxy stays
+thin** — zero transcode config, zero ffmpeg on the `/msproxy` path. The bridge
+opens `:7818`, names a *server-native* mode, relays bytes, closes.
+
+Items 1–4 are **one feature**: make NG server-authoritative for the PWA. NG
+decides the transform from the client's reported capabilities, ships every
+conditioning mode natively, and reports the verdict; the PWA honors it and the
+bridge relays.
+
+The gap the feature closes: the decision engine treats `pull` as "raw file
+only" and routes every REMUX/TRANSCODE decision to `push`/`hls`. The PWA is
+**pull-only**, `push` is extender-only, and `hls` is the 480×272 `iosstream`.
+The `:7818` pull protocol *can* serve transformed bytes (`XCODE_SETUP` before
+`OPEN`); NG needs to recognize that as a servable delivery mode and report it.
+
+> **Client side is already done.** The PWA honors a `CAP_EFFECTIVE_DELIVERY`
+> property verbatim (`pull:direct` / `pull-xcode:browserhd_remux` /
+> `pull-xcode:browserhd_copyv` / `pull-xcode:browserhd` / `pull-xcode:mpeg2tsremux`)
+> and routes to `/msproxy?mode=` — no client change is needed when NG ships this.
+> Until then the PWA uses its existing surface-sniff routing unchanged.
 
 ## What NG already has (verified in `SageTV-mine`, no change needed)
 
@@ -28,7 +43,11 @@ bridge proves it. NG just needs to recognize that as a servable delivery mode.
 | Live-edge streaming through the transcoder | `openFile()` → `xcoder.setActiveFile(true)` when `currMF.isRecording()`; `readFile()` wait-loop | ✅ |
 | Capability handshake + per-stream verdict | `PlaybackDecisionEngine.evaluateSurfaces()`; emits `CAP_EFFECTIVE_SURFACE` / `CAP_EFFECTIVE_PLAYER` per OPENURL | ✅ surface + delivery + target codecs computed |
 
-## What NG needs to change
+## The server-authoritative feature (items 1–4 = one unit)
+
+Do them together — #1 without #3 means NG decides but never tells the PWA, so
+nothing routes; #4 ships the modes #3 names. All server-native; the bridge
+injects nothing.
 
 ### 1. Add a `pull-xcode` delivery mode (the core change)
 
@@ -68,37 +87,57 @@ The PWA surface descriptor the client advertises (`PLAYBACK_SURFACES`) must list
 
 ### 3. Map the decision → a concrete `:7818` `XCODE_SETUP` mode and tell the client
 
+> **Thin-bridge principle:** every conditioning mode lives on NG. The bridge
+> carries **zero** transcode config and **zero** ffmpeg on this path — it opens
+> `:7818`, sends `XCODE_SETUP <server-native-mode>`, relays bytes, closes. So NG
+> ships **all** the modes below; the bridge injects nothing.
+
 The engine already knows `chosenDeliveryMode`, `targetVideoCodec`,
-`targetAudioCodec`. For `pull-xcode`, resolve the concrete MediaServer mode:
+`targetAudioCodec`. The concrete `:7818` mode is **surface-aware** — the browser
+(`pwa_mse`) can only consume fragmented MP4; AVPlay consumes raw TS/PS:
 
-| Engine decision | Target | `:7818` `XCODE_SETUP` mode |
+| Engine decision | `pwa_mse` (browser → fMP4) | AVPlay (TV → raw) |
 |---|---|---|
-| DIRECT_PLAY | — | *(none — plain `pull`)* |
-| REMUX (container only, codecs OK) | TS copy | `mpeg2tsremux` |
-| AUDIO_TRANSCODE / TRANSCODE (browser) | H.264+AAC fMP4 | `browserhd` |
+| DIRECT_PLAY | *(none — plain `pull`)* | *(none — plain `pull`)* |
+| REMUX (container only) | `browserhd_remux` (fMP4, copy V+A) | `mpeg2tsremux` (TS, copy V+A) |
+| AUDIO_TRANSCODE (V ok, A not) | `browserhd_copyv` (fMP4, copy V, AAC A) | rare — TV direct-plays audio |
+| TRANSCODE (V needs re-encode) | `browserhd` (fMP4, full re-encode) | direct-play (AVPlay decodes HEVC/AC-4) |
 
-Then **emit it to the client** alongside `CAP_EFFECTIVE_SURFACE`, e.g. a new
-session property per OPENURL:
+Why TS-remux can't serve browsers: `mpeg2tsremux` emits MPEG-TS, which MSE
+cannot demux. Browser REMUX therefore needs an fMP4 copy-remux (`browserhd_remux`),
+and AUDIO_TRANSCODE needs copy-video + AAC (`browserhd_copyv`) — not a full
+`browserhd` re-encode of already-good H.264. All three are trivial variants of
+`buildBrowserHdParams()` (same container + audio; vary only the video part):
 
 ```
-CAP_EFFECTIVE_DELIVERY = "pull:direct"            // direct play
-CAP_EFFECTIVE_DELIVERY = "pull-xcode:mpeg2tsremux" // remux
-CAP_EFFECTIVE_DELIVERY = "pull-xcode:browserhd"    // transcode
+browserhd_remux = -f mp4 -movflags +frag_keyframe+empty_moov+default_base_moof -c:v copy -c:a copy
+browserhd_copyv = -f mp4 -movflags +frag_keyframe+empty_moov+default_base_moof -c:v copy -c:a aac -ac 2 -ar 48000 -b:a 128k
 ```
 
-The bridge maps this 1:1 to `/msproxy?mode=`:
-`direct` → `mode=direct`, `pull-xcode:mpeg2tsremux` → `mode=remux:ts`,
-`pull-xcode:browserhd` → `mode=xcode:browserhd`. With this, the PWA **stops
-sniffing codecs on NG** and just honors the verdict — the server-authoritative
-goal. (Legacy sends no such property, so the bridge sniffs — unchanged.)
+Then **emit the verdict to the client** alongside `CAP_EFFECTIVE_SURFACE`, e.g. a
+new session property per OPENURL:
 
-### 4. Add `mpeg2tsremux` natively (low priority — bridge injects it)
+```
+CAP_EFFECTIVE_DELIVERY = "pull:direct"                 // direct play
+CAP_EFFECTIVE_DELIVERY = "pull-xcode:browserhd_remux"  // browser remux
+CAP_EFFECTIVE_DELIVERY = "pull-xcode:browserhd_copyv"  // browser audio-transcode
+CAP_EFFECTIVE_DELIVERY = "pull-xcode:browserhd"        // browser transcode
+CAP_EFFECTIVE_DELIVERY = "pull-xcode:mpeg2tsremux"     // AVPlay remux
+```
 
-Only `mpeg2psremux` ships. The bridge self-injects `mpeg2tsremux` =
-`-f mpegts -vcodec copy -acodec copy -copyts` via `Sage.put` at startup **only
-if absent**, so this works today. Shipping it natively (in the `MediaServer`
-ctor next to `mpeg2psremux`) makes it first-class and lets the bridge stop
-injecting.
+The PWA maps this 1:1 to `/msproxy?mode=`: `pull:direct` → `mode=direct`,
+`pull-xcode:mpeg2tsremux` → `mode=remux:ts`, any other `pull-xcode:<q>` →
+`mode=xcode:<q>` (fed to MSE as fMP4). **Client wiring is already done** — see
+`_deliveryToMsproxy` in `public/js/protocol/connection.js`. With the property
+emitted, the PWA stops sniffing on NG and honors the verdict.
+
+### 4. Ship the copy/remux modes natively (part of #3 — bridge injects nothing)
+
+Today only `browserhd` and `mpeg2psremux` ship. Add the rest in the
+`MediaServer` ctor next to `mpeg2psremux` so **all** modes are server-native:
+`browserhd_remux`, `browserhd_copyv` (both above), and `mpeg2tsremux`
+(`-f mpegts -vcodec copy -acodec copy -copyts`). The bridge no longer injects
+`mpeg2tsremux` — that self-inject was removed to keep the proxy thin.
 
 ## Non-goals / already-fine
 

@@ -43,13 +43,6 @@ public class BridgePlugin implements sage.SageTVPlugin {
             log.warn("Failed to set ConfigWiz/MCFullyConfigured", e);
         }
 
-        // Ensure the MediaServer transcode-quality modes the /msproxy proxy uses
-        // exist. NG already ships `browserhd` (HwEncoder-selected) and
-        // `mpeg2psremux`; only `mpeg2tsremux` is universally missing. We inject
-        // it ONLY when absent so a server-native definition is never clobbered
-        // (server-authoritative on NG; harmless self-inject on legacy).
-        injectMediaServerModes();
-
         // ── Requirement checks ──────────────────────────────────
         if (!checkRequirements()) {
             log.error("PWA MiniClient plugin cannot start — requirements not met");
@@ -112,31 +105,6 @@ public class BridgePlugin implements sage.SageTVPlugin {
             }
         } catch (Exception e) {
             log.error("Failed to start PWA MiniClient bridge", e);
-        }
-    }
-
-    /**
-     * Inject MediaServer transcode-quality modes required by {@code /msproxy},
-     * without ever overwriting a definition the server already ships. Only the
-     * TS copy-remux mode ({@code mpeg2tsremux}) is universally missing; NG
-     * defines {@code browserhd} and {@code mpeg2psremux} natively.
-     */
-    private void injectMediaServerModes() {
-        putModeIfAbsent("media_server/transcode_quality/mpeg2tsremux",
-            "-f mpegts -vcodec copy -acodec copy -copyts");
-    }
-
-    private void putModeIfAbsent(String key, String value) {
-        try {
-            String existing = sage.Sage.get(key, "");
-            if (existing == null || existing.trim().isEmpty()) {
-                sage.Sage.put(key, value);
-                log.info("Injected MediaServer mode {} = {}", key, value);
-            } else {
-                log.info("MediaServer mode {} already server-defined — keeping native definition", key);
-            }
-        } catch (Exception e) {
-            log.warn("Could not inject MediaServer mode {}: {}", key, e.getMessage());
         }
     }
 

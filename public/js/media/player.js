@@ -376,6 +376,52 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
+   * MSPROXY mode (server-authoritative, NG): play a pull source through the
+   * bridge's /msproxy thin proxy over SageTV's MediaServer :7818 protocol. The
+   * server does all conditioning; the bridge runs no ffmpeg on this path.
+   *   mode='direct'    -> raw bytes; native <video> decode (H.264/AAC MP4).
+   *   mode='xcode:<q>' -> server-produced fMP4 (browserhd) fed to MSE, exactly
+   *                       like the /transcode path but sourced server-side.
+   *   mode='remux:*'   -> raw TS/PS; browsers can't demux these via MSE, so we
+   *                       attempt native decode (best-effort; intended for the
+   *                       AVPlay/TV player, not Chromium MSE).
+   * @param {string} absPath  absolute media path on the server
+   * @param {string} mode     /msproxy mode token
+   * @param {string} hostname SageTV host
+   * @param {number} [seekSec=0]
+   */
+  async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
+    this.stop();
+    this.serverEOS = false;
+    this._totalPushed = 0;
+    this._pullFilePath = absPath;
+    this._pullHostname = hostname;
+    this._pullFallbackTried = false;
+    this._hlsFatalFallbackTried = false;
+
+    const base = (this._bridgeBase || '').replace(/\/$/, '');
+    const msUrl = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}`;
+    console.log(`[MediaPlayer] MSPROXY mode=${mode}: ${msUrl}`);
+
+    if (mode && mode.startsWith('xcode:')) {
+      // Server emits fragmented MP4 — feed MSE via the shared bridge machinery,
+      // but sourced from /msproxy (override consumed by _startBridgeStream).
+      this._msproxyStreamUrl = msUrl;
+      await this._loadBridgeMode(absPath, hostname, null);
+      if (seekSec > 0 && this.bridgeMode) {
+        this._flushAndRestart(absPath, seekSec);
+      }
+      return;
+    }
+
+    // direct / remux: native decode via <video src>.
+    this.pushMode = false;
+    this.video.src = msUrl;
+    this.video.load();
+    this.state = PlayerState.LOADED;
+  }
+
+  /**
    * BRIDGE mode: fetch transcoded H.264+AAC fragmented MP4 from bridge's ffmpeg.
    * Bridge runs on same machine as SageTV, reads file directly, transcodes with system ffmpeg.
    * ffmpeg outputs fMP4 (frag_keyframe+empty_moov) which feeds directly into MSE — no transmuxing.
@@ -386,7 +432,6 @@ export class MediaPlayer extends EventTarget {
     this._bridgeFilePath = filePath;
     this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
-
     // Set up MSE
     const MSClass = this._getMediaSourceClass();
     if (!MSClass) {
@@ -454,10 +499,18 @@ export class MediaPlayer extends EventTarget {
     // the fetch works from non-http origins (Tizen wgt file://, etc).
     // Prefer the MediaFile ID (Option B: bridge resolves it server-side and
     // bypasses HTTPLS) when present; otherwise fall back to an absolute path.
-    const src = (this._bridgeMfid !== null && this._bridgeMfid !== undefined)
-      ? `mfid=${encodeURIComponent(this._bridgeMfid)}`
-      : `file=${encodeURIComponent(filePath)}`;
-    const bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    // When _msproxyStreamUrl is set (server-authoritative NG delivery), stream
+    // the server-produced fMP4 from /msproxy instead of the bridge's own ffmpeg
+    // /transcode — same MSE consumption, zero bridge transcoding.
+    let bridgeUrl;
+    if (this._msproxyStreamUrl) {
+      bridgeUrl = `${this._msproxyStreamUrl}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    } else {
+      const src = (this._bridgeMfid !== null && this._bridgeMfid !== undefined)
+        ? `mfid=${encodeURIComponent(this._bridgeMfid)}`
+        : `file=${encodeURIComponent(filePath)}`;
+      bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+    }
     console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
 
     // Signal that we're buffering the opening of the stream so the UI can show
@@ -918,6 +971,7 @@ export class MediaPlayer extends EventTarget {
     this._bridgeFilePath = null;
     this._bridgeTimeOffsetMs = 0;
     this._bridgeNeedTimeReset = false;
+    this._msproxyStreamUrl = null;
 
     if (this._hls) {
       this._hls.destroy();

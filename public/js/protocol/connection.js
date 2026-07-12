@@ -1753,6 +1753,20 @@ export class MiniClientConnection extends EventTarget {
         this._effectivePlayer = value ? value.trim() : '';
         console.log(`[Connection] CAP_EFFECTIVE_PLAYER = ${this._effectivePlayer || '(none)'} (informational)`);
         return 0;
+      case 'CAP_EFFECTIVE_DELIVERY':
+        // Server-authoritative delivery verdict (NG only). The server tells us
+        // the exact conditioning to request over the MediaServer :7818 pull
+        // proxy for the stream it is about to open, e.g.:
+        //   pull:direct              -> /msproxy?mode=direct   (raw, DIRECT_PLAY)
+        //   pull-xcode:mpeg2tsremux  -> /msproxy?mode=remux:ts (TS copy-remux)
+        //   pull-xcode:browserhd     -> /msproxy?mode=xcode:browserhd (server fMP4)
+        // When present, the next MEDIACMD_OPENURL honors it verbatim (the PWA
+        // stops sniffing codecs — the NG server decided from our reported
+        // capabilities). Absent (legacy / pre-upgrade NG) => existing
+        // surface-sniff routing is used unchanged. Session-sticky per OPENURL.
+        this._effectiveDelivery = value ? value.trim() : '';
+        console.log(`[Connection] CAP_EFFECTIVE_DELIVERY = ${this._effectiveDelivery || '(none)'}`);
+        return 0;
       case 'MENU_HINT': {
         // Parse "menuName:X,popupName:Y,hasTextInput:true"
         const hint = { menuName: null, popupName: null, hasTextInput: false };
@@ -2732,6 +2746,19 @@ export class MiniClientConnection extends EventTarget {
           const isAbsPath = urlString.startsWith('/');
           console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
 
+          // Server-authoritative delivery (NG): if the server told us the exact
+          // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
+          // it verbatim via the /msproxy thin proxy and skip all client-side
+          // sniffing/heuristics below. Only applies to pull sources (abs path or
+          // stv://); push is retired and iosstream is a legacy-only construct.
+          const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
+          if (msRoute) {
+            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0);
+            this._sendMediaReturn(1);
+            break;
+          }
+
           // Option B: this server always delivers PWA media as an HTTPLS
           // "iosstream" HLS URL (the legacy iOS Placeshifter subsystem, capped
           // at 480x272). Rather than follow it, extract the SageTV MediaFile ID
@@ -2932,6 +2959,45 @@ export class MiniClientConnection extends EventTarget {
     const buf = new Uint8Array(4);
     new DataView(buf.buffer).setInt32(0, value, false);
     this._sendMedia(buf);
+  }
+
+  /**
+   * Map a server CAP_EFFECTIVE_DELIVERY verdict to a /msproxy route, or null
+   * when there is no verdict (legacy / pre-upgrade NG) or the source isn't a
+   * pull path. Delivery grammar: "<transport>:<mode>" where transport is
+   * `pull` (direct) or `pull-xcode` (server-conditioned), and mode is the
+   * MediaServer transcode_quality key (`browserhd`, `mpeg2tsremux`, ...) or
+   * the literal `direct`. Bare forms (e.g. "browserhd", "direct") are tolerated.
+   * @returns {{path:string, mode:string}|null}
+   */
+  _deliveryToMsproxy(delivery, urlString, isStv, isAbsPath) {
+    const d = (delivery || '').trim();
+    if (!d) return null;
+
+    // Resolve the pull source path.
+    let path = null;
+    if (isAbsPath) {
+      path = urlString;
+    } else if (isStv) {
+      const rest = urlString.substring(6);
+      const slash = rest.indexOf('/');
+      path = slash >= 0 ? rest.substring(slash) : null;
+    }
+    if (!path) return null;
+
+    // Strip the transport prefix; keep the conditioning token.
+    let token = d.toLowerCase();
+    if (token.startsWith('pull-xcode:')) token = token.substring('pull-xcode:'.length);
+    else if (token.startsWith('pull:')) token = token.substring('pull:'.length);
+    token = token.trim();
+    if (!token) return null;
+
+    let mode;
+    if (token === 'direct') mode = 'direct';
+    else if (token === 'mpeg2tsremux' || token === 'remux:ts' || token === 'remux') mode = 'remux:ts';
+    else if (token === 'mpeg2psremux' || token === 'remux:ps') mode = 'remux:ps';
+    else mode = 'xcode:' + token; // browserhd, or any server quality key
+    return { path, mode };
   }
 
   _sendMediaReturnLong(value) {
