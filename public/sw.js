@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.37.0-stuckkey-selfheal';
+const CACHE_NAME = 'sagetv-miniclient-8.38.0-ok-pause-common';
 
 // During development, use network-first strategy
 const DEV_MODE = true;

@@ -354,7 +354,7 @@ export class InputManager {
         return;
       }
 
-      this.connection.sendCommand(cmd.id);
+      this.connection.sendCommand(this._contextCommandId(cmd));
       return;
     }
 
@@ -392,12 +392,10 @@ export class InputManager {
         clearTimeout(this._tizenSelectTimer);
         this._tizenSelectTimer = null;
         if (!this._tizenSelectSuppress) {
-          // Context-sensitive OK tap: during video playback toggle pause/play;
-          // in menus select/open the focused item. (Long-press OK still opens
-          // the nav drawer via the _tizenSelectTimer path above.)
-          this.connection.sendCommand(
-            this._inPlayback() ? SageCommand.PLAY_PAUSE.id : SageCommand.SELECT.id
-          );
+          // Context-sensitive OK tap (see _contextCommandId): during playback
+          // toggle pause/play; in menus select/open. Long-press OK still opens
+          // the nav drawer via the _tizenSelectTimer path above.
+          this.connection.sendCommand(this._contextCommandId(SageCommand.SELECT));
         }
       }
       this._tizenSelectSuppress = false;
@@ -412,6 +410,14 @@ export class InputManager {
     if (this._arrowHoldTimer) { clearTimeout(this._arrowHoldTimer); this._arrowHoldTimer = null; }
     this._arrowHold = null;
     this._tizenSelectSuppress = false;
+  }
+
+  /** Map a command to its playback-context equivalent for ALL clients: OK/SELECT
+   * toggles pause/play while a video is playing (mirrors the arrow REW/FF remap
+   * in _arrowTransport). Non-SELECT commands pass through unchanged. */
+  _contextCommandId(cmd) {
+    if (cmd === SageCommand.SELECT && this._inPlayback()) return SageCommand.PLAY_PAUSE.id;
+    return cmd.id;
   }
 
   /** True when a media file is actively loaded/playing/paused (video context). */

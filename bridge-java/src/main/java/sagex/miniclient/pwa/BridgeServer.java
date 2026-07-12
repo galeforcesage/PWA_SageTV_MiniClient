@@ -115,10 +115,11 @@ public class BridgeServer {
             new DelegatingWebSocketServlet(BridgeWebSocket::new)), "/media");
         context.addServlet(new ServletHolder("ws-reconnect",
             new DelegatingWebSocketServlet(BridgeWebSocket::new)), "/reconnect");
-        context.addServlet(new ServletHolder("ws-push-transcode",
-            new DelegatingWebSocketServlet(() -> new PushTranscodeWebSocket(ffmpegPath))), "/transcode/push-stream");
 
-        // Transcode servlet
+        // Transcode servlet — browser MSE fallback for codecs a browser can't
+        // decode natively (the TV uses AVPlay direct-play instead). The legacy
+        // push-transcode WebSocket was removed: the PWA is pull-only
+        // (PUSH_AV_CONTAINERS=NONE), so nothing ever connected to it.
         context.addServlet(new ServletHolder("transcode", new TranscodeServlet(ffmpegPath, hwAccel)), "/transcode");
         context.addServlet(new ServletHolder("transcode-stop", new TranscodeStopServlet()), "/transcode/stop");
 
