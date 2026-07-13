@@ -1022,11 +1022,30 @@ export class MiniClientConnection extends EventTarget {
     }
 
     // Final blacklist filter for the NATIVE surface (all platforms; a no-op
-    // where the probe never added a blacklisted codec). The bridge surface
-    // (pwa_mse) keeps e.g. DTS because it transcodes such sources to AAC.
+    // where the probe never added a blacklisted codec).
     native.video = filterNativeBlacklist('video', native.video);
     native.audio = filterNativeBlacklist('audio', native.audio);
     native.containers = filterNativeBlacklist('containers', native.containers);
+
+    // pwa_mse HONEST end-to-end capability: the raw MSE probe INTERSECTED with
+    // what the bridge/proxy + client fMP4 pipeline can actually DELIVER. Today
+    // that is bounded by the server's browserhd target AND the client's fMP4
+    // SourceBuffer, both H.264 video + AAC audio in MP4 — so anything else the
+    // browser could decode is removed, because we can't feed it. Unlike Tizen,
+    // browsers need NO whitelist (MediaSource.isTypeSupported is authoritative,
+    // it doesn't under-report hardware decoders); only this blacklist-style
+    // deliverable filter. This narrowness is ALSO what makes the NG engine pick
+    // the right transform: REMUX only for codecs we can actually play, TRANSCODE
+    // for the rest -> server delivers fMP4 via pull-xcode. Widen MSE_DELIVERABLE_*
+    // when the MSE pipeline gains dynamic-codec SourceBuffers (HEVC/VP9/AV1
+    // remux without transcode).
+    const MSE_DELIVERABLE_VIDEO = ['H264'];
+    const MSE_DELIVERABLE_AUDIO = ['AAC'];
+    const mseDelivVideo = mse.video.filter((c) => MSE_DELIVERABLE_VIDEO.includes(c));
+    const mseDelivAudio = mse.audio.filter((c) => MSE_DELIVERABLE_AUDIO.includes(c));
+    const mseDelivContainers = (mseDelivVideo.length || mseDelivAudio.length) ? ['MP4'] : [];
+    console.log('[PlaybackSurfaces] pwa_mse probe raw video=[' + mse.video + '] audio=[' + mse.audio
+      + '] -> deliverable video=[' + mseDelivVideo + '] audio=[' + mseDelivAudio + ']');
 
     this._playbackSurfaces = {
       // Higher priority = preferred. Native has zero server transcode cost when
@@ -1060,17 +1079,20 @@ export class MiniClientConnection extends EventTarget {
       pwa_mse: {
         route: 'mse',
         priority: 80,
-        // pwa_mse is fed by the bridge /transcode endpoint, whose ffmpeg can
-        // DECODE virtually any source codec/container and re-encode to the
-        // H.264+AAC fMP4 that MediaSource plays. So this surface's true
-        // capability is "whatever ffmpeg can read", NOT "what MSE natively
-        // decodes". Declare the broad source set so the server routes
-        // non-natively-decodable recordings here via a pull URL (abs path),
-        // and the client bridge-transcodes them to HD — bypassing HTTPLS/HLS.
-        deliveryModes: 'pull',
-        videoCodecs: ['H264', 'HEVC', 'MPEG2-VIDEO', 'MPEG4-VIDEO', 'VP9', 'AV1'],
-        audioCodecs: ['AAC', 'HE-AAC', 'AC3', 'EAC3', 'MP2', 'MP3', 'OPUS', 'FLAC', 'DTS'],
-        containers: ['MP4', 'MATROSKA', 'MPEG2-TS', 'MPEG2-PS', 'AVI', 'MOV'],
+        // HONEST end-to-end capability, NOT "whatever ffmpeg can read". This
+        // surface is reachable only through the bridge/proxy fMP4 pipeline, so
+        // it advertises exactly the MSE probe INTERSECTED with the deliverable
+        // set (mseDeliv* above) = H.264/AAC/MP4 today. Declaring the old broad
+        // set made the NG engine rule DIRECT_PLAY and hand us a raw MPEG-2 file
+        // we can't decode (the spin/Broken-pipe bug). Delivery is pull-xcode:
+        // the server conditions the source into fMP4 (browserhd / browserhd_copyv
+        // / browserhd_remux) which this pipeline plays. Direct H.264/AAC MP4 is
+        // handled by the higher-priority pwa_native surface, so pwa_mse does not
+        // advertise plain 'pull'.
+        deliveryModes: 'pull-xcode',
+        videoCodecs: mseDelivVideo,
+        audioCodecs: mseDelivAudio,
+        containers: mseDelivContainers,
         // Audio track-access (Protocol 2.1.0006, §3 fields 7-9). The bridge
         // /transcode (ffmpeg) COULD map any audio track, but it does not yet
         // select by language — it emits ffmpeg's default stream. So today the
@@ -1091,17 +1113,18 @@ export class MiniClientConnection extends EventTarget {
     // codec/container is "supported" here, the server hands us a PULL url (real
     // file path); otherwise it pushes (which we retired).
     //
-    // Because the PWA ALWAYS has the bridge, it can genuinely play ANYTHING the
-    // bridge's ffmpeg can read — by direct-playing compatible content via
-    // /rawmedia and bridge-transcoding the rest to HD fMP4. So we declare the
-    // BROAD bridge-transcodable set here (same as the pwa_mse surface), which
-    // makes the server always choose pull. This is server-agnostic: it works on
-    // Protocol 2.1 servers AND legacy servers, because the client-side pull->
-    // bridge fallback handles the actual decode/transcode regardless.
+    // LEGACY SERVER path ONLY (there is NO legacy PWA client — the PWA is all
+    // NG). A 9.2.16 server does no surface negotiation; it reads VIDEO_CODECS/
+    // AUDIO_CODECS/PULL_AV_CONTAINERS and decides pull vs push. We declare the
+    // BROAD bridge-transcodable set so a legacy server ALWAYS hands us a pull
+    // URL, and the client's own sniff + bridge /transcode handles the actual
+    // decode. Deliberately DECOUPLED from the now-honest pwa_mse surface above:
+    // this is the client-authoritative legacy path, never consulted by an NG
+    // server (which prioritizes the surface contract).
     this._legacyDecodable = {
-      video: this._playbackSurfaces.pwa_mse.videoCodecs.slice(),
-      audio: this._playbackSurfaces.pwa_mse.audioCodecs.slice(),
-      containers: this._playbackSurfaces.pwa_mse.containers.slice(),
+      video: ['H264', 'HEVC', 'MPEG2-VIDEO', 'MPEG4-VIDEO', 'VP9', 'AV1'],
+      audio: ['AAC', 'HE-AAC', 'AC3', 'EAC3', 'MP2', 'MP3', 'OPUS', 'FLAC', 'DTS'],
+      containers: ['MP4', 'MATROSKA', 'MPEG2-TS', 'MPEG2-PS', 'AVI', 'MOV'],
     };
 
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));

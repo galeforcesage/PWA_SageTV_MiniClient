@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.40.0-msproxy-fallback';
+const CACHE_NAME = 'sagetv-miniclient-8.41.0-honest-pwa-mse';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
