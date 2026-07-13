@@ -525,6 +525,15 @@ export class MediaPlayer extends EventTarget {
 
       if (!response.ok) {
         console.error(`[MediaPlayer] Bridge transcode failed: ${response.status} ${response.statusText}`);
+        // Server-authoritative /msproxy path unavailable (e.g. the bridge jar
+        // with the servlet isn't deployed yet => 404, or server conditioning
+        // errored). Degrade to the bridge's own /transcode ffmpeg so playback
+        // still works — makes the client deploy-order-independent of the jar.
+        if (this._msproxyStreamUrl) {
+          console.warn(`[MediaPlayer] /msproxy unavailable (${response.status}); falling back to /transcode`);
+          this._msproxyStreamUrl = null;
+          return this._startBridgeStream(filePath, seekSec);
+        }
         this.state = PlayerState.STOPPED;
         this._emitPlaybackFailure('BRIDGE_TRANSCODE_FAILED', {
           mode: 'bridge',
@@ -612,6 +621,12 @@ export class MediaPlayer extends EventTarget {
     } catch (err) {
       if (err.name === 'AbortError') {
         console.log('[MediaPlayer] Bridge stream aborted (seek or stop)');
+      } else if (this._msproxyStreamUrl) {
+        // /msproxy fetch failed outright (endpoint missing / connection reset)
+        // — fall back to the bridge /transcode path so playback survives.
+        console.warn('[MediaPlayer] /msproxy stream error; falling back to /transcode:', err && err.message);
+        this._msproxyStreamUrl = null;
+        return this._startBridgeStream(filePath, 0);
       } else {
         console.error('[MediaPlayer] Bridge stream error:', err);
         this._emitPlaybackFailure('BRIDGE_STREAM_ERROR', {

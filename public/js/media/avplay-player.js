@@ -134,13 +134,18 @@ export class AVPlayPlayer extends EventTarget {
 
   // ── Load / transport ─────────────────────────────────────
 
-  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath) {
+  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath, msproxyFallbackUrl = null) {
     this.stop();
     // Token for THIS load. stop()/a newer load() bump _loadSeq, so the async
     // prepareAsync callbacks below are ignored if playback was already exited
     // (otherwise a late "prepared" would set state=PLAY and strand the menu
     // input in playback context — Right→FF, OK→pause instead of nav/select).
     const seq = (this._loadSeq = (this._loadSeq || 0) + 1);
+    // /msproxy resilience: when set, a prepare/open failure retries once via the
+    // bridge /transcode fallback (makes the client deploy-order-independent of
+    // the bridge jar that carries the /msproxy servlet).
+    this._msproxyFallbackUrl = msproxyFallbackUrl;
+    this._pullHostname = hostname;
     this.serverEOS = false;
     this._firstFrameEmitted = false;
     this._positionMs = 0;
@@ -182,12 +187,26 @@ export class AVPlayPlayer extends EventTarget {
         (e) => {
           if (seq !== this._loadSeq) return;
           console.error('[AVPlay] prepareAsync failed:', e);
+          if (this._msproxyFallbackUrl) {
+            const fb = this._msproxyFallbackUrl;
+            this._msproxyFallbackUrl = null;
+            console.warn('[AVPlay] /msproxy prepare failed; falling back to /transcode');
+            this.load(0, 0, '', fb, this._pullHostname || '', false, 0, null);
+            return;
+          }
           this._emitPlaybackFailure('AVPLAY_PREPARE_ERROR', { mode: 'avplay', message: JSON.stringify(e) });
           this.state = PlayerState.STOPPED;
         }
       );
     } catch (e) {
       console.error('[AVPlay] open/prepare threw:', e);
+      if (this._msproxyFallbackUrl) {
+        const fb = this._msproxyFallbackUrl;
+        this._msproxyFallbackUrl = null;
+        console.warn('[AVPlay] /msproxy open threw; falling back to /transcode');
+        this.load(0, 0, '', fb, this._pullHostname || '', false, 0, null);
+        return;
+      }
       this._emitPlaybackFailure('AVPLAY_OPEN_ERROR', { mode: 'avplay', message: e && e.message });
       this.state = PlayerState.STOPPED;
     }
@@ -212,8 +231,9 @@ export class AVPlayPlayer extends EventTarget {
   async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}`;
+    const fallbackUrl = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}`;
     console.log(`[AVPlay] loadMsProxy mode=${mode}: ${url}`);
-    return this.load(0, 0, '', url, hostname, false, 0, null);
+    return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl);
   }
 
   _installListener() {
