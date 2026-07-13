@@ -1084,12 +1084,19 @@ export class MiniClientConnection extends EventTarget {
         // it advertises exactly the MSE probe INTERSECTED with the deliverable
         // set (mseDeliv* above) = H.264/AAC/MP4 today. Declaring the old broad
         // set made the NG engine rule DIRECT_PLAY and hand us a raw MPEG-2 file
-        // we can't decode (the spin/Broken-pipe bug). Delivery is pull-xcode:
-        // the server conditions the source into fMP4 (browserhd / browserhd_copyv
-        // / browserhd_remux) which this pipeline plays. Direct H.264/AAC MP4 is
-        // handled by the higher-priority pwa_native surface, so pwa_mse does not
-        // advertise plain 'pull'.
-        deliveryModes: 'pull-xcode',
+        // we can't decode (the spin/Broken-pipe bug).
+        //
+        // Delivery declares BOTH transports — "deliver" is part of "honest":
+        //   pull       -> direct H.264/AAC fMP4 (native <video>/rawmedia). Needed
+        //                 so a DIRECT_PLAY decision for THIS surface has a
+        //                 transport. pwa_native usually wins direct on priority,
+        //                 but with pull-xcode ONLY, a pwa_mse direct decision has
+        //                 no servable mode and is dropped -> broken fallback.
+        //   pull-xcode -> REMUX / AUDIO_TRANSCODE / TRANSCODE outcomes: the server
+        //                 conditions the source into fMP4 (browserhd /
+        //                 browserhd_copyv / browserhd_remux) which this pipeline
+        //                 plays. Without it, every non-direct decision is dropped.
+        deliveryModes: 'pull,pull-xcode',
         videoCodecs: mseDelivVideo,
         audioCodecs: mseDelivAudio,
         containers: mseDelivContainers,
