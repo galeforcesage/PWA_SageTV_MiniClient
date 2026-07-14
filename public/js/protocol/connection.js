@@ -1027,25 +1027,23 @@ export class MiniClientConnection extends EventTarget {
     native.audio = filterNativeBlacklist('audio', native.audio);
     native.containers = filterNativeBlacklist('containers', native.containers);
 
-    // pwa_mse HONEST end-to-end capability: the raw MSE probe INTERSECTED with
-    // what the bridge/proxy + client fMP4 pipeline can actually DELIVER. Today
-    // that is bounded by the server's browserhd target AND the client's fMP4
-    // SourceBuffer, both H.264 video + AAC audio in MP4 — so anything else the
-    // browser could decode is removed, because we can't feed it. Unlike Tizen,
-    // browsers need NO whitelist (MediaSource.isTypeSupported is authoritative,
-    // it doesn't under-report hardware decoders); only this blacklist-style
-    // deliverable filter. This narrowness is ALSO what makes the NG engine pick
-    // the right transform: REMUX only for codecs we can actually play, TRANSCODE
-    // for the rest -> server delivers fMP4 via pull-xcode. Widen MSE_DELIVERABLE_*
-    // when the MSE pipeline gains dynamic-codec SourceBuffers (HEVC/VP9/AV1
-    // remux without transcode).
-    const MSE_DELIVERABLE_VIDEO = ['H264'];
-    const MSE_DELIVERABLE_AUDIO = ['AAC'];
-    const mseDelivVideo = mse.video.filter((c) => MSE_DELIVERABLE_VIDEO.includes(c));
-    const mseDelivAudio = mse.audio.filter((c) => MSE_DELIVERABLE_AUDIO.includes(c));
+    // pwa_mse HONEST end-to-end capability. With a DYNAMIC MSE SourceBuffer
+    // (the player sniffs the fMP4 init segment and creates a matching
+    // SourceBuffer), the deliverable set is exactly what MediaSource.
+    // isTypeSupported() confirms — baseline H.264/AAC always, plus HEVC/VP9/AV1
+    // and AC-3/E-AC-3/Opus ONLY when the browser proves it. So the server can
+    // REMUX (copy) HEVC on an HEVC-capable browser instead of re-encoding it.
+    // Container stays MP4 (MSE ingests fMP4). Anything NOT in the probe (MPEG-2,
+    // etc.) has no match -> the engine rules TRANSCODE -> browserhd. Browsers
+    // need NO whitelist (isTypeSupported is authoritative, unlike Tizen's
+    // canPlayType); the "deliverable" gate is the probe itself now that the
+    // SourceBuffer is dynamic. If a sniffed codec ever fails at play time the
+    // player forces a full browserhd transcode (safety net).
+    const mseDelivVideo = mse.video.slice();
+    const mseDelivAudio = mse.audio.slice();
     const mseDelivContainers = (mseDelivVideo.length || mseDelivAudio.length) ? ['MP4'] : [];
-    console.log('[PlaybackSurfaces] pwa_mse probe raw video=[' + mse.video + '] audio=[' + mse.audio
-      + '] -> deliverable video=[' + mseDelivVideo + '] audio=[' + mseDelivAudio + ']');
+    console.log('[PlaybackSurfaces] pwa_mse honest (dynamic SourceBuffer) video=[' + mseDelivVideo
+      + '] audio=[' + mseDelivAudio + ']');
 
     this._playbackSurfaces = {
       // Higher priority = preferred. Native has zero server transcode cost when

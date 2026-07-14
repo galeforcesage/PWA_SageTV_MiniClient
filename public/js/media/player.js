@@ -407,6 +407,8 @@ export class MediaPlayer extends EventTarget {
       // Server emits fragmented MP4 — feed MSE via the shared bridge machinery,
       // but sourced from /msproxy (override consumed by _startBridgeStream).
       this._msproxyStreamUrl = msUrl;
+      this._msproxyAbsPath = absPath;   // for the force-full-transcode safety net
+      this._msproxyMode = mode;
       await this._loadBridgeMode(absPath, hostname, null);
       if (seekSec > 0 && this.bridgeMode) {
         this._flushAndRestart(absPath, seekSec);
@@ -450,38 +452,19 @@ export class MediaPlayer extends EventTarget {
 
     await this._openMediaSource(MSClass);
 
-    // Create fMP4 source buffer for H.264+AAC
-    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
-    if (!MSClass.isTypeSupported(mimeType)) {
-      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
-      if (MSClass.isTypeSupported(videoOnly)) {
-        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
-      } else {
-        console.error('[MediaPlayer] No supported fMP4 MIME type');
-        this.state = PlayerState.STOPPED;
-        this._emitCapabilityUpdate({
-          playbackHints: {
-            canPlayBridgeFmp4: false,
-          },
-        }, 'bridge_fmp4_unsupported');
-        this._emitPlaybackFailure('UNSUPPORTED_BRIDGE_FORMAT', {
-          mode: 'bridge',
-          mimeType,
-        });
-        return;
-      }
-    } else {
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
-    }
-    this.sourceBuffer.mode = 'segments';
-    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
-    this.sourceBuffer.addEventListener('error', (e) => {
-      console.error('[MediaPlayer] SourceBuffer error:', e);
-    });
+    // Defer SourceBuffer creation until we've sniffed the fMP4 init segment's
+    // REAL codecs (dynamic SourceBuffer). browserhd emits H.264/AAC, but
+    // browserhd_remux/copyv can emit HEVC/VP9/AV1/AC-3 that the browser decodes
+    // natively — those need a matching SourceBuffer, not the old hardcoded avc1.
+    // The init segment (ftyp+moov) leads the stream; _startBridgeStream
+    // accumulates until moov is complete, then calls _ensureDynamicSourceBuffer.
+    this._sbPending = true;
+    this._initAccum = [];
+    this._initAccumLen = 0;
 
     this.state = PlayerState.LOADED;
 
-    // Start fetching transcoded stream from bridge
+    // Start fetching the fMP4 stream from the bridge / msproxy.
     this._startBridgeStream(filePath, 0);
   }
 
@@ -494,6 +477,16 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController.abort();
     }
     this._bridgeAbortController = new AbortController();
+
+    // Fresh init-segment accumulation for THIS attempt. A fallback/retry (e.g.
+    // /msproxy -> /transcode) can deliver a DIFFERENT codec (bridge /transcode
+    // always emits H.264/AAC), so we must re-sniff. Skipped for a seek-restart
+    // where the SourceBuffer already exists.
+    if (!this.sourceBuffer) {
+      this._sbPending = true;
+      this._initAccum = [];
+      this._initAccumLen = 0;
+    }
 
     // Build bridge URL — absolute path against the resolved bridge base so
     // the fetch works from non-http origins (Tizen wgt file://, etc).
@@ -579,6 +572,22 @@ export class MediaPlayer extends EventTarget {
           }
         }
 
+        // Dynamic SourceBuffer: until it exists, accumulate the leading bytes
+        // (ftyp+moov), sniff the real codecs, and create a matching SourceBuffer.
+        // Only then do we start feeding — the first append MUST be the init.
+        if (this._sbPending) {
+          this._initAccum.push(new Uint8Array(value));
+          this._initAccumLen += value.length;
+          const created = this._ensureDynamicSourceBuffer();
+          if (created === 'fallback') return;   // transcode fallback took over
+          if (!created) continue;               // moov not complete yet — keep reading
+          for (const chunk of this._initAccum) this._pushQueue.push(chunk);
+          this._initAccum = [];
+          this._sbPending = false;
+          this._processPushQueue();
+          continue;
+        }
+
         // Feed fMP4 directly to SourceBuffer
         if (this.sourceBuffer && this.mediaSource && this.mediaSource.readyState === 'open') {
           this._pushQueue.push(new Uint8Array(value));
@@ -635,6 +644,221 @@ export class MediaPlayer extends EventTarget {
         });
       }
     }
+  }
+
+  /**
+   * Create the MSE SourceBuffer from the sniffed init-segment codecs. Returns
+   * true when created, false when the moov isn't complete yet (keep reading),
+   * or the string 'fallback' when it triggered a full-transcode reload (caller
+   * must stop processing this stream).
+   */
+  _ensureDynamicSourceBuffer() {
+    const MSClass = this._getMediaSourceClass();
+    if (!MSClass || !this.mediaSource || this.mediaSource.readyState !== 'open') return false;
+
+    const bytes = this._concatChunks(this._initAccum, this._initAccumLen);
+    let codecs = null;
+    try { codecs = this._extractMp4Codecs(bytes); } catch (e) {
+      console.warn('[MediaPlayer] init-segment sniff error:', e && e.message);
+    }
+    if (!codecs) {
+      // moov not fully arrived — keep accumulating, but cap so we never hang.
+      if (this._initAccumLen < 512 * 1024) return false;
+      console.warn(`[MediaPlayer] codec sniff gave up after ${this._initAccumLen}B; defaulting to avc1/aac`);
+      codecs = { video: 'avc1.640028', audio: 'mp4a.40.2' };
+    }
+
+    const parts = [];
+    if (codecs.video) parts.push(codecs.video);
+    if (codecs.audio) parts.push(codecs.audio);
+    const candidates = [];
+    if (parts.length) candidates.push(`video/mp4; codecs="${parts.join(',')}"`);
+    if (codecs.video) candidates.push(`video/mp4; codecs="${codecs.video}"`);   // video-only
+    candidates.push('video/mp4; codecs="avc1.640028,mp4a.40.2"');               // last resort
+    candidates.push('video/mp4; codecs="avc1.42E01E,mp4a.40.2"');
+
+    let mime = null;
+    for (const c of candidates) {
+      try { if (MSClass.isTypeSupported(c)) { mime = c; break; } } catch { /* ignore */ }
+    }
+    if (!mime) {
+      console.warn(`[MediaPlayer] no supported SourceBuffer for sniffed codecs ${JSON.stringify(codecs)}`);
+      if (this._forceMsproxyTranscodeFallback()) return 'fallback';
+      this.state = PlayerState.STOPPED;
+      this._emitPlaybackFailure('UNSUPPORTED_BRIDGE_FORMAT', { mode: 'bridge', codecs });
+      return 'fallback';
+    }
+
+    try {
+      this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
+    } catch (e) {
+      console.warn(`[MediaPlayer] addSourceBuffer(${mime}) failed:`, e && e.message);
+      if (this._forceMsproxyTranscodeFallback()) return 'fallback';
+      this.state = PlayerState.STOPPED;
+      this._emitPlaybackFailure('UNSUPPORTED_BRIDGE_FORMAT', { mode: 'bridge', mime });
+      return 'fallback';
+    }
+    this.sourceBuffer.mode = 'segments';
+    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+    this.sourceBuffer.addEventListener('error', (e) => {
+      console.error('[MediaPlayer] SourceBuffer error:', e);
+      // A decode/append error on a remux stream: force a full transcode.
+      this._forceMsproxyTranscodeFallback();
+    });
+    console.log(`[MediaPlayer] Dynamic SourceBuffer: ${mime}`);
+    return true;
+  }
+
+  /**
+   * If the current stream came from /msproxy in a copy/remux mode (not already a
+   * full transcode), reload it forcing xcode:browserhd (H.264/AAC) so playback
+   * survives even when the browser can't handle the sniffed codec. Returns true
+   * if a fallback reload was started.
+   */
+  _forceMsproxyTranscodeFallback() {
+    if (!this._msproxyAbsPath) return false;
+    const mode = this._msproxyMode || '';
+    if (mode === 'xcode:browserhd') return false;   // already full transcode — nothing more to try
+    console.warn(`[MediaPlayer] SourceBuffer/codec failure on ${mode}; forcing full transcode (xcode:browserhd)`);
+    const absPath = this._msproxyAbsPath;
+    const host = this._pullHostname;
+    if (this._bridgeAbortController) { try { this._bridgeAbortController.abort(); } catch { /* ignore */ } }
+    this.loadMsProxy(absPath, 'xcode:browserhd', host, 0);
+    return true;
+  }
+
+  _concatChunks(chunks, totalLen) {
+    const out = new Uint8Array(totalLen);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out;
+  }
+
+  /**
+   * Extract MSE codec strings from an fMP4 init segment (ftyp+moov). Returns
+   * {video, audio} (either may be null), or null if the moov isn't fully
+   * present yet. Handles avc1/avc3, hvc1/hev1, av01, vp09 video and
+   * mp4a/ac-3/ec-3/opus/flac audio.
+   */
+  _extractMp4Codecs(b) {
+    const len = b.length;
+    const rd32 = (o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+    const type4 = (o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    const hex2 = (n) => n.toString(16).padStart(2, '0');
+    const CONTAINERS = { moov: 1, trak: 1, mdia: 1, minf: 1, stbl: 1 };
+
+    // Locate a top-level box; require it be fully present (so we don't parse a
+    // truncated moov). Returns {dataStart, end} or null.
+    const findTop = (want, start, end) => {
+      let o = start;
+      while (o + 8 <= end) {
+        let size = rd32(o); let hdr = 8;
+        if (size === 1) { if (o + 16 > end) return null; size = rd32(o + 12); hdr = 16; }
+        else if (size === 0) size = end - o;
+        if (size < hdr) return null;
+        if (type4(o + 4) === want) {
+          if (o + size > end) return null;   // not fully arrived
+          return { dataStart: o + hdr, end: o + size };
+        }
+        o += size;
+      }
+      return null;
+    };
+
+    const moov = findTop('moov', 0, len);
+    if (!moov) return null;
+
+    const codecs = { video: null, audio: null };
+
+    // Find a child box of `want` within [start,end) (linear box scan).
+    const findChild = (want, start, end) => {
+      let o = start;
+      while (o + 8 <= end) {
+        const size = rd32(o);
+        if (size < 8 || o + size > end) return null;
+        if (type4(o + 4) === want) return { dataStart: o + 8, end: o + size };
+        o += size;
+      }
+      return null;
+    };
+
+    const reverseBits32 = (n) => { let r = 0; for (let i = 0; i < 32; i++) { r = (r << 1) | (n & 1); n >>>= 1; } return r >>> 0; };
+
+    const videoCodec = (fourcc, entryStart, entryEnd) => {
+      const cfgStart = entryStart + 8 + 78;   // box header + VisualSampleEntry fields
+      if (fourcc === 'avc1' || fourcc === 'avc3') {
+        const box = findChild('avcC', cfgStart, entryEnd);
+        if (box) {
+          const p = box.dataStart;             // [ver][profile][compat][level]
+          return `${fourcc}.${hex2(b[p + 1])}${hex2(b[p + 2])}${hex2(b[p + 3])}`;
+        }
+        return `${fourcc}.640028`;
+      }
+      if (fourcc === 'hvc1' || fourcc === 'hev1') {
+        const box = findChild('hvcC', cfgStart, entryEnd);
+        if (box) {
+          const p = box.dataStart;
+          const profileSpace = (b[p + 1] >> 6) & 0x3;
+          const tierFlag = (b[p + 1] >> 5) & 0x1;
+          const profileIdc = b[p + 1] & 0x1f;
+          const compat = rd32(p + 2);
+          const levelIdc = b[p + 12];
+          let s = `${fourcc}.${['', 'A', 'B', 'C'][profileSpace]}${profileIdc}`;
+          s += `.${reverseBits32(compat).toString(16).toUpperCase()}`;
+          s += `.${tierFlag ? 'H' : 'L'}${levelIdc}`;
+          let last = -1;
+          for (let i = 0; i < 6; i++) if (b[p + 6 + i]) last = i;
+          for (let i = 0; i <= last; i++) s += `.${hex2(b[p + 6 + i]).toUpperCase()}`;
+          return s;
+        }
+        return `${fourcc}.1.6.L120.90`;
+      }
+      if (fourcc === 'av01') return 'av01.0.08M.08';
+      if (fourcc === 'vp09' || fourcc === 'vp08') return 'vp09.00.10.08';
+      return null;
+    };
+
+    const audioCodec = (fourcc) => {
+      if (fourcc === 'mp4a') return 'mp4a.40.2';
+      if (fourcc === 'ac-3') return 'ac-3';
+      if (fourcc === 'ec-3') return 'ec-3';
+      if (fourcc === 'Opus' || fourcc === 'opus') return 'opus';
+      if (fourcc === 'fLaC' || fourcc === 'flac') return 'flac';
+      return null;
+    };
+
+    const parseStsd = (s, e) => {
+      let o = s + 8;                            // version/flags(4) + entry_count(4)
+      while (o + 8 <= e) {
+        const size = rd32(o);
+        if (size < 8 || o + size > e) break;
+        const fourcc = type4(o + 4);
+        if (!codecs.video && /^(avc1|avc3|hvc1|hev1|av01|vp09|vp08)$/.test(fourcc)) {
+          codecs.video = videoCodec(fourcc, o, o + size);
+        } else if (!codecs.audio && /^(mp4a|ac-3|ec-3|Opus|opus|fLaC|flac)$/.test(fourcc)) {
+          codecs.audio = audioCodec(fourcc);
+        }
+        o += size;
+      }
+    };
+
+    const walk = (start, end) => {
+      let o = start;
+      while (o + 8 <= end) {
+        let size = rd32(o); let hdr = 8;
+        if (size === 1) { if (o + 16 > end) break; size = rd32(o + 12); hdr = 16; }
+        else if (size === 0) size = end - o;
+        if (size < hdr || o + size > end) break;
+        const t = type4(o + 4);
+        if (t === 'stsd') parseStsd(o + hdr, o + size);
+        else if (CONTAINERS[t]) walk(o + hdr, o + size);
+        o += size;
+      }
+    };
+
+    walk(moov.dataStart, moov.end);
+    if (!codecs.video && !codecs.audio) return null;
+    return codecs;
   }
 
   /**
@@ -987,6 +1211,11 @@ export class MediaPlayer extends EventTarget {
     this._bridgeTimeOffsetMs = 0;
     this._bridgeNeedTimeReset = false;
     this._msproxyStreamUrl = null;
+    this._msproxyAbsPath = null;
+    this._msproxyMode = null;
+    this._sbPending = false;
+    this._initAccum = null;
+    this._initAccumLen = 0;
 
     if (this._hls) {
       this._hls.destroy();

@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.43.0-delivery-params';
+const CACHE_NAME = 'sagetv-miniclient-8.44.0-dynamic-sourcebuffer';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
