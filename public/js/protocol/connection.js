@@ -2994,10 +2994,12 @@ export class MiniClientConnection extends EventTarget {
   /**
    * Map a server CAP_EFFECTIVE_DELIVERY verdict to a /msproxy route, or null
    * when there is no verdict (legacy / pre-upgrade NG) or the source isn't a
-   * pull path. Delivery grammar: "<transport>:<mode>" where transport is
-   * `pull` (direct) or `pull-xcode` (server-conditioned), and mode is the
-   * MediaServer transcode_quality key (`browserhd`, `mpeg2tsremux`, ...) or
-   * the literal `direct`. Bare forms (e.g. "browserhd", "direct") are tolerated.
+   * pull path. Delivery grammar: "<transport>:<mode>[;k=v...]" where transport
+   * is `pull` (direct) or `pull-xcode` (server-conditioned), mode is the
+   * MediaServer transcode_quality key (`browserhd`, `browserhd_copyv`,
+   * `mpeg2tsremux`, ...) or the literal `direct`, and an optional `;k=v`
+   * parameter suffix (Option B: server-parameterized transcode, e.g.
+   * `browserhd_copyv;acodec=eac3`). Bare forms ("browserhd", "direct") tolerated.
    * @returns {{path:string, mode:string}|null}
    */
   _deliveryToMsproxy(delivery, urlString, isStv, isAbsPath) {
@@ -3022,12 +3024,24 @@ export class MiniClientConnection extends EventTarget {
     token = token.trim();
     if (!token) return null;
 
+    // Split off any ";k=v" parameter suffix (Option B). The BASE token selects
+    // the /msproxy mode; the suffix is relayed VERBATIM so the server's
+    // XCODE_SETUP parser can apply the override (e.g. acodec=eac3). Lowercase is
+    // fine for both base and params (codec/quality names are case-insensitive).
+    let params = '';
+    const semi = token.indexOf(';');
+    if (semi >= 0) {
+      params = token.substring(semi);   // includes the leading ';'
+      token = token.substring(0, semi).trim();
+    }
+    if (!token) return null;
+
     let mode;
     if (token === 'direct') mode = 'direct';
     else if (token === 'mpeg2tsremux' || token === 'remux:ts' || token === 'remux') mode = 'remux:ts';
     else if (token === 'mpeg2psremux' || token === 'remux:ps') mode = 'remux:ps';
-    else mode = 'xcode:' + token; // browserhd, or any server quality key
-    return { path, mode };
+    else mode = 'xcode:' + token; // browserhd, browserhd_copyv, or any quality key
+    return { path, mode: mode + params };
   }
 
   _sendMediaReturnLong(value) {

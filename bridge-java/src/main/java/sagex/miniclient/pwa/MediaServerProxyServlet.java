@@ -381,24 +381,44 @@ public class MediaServerProxyServlet extends HttpServlet {
     // ---- mode / range / content-type ------------------------------------
 
     /**
+     * Split a mode token into its base (before the first {@code ';'}) and its
+     * verbatim parameter suffix (from {@code ';'} onward, or {@code ""}). The
+     * base drives classification (quality key + content-type); the suffix is a
+     * server-parameterized transcode override (Option B, e.g.
+     * {@code browserhd_copyv;acodec=eac3}) relayed untouched into
+     * {@code XCODE_SETUP} for the MediaServer's parser to apply.
+     */
+    private static String[] splitModeParams(String mode) {
+        int semi = mode.indexOf(';');
+        if (semi < 0) return new String[] { mode, "" };
+        return new String[] { mode.substring(0, semi), mode.substring(semi) };
+    }
+
+    /**
      * Map a client {@code mode} to a {@code media_server/transcode_quality/*}
-     * key, or {@code null} for direct play (no {@code XCODE_SETUP}).
+     * key (plus any verbatim {@code ;k=v} suffix), or {@code null} for direct
+     * play (no {@code XCODE_SETUP}).
      */
     private static String mapModeToXcodeQuality(String mode) {
-        String m = mode.toLowerCase(Locale.ROOT);
-        if (m.equals("direct")) return null;
-        if (m.equals("remux:ts") || m.equals("remux")) return "mpeg2tsremux";
-        if (m.equals("remux:ps")) return "mpeg2psremux";
-        if (m.startsWith("xcode:")) {
-            String q = mode.substring("xcode:".length()).trim();
-            return q.isEmpty() ? "browserhd" : q;
+        String[] bp = splitModeParams(mode);
+        String base = bp[0];
+        String params = bp[1];               // ";k=v..." or ""
+        String m = base.toLowerCase(Locale.ROOT);
+        if (m.equals("direct")) return null; // direct play carries no XCODE_SETUP
+        String quality;
+        if (m.equals("remux:ts") || m.equals("remux")) quality = "mpeg2tsremux";
+        else if (m.equals("remux:ps")) quality = "mpeg2psremux";
+        else if (m.startsWith("xcode:")) {
+            String q = base.substring("xcode:".length()).trim();
+            quality = q.isEmpty() ? "browserhd" : q;
+        } else {
+            quality = base;                  // unknown: treat as a raw quality name
         }
-        // Unknown token: treat as a raw quality name for forward-compat.
-        return mode;
+        return quality + params;             // re-append ;k=v for the server's XCODE_SETUP parser
     }
 
     private static String contentTypeForMode(String mode, String path) {
-        String m = mode.toLowerCase(Locale.ROOT);
+        String m = splitModeParams(mode)[0].toLowerCase(Locale.ROOT);
         if (m.startsWith("xcode:") || m.equals("xcode")) return "video/mp4";      // browserhd = fMP4
         if (m.equals("remux:ts") || m.equals("remux")) return "video/mp2t";
         if (m.equals("remux:ps")) return "video/mpeg";
