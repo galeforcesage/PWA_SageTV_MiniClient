@@ -465,7 +465,40 @@ export class MediaPlayer extends EventTarget {
     this.state = PlayerState.LOADED;
 
     // Start fetching the fMP4 stream from the bridge / msproxy.
-    this._startBridgeStream(filePath, 0);
+    this._startInitialBridgeFetch(filePath);
+  }
+
+  /**
+   * Kick off the FIRST fetch of a bridge/msproxy stream.
+   *
+   * For the server-authoritative /msproxy pull-xcode path, SageTV ALWAYS sends
+   * an initial seek (resume position, or 0) immediately after OPENURL. If we
+   * eagerly start the fetch at 0 and then restart when that seek arrives, the
+   * abort tears down the server transcode BEFORE its first READ and wedges it
+   * (EOFException -> transcode destroyed -> spin). So we defer the first fetch
+   * by a short grace window; the initial seek (handled in seek()) folds its
+   * target into this first request, starting the server transcode DIRECTLY at
+   * the seek point with no teardown. A fallback timer starts at 0 if no seek
+   * arrives in time. The bridge's own /transcode path has no such server race,
+   * so it starts immediately.
+   */
+  _startInitialBridgeFetch(filePath) {
+    if (this._initialFetchTimer) { clearTimeout(this._initialFetchTimer); this._initialFetchTimer = null; }
+    this._initialFetchStarted = false;
+    this._pendingInitialSeekSec = 0;
+    if (!this._msproxyStreamUrl) {
+      this._initialFetchStarted = true;
+      this._startBridgeStream(filePath, 0);
+      return;
+    }
+    const graceMs = this._initialSeekGraceMs ?? 250;
+    this._initialFetchTimer = setTimeout(() => {
+      this._initialFetchTimer = null;
+      if (this._initialFetchStarted) return;
+      this._initialFetchStarted = true;
+      console.log(`[MediaPlayer] MSPROXY no initial seek within ${graceMs}ms — starting at 0`);
+      this._startBridgeStream(filePath, this._pendingInitialSeekSec || 0);
+    }, graceMs);
   }
 
   /**
@@ -477,6 +510,11 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController.abort();
     }
     this._bridgeAbortController = new AbortController();
+    // Reset the "has the pull/transcode stream produced any bytes yet" gate.
+    // Used by seek() to distinguish the server's initial resume positioning
+    // (arrives before the first byte — must NOT tear down the fetch) from a
+    // real mid-playback user seek.
+    this._bridgeStreamProducedData = false;
 
     // Fresh init-segment accumulation for THIS attempt. A fallback/retry (e.g.
     // /msproxy -> /transcode) can deliver a DIFFERENT codec (bridge /transcode
@@ -563,6 +601,7 @@ export class MediaPlayer extends EventTarget {
 
         // First chunk — log fMP4 header for debugging
         if (totalBytes === value.length) {
+          this._bridgeStreamProducedData = true;
           const hdr = Array.from(value.subarray(0, Math.min(16, value.length)))
             .map(b => b.toString(16).padStart(2, '0')).join(' ');
           console.log(`[MediaPlayer] Bridge first chunk: ${value.length}B, header=[${hdr}]`);
@@ -600,20 +639,25 @@ export class MediaPlayer extends EventTarget {
           }
         }
 
-        // Auto-play once we have a HEALTHY PREBUFFER, not just one frame.
-        // Playing after ~16KB decoded frame 1 and then immediately ran dry,
-        // stalling 2-3s on the frozen opening frame before the transcode/
-        // buffer caught up. Instead wait until the SourceBuffer holds
-        // ~PREBUFFER_SEC of media (or the element reports it can play through),
-        // so playback starts AND continues smoothly. The byte ceiling is a
-        // safety net so odd/short sources never hang waiting for the target.
+        // Auto-play as soon as we have a SMALL safety margin buffered AND the
+        // element can decode past the current frame. A big upfront buffer just
+        // stacks client latency on top of the server's time-to-first-fragment.
+        // The transcode fills continuously behind us, so a ~0.25s margin gated
+        // on HAVE_FUTURE_DATA (readyState 3) starts fast WITHOUT the old
+        // start-on-frame-1-then-run-dry stall (that started before any GOP was
+        // decodable). Fallbacks: a fuller buffer if readyState lags, and a byte
+        // ceiling so odd/short sources never hang. All thresholds overridable
+        // via _fastStartSec / _prebufferSec.
         if (!autoPlayed && (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
-          const PREBUFFER_SEC = this._prebufferSec ?? 1.2;
+          const FAST_START_SEC = this._fastStartSec ?? 0.25;   // min margin above frame 1
+          const PREBUFFER_SEC = this._prebufferSec ?? 0.6;     // full-buffer fallback (was 1.2)
           const br = this.sourceBuffer && this.sourceBuffer.buffered;
           const bufferedSec = (br && br.length) ? (br.end(br.length - 1) - br.start(0)) : 0;
-          const ready = bufferedSec >= PREBUFFER_SEC ||
-                        this.video.readyState >= 4 /* HAVE_ENOUGH_DATA */ ||
-                        totalBytes > 4 * 1024 * 1024;
+          const ready =
+            (this.video.readyState >= 3 /* HAVE_FUTURE_DATA */ && bufferedSec >= FAST_START_SEC) ||
+            bufferedSec >= PREBUFFER_SEC ||
+            this.video.readyState >= 4 /* HAVE_ENOUGH_DATA */ ||
+            totalBytes > 4 * 1024 * 1024;
           if (ready) {
             console.log(`[MediaPlayer] Bridge auto-playing: buffered=${bufferedSec.toFixed(2)}s bytes=${(totalBytes / 1024).toFixed(0)}KB readyState=${this.video.readyState}`);
             this._wasPlayingBeforeSeek = false;
@@ -1196,6 +1240,10 @@ export class MediaPlayer extends EventTarget {
       clearTimeout(this._seekDebounceTimer);
       this._seekDebounceTimer = null;
     }
+    if (this._initialFetchTimer) {
+      clearTimeout(this._initialFetchTimer);
+      this._initialFetchTimer = null;
+    }
 
     // Stop bridge transcode
     if (this._bridgeAbortController) {
@@ -1268,6 +1316,27 @@ export class MediaPlayer extends EventTarget {
     if (!isFinite(timeSec) || timeSec < 0) return;
 
     if (this.bridgeMode && this._bridgeFilePath) {
+      // ── 0) SERVER-AUTHORITATIVE PULL-XCODE (/msproxy) INITIAL SEEK ──
+      // The initial seek (resume position or 0) arrives right after OPENURL,
+      // while the first fetch is still deferred by _startInitialBridgeFetch.
+      // FOLD it into that first request so the server transcode STARTS at the
+      // target (XCODE_SETUP + -ss on the server) instead of starting at 0 and
+      // then tearing the fetch down mid-startup — which aborts the server
+      // transcode before its first READ and wedges it. Genuine mid-playback
+      // seeks (after bytes have flowed) fall through to the restart path below.
+      if (this._msproxyStreamUrl && this._initialFetchTimer && !this._initialFetchStarted) {
+        clearTimeout(this._initialFetchTimer);
+        this._initialFetchTimer = null;
+        this._initialFetchStarted = true;
+        this._pendingInitialSeekSec = timeSec;
+        this._bridgeTimeOffsetMs = timeMS;
+        this._bridgeNeedTimeReset = true;
+        this.seeking = false;
+        console.log(`[MediaPlayer] MSPROXY initial seek to ${timeSec.toFixed(1)}s — starting server transcode at target (no teardown)`);
+        this._startBridgeStream(this._bridgeFilePath, timeSec);
+        return;
+      }
+
       // ── A) IN-BUFFER FAST PATH ──
       // If the target is already transcoded into the SourceBuffer, jump there
       // INSTANTLY (like a native/ExoPlayer seekTo) with NO ffmpeg restart. This
@@ -1399,25 +1468,20 @@ export class MediaPlayer extends EventTarget {
     // Check again after async wait
     if (this._currentRestartId !== restartId) return;
 
-    const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
-    if (!MSClass.isTypeSupported(mimeType)) {
-      const videoOnly = 'video/mp4; codecs="avc1.42E01E"';
-      if (MSClass.isTypeSupported(videoOnly)) {
-        this.sourceBuffer = this.mediaSource.addSourceBuffer(videoOnly);
-      } else {
-        console.error('[MediaPlayer] No supported fMP4 MIME type after seek');
-        return;
-      }
-    } else {
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
-    }
-    this.sourceBuffer.mode = 'segments';
-    this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
-    this.sourceBuffer.addEventListener('error', (e) => {
-      console.error('[MediaPlayer] SourceBuffer error:', e);
-    });
+    // Defer SourceBuffer creation to the dynamic init-segment sniff in
+    // _startBridgeStream -> _ensureDynamicSourceBuffer, EXACTLY like the initial
+    // load. The restarted server transcode emits a fresh init segment whose REAL
+    // codec must be matched: browserhd (h264_nvenc) produces H.264 High@L5.0
+    // (avc1.6400xx) for a 2560x1440 source, but a hardcoded avc1.42E01E
+    // (Constrained Baseline L3.0, max 720x576) SourceBuffer rejects that first
+    // fragment — which tore the /msproxy stream down (MediaServer EOFException,
+    // transcode destroyed, endless spin) on any resume/out-of-buffer seek.
+    this.sourceBuffer = null;
+    this._sbPending = true;
+    this._initAccum = [];
+    this._initAccumLen = 0;
 
-    // Now start the new stream
+    // Now start the new stream (SourceBuffer created from the sniffed codecs).
     this._startBridgeStream(filePath, seekSec);
   }
 

@@ -149,6 +149,13 @@ public class MediaServerProxyServlet extends HttpServlet {
         if (mode == null || mode.isEmpty()) mode = "direct";
         String xcodeMode = mapModeToXcodeQuality(mode);   // null => direct (no XCODE_SETUP)
 
+        // Server-authoritative seek: the client passes &seek=<sec> so the SERVER
+        // transcode starts at that position (XCODE_SETUP ...;ss=<ms>), giving
+        // pull-xcode a real reposition instead of always starting at 0. Each PWA
+        // seek opens a fresh /msproxy request, so a start-seek on setup is all
+        // that's needed (no mid-stream seek command).
+        long seekMs = parseSeekMillis(req.getParameter("seek"));
+
         Socket socket = null;
         try {
             socket = new Socket();
@@ -160,10 +167,16 @@ public class MediaServerProxyServlet extends HttpServlet {
             // 1) Condition the stream (transcode / remux) BEFORE OPEN so the
             //    server starts the transcoder against the file.
             if (xcodeMode != null) {
-                sendLine(sockOut, "XCODE_SETUP " + xcodeMode);
+                String setup = "XCODE_SETUP " + xcodeMode;
+                // Server-authoritative seek: start the transcode at the requested
+                // position. The server's XCODE_SETUP parser reads ";k=v" hints and
+                // ignores keys it doesn't recognize, so this is forward/backward
+                // safe (older servers simply start at 0).
+                if (seekMs > 0) setup += ";ss=" + seekMs;
+                sendLine(sockOut, setup);
                 String ack = readLine(in);
                 if (!"OK".equals(ack)) {
-                    log.warn("[MsProxy] XCODE_SETUP {} rejected: {}", xcodeMode, ack);
+                    log.warn("[MsProxy] XCODE_SETUP {} rejected: {}", setup, ack);
                     resp.sendError(502, "MediaServer rejected transcode setup");
                     return;
                 }
@@ -190,7 +203,7 @@ public class MediaServerProxyServlet extends HttpServlet {
             if (!growing) {
                 serveStatic(req, resp, in, sockOut, total, contentType);
             } else {
-                serveStream(req, resp, in, sockOut, avail, total, contentType);
+                serveStream(req, resp, in, sockOut, avail, total, contentType, xcodeMode != null);
             }
         } catch (IOException ioe) {
             log.debug("[MsProxy] stream aborted for {}: {}", canonical, ioe.toString());
@@ -268,7 +281,8 @@ public class MediaServerProxyServlet extends HttpServlet {
      */
     private void serveStream(HttpServletRequest req, HttpServletResponse resp,
                              InputStream in, OutputStream sockOut,
-                             long avail, long total, String contentType) throws IOException {
+                             long avail, long total, String contentType,
+                             boolean liveXcode) throws IOException {
         // For a growing raw recording a client may seek by byte offset; for a
         // transcode the output offset is stream position (start from 0).
         long offset = 0;
@@ -298,16 +312,26 @@ public class MediaServerProxyServlet extends HttpServlet {
                 long[] sz = querySize(sockOut, in);
                 long newAvail = sz[0];
                 long newTotal = sz[1];
-                boolean done = (newAvail == newTotal) && offset >= newAvail;
+                // A LIVE TRANSCODE has an UNKNOWN final size, so MediaServer
+                // reports total == avail and both grow together as ffmpeg
+                // encodes. Treating avail==total as EOF there is WRONG: it fires
+                // the instant the client drains the encoder's current output,
+                // tearing the pull connection down ~100ms after it starts
+                // (MediaServer EOFException -> transcode destroyed -> endless
+                // "Loading"). A live xcode only truly ends when ffmpeg exits,
+                // which manifests as avail no longer growing -> the idle timeout
+                // below. For a static/growing RAW file (not xcode) avail==total
+                // remains a valid completion signal.
+                boolean done = !liveXcode && (newAvail == newTotal) && offset >= newAvail;
                 if (newAvail > avail) {
                     avail = newAvail;
                     total = newTotal;
                     lastGrowthAt = System.currentTimeMillis();
                     continue;
                 }
-                if (done) break; // transcode finished / file complete
+                if (done) { log.info("[MsProxy] source fully served ({} bytes)", offset); break; } // transcode finished / file complete
                 if (System.currentTimeMillis() - lastGrowthAt > LIVE_IDLE_TIMEOUT_MS) {
-                    log.debug("[MsProxy] live stream idle {}ms, ending", LIVE_IDLE_TIMEOUT_MS);
+                    log.info("[MsProxy] live stream idle {}ms after {} bytes, ending", LIVE_IDLE_TIMEOUT_MS, offset);
                     break;
                 }
                 try { Thread.sleep(LIVE_POLL_MS); } catch (InterruptedException ie) {
@@ -324,7 +348,7 @@ public class MediaServerProxyServlet extends HttpServlet {
                 out.write(buf, 0, want);
                 out.flush();
             } catch (IOException clientGone) {
-                log.debug("[MsProxy] client disconnected mid-stream");
+                log.info("[MsProxy] client disconnected mid-stream after {} bytes", offset);
                 break;
             }
             offset += want;
@@ -415,6 +439,22 @@ public class MediaServerProxyServlet extends HttpServlet {
             quality = base;                  // unknown: treat as a raw quality name
         }
         return quality + params;             // re-append ;k=v for the server's XCODE_SETUP parser
+    }
+
+    /**
+     * Parse the client's {@code &seek=<sec>} parameter (fractional seconds) into
+     * whole milliseconds for the server's {@code XCODE_SETUP ...;ss=<ms>} hint.
+     * Returns 0 for missing / invalid / non-positive values (start at 0).
+     */
+    private static long parseSeekMillis(String seekParam) {
+        if (seekParam == null || seekParam.isEmpty()) return 0L;
+        try {
+            double sec = Double.parseDouble(seekParam.trim());
+            if (!Double.isFinite(sec) || sec <= 0) return 0L;
+            return (long) (sec * 1000.0);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     private static String contentTypeForMode(String mode, String path) {
