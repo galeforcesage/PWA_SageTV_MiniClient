@@ -60,35 +60,10 @@ export class SessionManager extends EventTarget {
     this.platformCapabilities = await this.platformDetector.init();
     this.dispatchEvent(new CustomEvent('platformcaps', { detail: this.platformCapabilities }));
 
-    // Get resolution from settings, with adaptive default for weak devices
-    const adaptiveRes = this._detectAdaptiveResolution();
-    const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
-    const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
-    const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
-    // Legacy Tizen installs may have `resolution_width=1280x720` (very old
-    // default) or `1920x1080` (previous default) stored. On a 4K panel both
-    // force the TV to upscale and produce fuzzy menus. If the detected panel
-    // supports a higher tier AND the stored value matches one of the two
-    // historical defaults, auto-upgrade to the detected tier. Explicit user
-    // picks that aren't 1280x720 or 1920x1080 are left alone.
-    const isTizen = this.platformDetector.isTizen();
-    const legacyTizenDefault =
-      (configuredWidth === 1280 && configuredHeight === 720) ||
-      (configuredWidth === 1920 && configuredHeight === 1080);
-    const useTizenUpgrade = isTizen
-      && legacyTizenDefault
-      && (adaptiveRes.width > configuredWidth || adaptiveRes.height > configuredHeight);
-    const width = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.width : configuredWidth;
-    const height = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.height : configuredHeight;
-    if (useIOSPerfProfile) {
-      console.log(`[Session] iOS perf profile enabled: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
-    }
-    if (useTizenUpgrade) {
-      console.log(`[Session] Tizen auto-upgrade: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
-      this.settings.set('resolution_width', String(width));
-      this.settings.set('resolution_height', String(height));
-    }
-    console.log(`[Session] Client render resolution: ${width}x${height} (adaptive=${adaptiveRes.width}x${adaptiveRes.height}, stored=${configuredWidth}x${configuredHeight}, DPR=${window.devicePixelRatio || 1})`);
+    // Adaptive render resolution: snap the panel's device-pixel size to a
+    // standard 16:9 tier, auto-upgrading a stored historical default. See
+    // _resolveRenderResolution / _detectAdaptiveResolution.
+    const { width, height } = this._resolveRenderResolution();
 
     // Set canvas size
     canvas.width = width;
@@ -238,18 +213,7 @@ export class SessionManager extends EventTarget {
       this.mediaPlayer.setBridgeBase(bridgeHttpBase);
     }
 
-    const adaptiveRes = this._detectAdaptiveResolution();
-    const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
-    const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
-    const useIOSPerfProfile = this.platformDetector.isIOS() && configuredWidth === 1280 && configuredHeight === 720;
-    const legacyTizenDefault =
-      (configuredWidth === 1280 && configuredHeight === 720) ||
-      (configuredWidth === 1920 && configuredHeight === 1080);
-    const useTizenUpgrade = this.platformDetector.isTizen()
-      && legacyTizenDefault
-      && (adaptiveRes.width > configuredWidth || adaptiveRes.height > configuredHeight);
-    const width = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.width : configuredWidth;
-    const height = (useIOSPerfProfile || useTizenUpgrade) ? adaptiveRes.height : configuredHeight;
+    const { width, height } = this._resolveRenderResolution();
 
     // Create connection
     this.connection = new MiniClientConnection({
@@ -449,42 +413,76 @@ export class SessionManager extends EventTarget {
   }
 
   /**
-   * Detect optimal resolution based on device capabilities.
-   * Weak devices (low core count, touch-only, small memory) get 960x540
-   * to reduce pixel throughput and image transfer volume.
+   * Resolve the effective render resolution: the stored setting, or the adaptive
+   * default when unset, auto-upgrading a stored value that exactly matches a
+   * historical AUTO-default (never an explicit user pick) to the detected tier.
+   * Only ever UPGRADES (detected strictly higher), never silently downgrades.
+   * Used by both init() (canvas) and connect() (connection) so they never drift.
+   */
+  _resolveRenderResolution() {
+    const adaptiveRes = this._detectAdaptiveResolution();
+    const configuredWidth = this.settings.getInt('resolution_width', adaptiveRes.width);
+    const configuredHeight = this.settings.getInt('resolution_height', adaptiveRes.height);
+    // Historical auto-defaults that were saved WITHOUT user intent. Tizen keeps
+    // its original pair (1280x720 / 1920x1080 upscale-on-4K fix); browser/iOS
+    // use the flat 1280x720 desktop default and the old 1024x576 iOS default,
+    // so an explicit 1080p pick on a desktop/iPad is respected (not bumped).
+    const isTizen = this.platformDetector.isTizen();
+    const historicalDefaults = isTizen
+      ? [[1280, 720], [1920, 1080]]
+      : [[1280, 720], [1024, 576]];
+    const isHistoricalDefault = historicalDefaults.some(
+      ([w, h]) => w === configuredWidth && h === configuredHeight);
+    const autoUpgrade = isHistoricalDefault
+      && (adaptiveRes.width > configuredWidth || adaptiveRes.height > configuredHeight);
+    const width = autoUpgrade ? adaptiveRes.width : configuredWidth;
+    const height = autoUpgrade ? adaptiveRes.height : configuredHeight;
+    if (autoUpgrade) {
+      this.settings.set('resolution_width', String(width));
+      this.settings.set('resolution_height', String(height));
+      console.log(`[Session] Auto-upgrade render resolution: ${configuredWidth}x${configuredHeight} -> ${width}x${height}`);
+    }
+    console.log(`[Session] Client render resolution: ${width}x${height} (adaptive=${adaptiveRes.width}x${adaptiveRes.height}, stored=${configuredWidth}x${configuredHeight}, DPR=${window.devicePixelRatio || 1})`);
+    return { width, height };
+  }
+
+  /**
+   * Detect the optimal SERVER-SIDE render resolution for this device by snapping
+   * the panel's device-pixel size (CSS px * devicePixelRatio) to a standard
+   * 16:9 tier. The STV UI is rendered at this size server-side and streamed as
+   * GFX bitmaps, so higher = sharper text/vectors but more transfer +
+   * compositing cost. Tiers: 960x540, 1280x720, 1920x1080, 2560x1440, 3840x2160.
+   * (Above 1080p only text/vector primitives sharpen — STV bitmap art is authored
+   * <=1080p — while 4K ~4x's framebuffer + image-transfer bandwidth, so we cap at 4K.)
+   *
+   * iOS/iPadOS Safari composites the streamed bitmaps on the main thread and can
+   * get input-laggy on deep menus at high targets, so it is capped at 1080p
+   * (users can still force higher in Settings -> Connection -> Resolution).
    */
   _detectAdaptiveResolution() {
-    // iOS Safari can become input-laggy on deep, image-heavy STV screens at 720p.
-    // Use a lighter runtime profile unless the user explicitly picked another size.
-    if (this.platformDetector.isIOS()) {
-      return { width: 1024, height: 576 };
-    }
-    // Tizen TVs are typically 4K panels. `window.screen.width/height` and
-    // `devicePixelRatio` together describe the actual device-pixel count of
-    // the panel (Samsung's Tizen browser variously reports 1920 with DPR=1.5
-    // or DPR=2, or 3840 with DPR=1 — the product is what matters).
-    // Snap to standard tiers so the server has a sensible render target:
-    //   >= 3840  -> 3840x2160 (4K)   sharpest text/vectors, ~4x pixel volume
-    //   >= 2560  -> 2560x1440 (QHD)  intermediate step
-    //   else     -> 1920x1080 (1080p) safe default; integer 2x upscale on 4K
-    // Reasoning for capping at 3840: STV bitmap assets are authored at
-    // 720p/1080p, so above 1080p only text/vector primitives gain sharpness;
-    // 4K quadruples framebuffer + image-transfer bandwidth for a modest
-    // visual gain. Users who want to force 4K can pick it explicitly in
-    // Settings -> Connection -> Resolution.
-    if (this.platformDetector.isTizen()) {
-      const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
-      const scrW = Math.max(window.screen?.width || 0, window.innerWidth || 0, 1920);
-      const scrH = Math.max(window.screen?.height || 0, window.innerHeight || 0, 1080);
-      const devPxW = Math.round(scrW * dpr);
-      let target;
-      if (devPxW >= 3840) target = { width: 3840, height: 2160 };
-      else if (devPxW >= 2560) target = { width: 2560, height: 1440 };
-      else target = { width: 1920, height: 1080 };
-      console.log(`[Session] Tizen panel detect: screen=${scrW}x${scrH} DPR=${dpr} devPx=${devPxW}x${Math.round(scrH * dpr)} -> ${target.width}x${target.height}`);
-      return target;
-    }
-    return { width: 1280, height: 720 };
+    const isTizen = this.platformDetector.isTizen();
+    const isIOS = this.platformDetector.isIOS();
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+    // TVs are always fullscreen and report the panel via screen*DPR; floor at
+    // 1080p since a Tizen panel is never a 720p render target.
+    const floorW = isTizen ? 1920 : 0;
+    const floorH = isTizen ? 1080 : 0;
+    const cssW = Math.max(window.screen?.width || 0, window.innerWidth || 0, floorW);
+    const cssH = Math.max(window.screen?.height || 0, window.innerHeight || 0, floorH);
+    const devPxW = Math.round(cssW * dpr);
+
+    let target;
+    if (devPxW >= 3840) target = { width: 3840, height: 2160 };      // 4K UHD
+    else if (devPxW >= 2560) target = { width: 2560, height: 1440 }; // QHD
+    else if (devPxW >= 1920) target = { width: 1920, height: 1080 }; // FHD
+    else if (devPxW >= 1280) target = { width: 1280, height: 720 };  // HD
+    else target = { width: 960, height: 540 };                       // qHD floor
+
+    // iOS/iPadOS Safari GFX-compositing lag cap.
+    if (isIOS && target.width > 1920) target = { width: 1920, height: 1080 };
+
+    console.log(`[Session] Adaptive resolution detect: screen=${window.screen?.width || 0}x${window.screen?.height || 0} DPR=${dpr} devPx=${devPxW}x${Math.round(cssH * dpr)} tizen=${isTizen} ios=${isIOS} -> ${target.width}x${target.height}`);
+    return target;
   }
 
   /**

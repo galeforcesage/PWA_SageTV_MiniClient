@@ -748,7 +748,11 @@ function setupEventHandlers() {
     // browser HUD. On Tizen it adds no value and AVPlay doesn't expose the
     // per-second bitrate/buffer the MSE player does (would show "undefined
     // Kbps"), so keep it hidden and don't poll on TV.
-    if (_isTizen) { if (statusBar) statusBar.hidden = true; return; }
+    // NOTE: the `_isTizen` const declared during startup lives in a different
+    // closure and is NOT in scope here, so detect locally (same expression) to
+    // avoid an uncaught ReferenceError that aborted the 'connected' handler.
+    const isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
+    if (isTizen) { if (statusBar) statusBar.hidden = true; return; }
     initStatusBarGauge();
     if (statusBar) statusBar.hidden = !!document.fullscreenElement;
     statusBarInterval = setInterval(updateStatusBar, 1000);
