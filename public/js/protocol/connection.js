@@ -24,7 +24,7 @@ import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
 import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
-import { NgPlaybackContextStore } from '../media/ng-playback-context-store.js';
+import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -230,8 +230,8 @@ export class MiniClientConnection extends EventTarget {
     this._capabilityFeedbackSeq = 0;
     this._feedbackEndpointSupported = true;
 
-    // NG Playback Context store (receives metadata from server SET_PROPERTY)
-    this.playbackContextStore = new NgPlaybackContextStore();
+    // NG Playback Context manager (receives metadata from server SET_PROPERTY)
+    this.playbackContextManager = new NgPlaybackContextManager();
 
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
@@ -1825,7 +1825,7 @@ export class MiniClientConnection extends EventTarget {
         this._handleDownloadRequestProperty(value);
         return 0;
       case 'NG_PLAYBACK_CONTEXT':
-        this.playbackContextStore.onPropertyReceived(value);
+        this.playbackContextManager.onPropertyReceived(value);
         return 0;
       default:
         return 0;
@@ -2760,7 +2760,7 @@ export class MiniClientConnection extends EventTarget {
       case 1: // MEDIACMD_DEINIT
         console.log('[Media] DEINIT');
         this.mediaPlayer.stop();
-        this.playbackContextStore.onMediaClose();
+        this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
         break;
 
@@ -2785,8 +2785,8 @@ export class MiniClientConnection extends EventTarget {
           const isAbsPath = urlString.startsWith('/');
           console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
 
-          // Notify NG playback context store of the media open
-          this.playbackContextStore.onMediaOpen(urlString);
+          // Notify NG playback context manager of the media open
+          this.playbackContextManager.onMediaOpen(urlString);
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
@@ -2864,7 +2864,7 @@ export class MiniClientConnection extends EventTarget {
 
       case 19: // MEDIACMD_STOP
         this.mediaPlayer.stop();
-        this.playbackContextStore.onMediaClose();
+        this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
         break;
 

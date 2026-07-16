@@ -1,5 +1,5 @@
 /**
- * NG Playback Context Store
+ * NG Playback Context Manager
  *
  * Per-connection holder for the current NgPlaybackContext. Receives context
  * data from the server via SET_PROPERTY "NG_PLAYBACK_CONTEXT", stores it, and
@@ -14,13 +14,13 @@
  * Against a legacy server (9.2.16 or earlier), this store is created but
  * getCurrent() always returns null — no new code paths activate.
  *
- * Mirrors: core/src/main/java/sagex/miniclient/ngcontext/NgPlaybackContextStore.java
+ * Mirrors: core/src/main/java/sagex/miniclient/ngcontext/NgPlaybackContextManager.java
  * (uses EventTarget instead of IBus for event dispatch)
  */
 
 import { NgPlaybackContextParser } from './ng-playback-context-parser.js';
 
-export class NgPlaybackContextStore extends EventTarget {
+export class NgPlaybackContextManager extends EventTarget {
   constructor() {
     super();
     /** @type {import('./ng-playback-context.js').NgPlaybackContext|null} */
@@ -47,12 +47,12 @@ export class NgPlaybackContextStore extends EventTarget {
     const parsed = NgPlaybackContextParser.parse(wireValue, this._lastOpenUrl);
 
     if (!parsed) {
-      console.warn('[NgPlaybackContextStore] Failed to parse context:', wireValue?.substring(0, 100));
+      console.warn('[NgPlaybackContextManager] Failed to parse context:', wireValue?.substring(0, 100));
       return;
     }
 
     this._current = parsed;
-    console.log(`[NgPlaybackContextStore] Context updated: "${parsed.title}" (${parsed.contentType}, ${parsed.durationMs}ms, seekable=${parsed.seekableByClient})`);
+    console.log(`[NgPlaybackContextManager] Context updated: "${parsed.title}" (${parsed.contentType}, ${parsed.durationMs}ms, seekable=${parsed.seekableByClient})`);
 
     this._fireChange(previous, this._current);
   }
@@ -75,7 +75,7 @@ export class NgPlaybackContextStore extends EventTarget {
     this._lastOpenUrl = null;
 
     if (previous) {
-      console.log('[NgPlaybackContextStore] Context cleared (media closed)');
+      console.log('[NgPlaybackContextManager] Context cleared (media closed)');
       this._fireChange(previous, null);
     }
   }
