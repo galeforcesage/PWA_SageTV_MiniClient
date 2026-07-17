@@ -156,6 +156,7 @@ const DEFAULTS = {
   'cache_images_on_disk': 'true',
   'install_prompted': 'false',
   'debug_sage_commands': 'false',
+  'ng_playback_context_debug': 'false',
 };
 
 /** Key that indicates defaults have been written */
