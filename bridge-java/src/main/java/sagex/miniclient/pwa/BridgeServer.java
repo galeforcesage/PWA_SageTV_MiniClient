@@ -20,6 +20,10 @@ import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import sagex.miniclient.pwa.ngcontext.NgPlaybackContextBridgeProvider;
+import sagex.miniclient.pwa.ngcontext.NgPlaybackContextServlet;
+import sagex.miniclient.pwa.ngcontext.NoopNgPlaybackContextBridgeProvider;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -144,6 +148,14 @@ public class BridgeServer {
 
         // Secure proxy for Sage transfer download endpoints.
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
+
+        // NG Playback Context metadata endpoint — returns current context for
+        // the active PWA session, or unavailable with a reason. Phase 1 uses
+        // NoopProvider (always returns bridge_not_wired) until session mapping
+        // is connected.
+        NgPlaybackContextBridgeProvider ngProvider = new NoopNgPlaybackContextBridgeProvider();
+        NgPlaybackContextServlet ngContextServlet = new NgPlaybackContextServlet(ngProvider);
+        context.addServlet(new ServletHolder("ng-context", ngContextServlet), "/ng/playback-context/current");
 
         // LAN discovery — broadcasts SageTV locator probes so the PWA can
         // populate its server picker without needing UDP itself. Purely

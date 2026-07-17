@@ -260,6 +260,28 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── NG Playback Context metadata endpoint ────────────────
+  if (reqUrl.pathname === '/ng/playback-context/current') {
+    // Phase 1: No active session mapping exists in the Node bridge.
+    // The Node bridge is a pure TCP relay — it has no knowledge of which
+    // PWA WebSocket corresponds to which SageTV session. Return unavailable.
+    //
+    // TODO: Wire session mapping when the bridge gains session awareness.
+    // Possible approach: track the MAC/clientId from the WS handshake query
+    // params and map it to an opaque sessionId.
+    const response = {
+      type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+      reason: 'bridge_not_wired',
+    };
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify(response));
+    return;
+  }
+
   // ── CORS preflight ──────────────────────────────────────
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
