@@ -16,6 +16,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { discoverServers } from './discovery.js';
+import { ActivePlaybackSessionTracker } from './active-playback-session-tracker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +48,10 @@ const MIME_TYPES = {
 
 // Track active transcode processes
 const activeTranscodes = new Map();
+
+// ── Active playback session tracker ────────────────────────
+const sessionTracker = new ActivePlaybackSessionTracker();
+sessionTracker.start();
 
 // ── LAN discovery cache ────────────────────────────────────
 // The UDP probe takes ~2 s. Cache results briefly so a stream of clients
@@ -262,17 +267,25 @@ const server = http.createServer((req, res) => {
 
   // ── NG Playback Context metadata endpoint ────────────────
   if (reqUrl.pathname === '/ng/playback-context/current') {
-    // Phase 1: No active session mapping exists in the Node bridge.
-    // The Node bridge is a pure TCP relay — it has no knowledge of which
-    // PWA WebSocket corresponds to which SageTV session. Return unavailable.
-    //
-    // TODO: Wire session mapping when the bridge gains session awareness.
-    // Possible approach: track the MAC/clientId from the WS handshake query
-    // params and map it to an opaque sessionId.
-    const response = {
-      type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
-      reason: 'bridge_not_wired',
-    };
+    const activeSession = sessionTracker.getActiveSession();
+
+    let response;
+    if (activeSession) {
+      // Future: call a provider to get actual context from the server
+      // For now, if we somehow have a sessionId, we'd return it — but since
+      // setSessionId is never called yet, this branch won't fire in phase 1.
+      response = {
+        type: 'NG_PLAYBACK_CONTEXT',
+        sessionId: activeSession.sessionId,
+        context: {},
+      };
+    } else {
+      response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: sessionTracker.getUnavailableReason(),
+      };
+    }
+
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -362,16 +375,21 @@ wss.on('connection', (ws, req) => {
 
   console.log(`[Bridge] New ${channelPath} connection → ${sageHost}:${sagePort}`);
 
+  // ── Session tracking ──────────────────────────────────────
+  const connectionId = sessionTracker.onConnect({ channel: channelPath, host: sageHost, port: sagePort });
+
   const tcpStartTime = Date.now();
   let bytesSentToTcp = 0;
   let bytesRecvFromTcp = 0;
 
   const tcpSocket = net.createConnection({ host: sageHost, port: sagePort }, () => {
     console.log(`[Bridge] TCP connected to ${sageHost}:${sagePort} for ${channelPath} (${Date.now() - tcpStartTime}ms)`);
+    sessionTracker.onActivity(connectionId);
   });
 
   tcpSocket.on('error', (err) => {
     console.error(`[Bridge] TCP error (${channelPath}):`, err.message);
+    sessionTracker.onDisconnect(connectionId);
     if (ws.readyState === WebSocket.OPEN) {
       ws.close(4003, `TCP error: ${err.message}`);
     }
@@ -379,6 +397,7 @@ wss.on('connection', (ws, req) => {
 
   tcpSocket.on('close', () => {
     console.log(`[Bridge] TCP closed for ${channelPath}`);
+    sessionTracker.onDisconnect(connectionId);
     if (ws.readyState === WebSocket.OPEN) {
       ws.close(1000, 'TCP connection closed');
     }
@@ -419,11 +438,13 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     console.log(`[Bridge] WebSocket closed for ${channelPath} (code=${code}, sent=${bytesSentToTcp}B, recv=${bytesRecvFromTcp}B)`);
+    sessionTracker.onDisconnect(connectionId);
     tcpSocket.destroy();
   });
 
   ws.on('error', (err) => {
     console.error(`[Bridge] WebSocket error (${channelPath}):`, err.message);
+    sessionTracker.onDisconnect(connectionId);
     tcpSocket.destroy();
   });
 });

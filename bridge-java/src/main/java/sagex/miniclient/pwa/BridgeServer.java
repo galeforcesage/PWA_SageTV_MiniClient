@@ -20,6 +20,7 @@ import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import sagex.miniclient.pwa.ngcontext.ActivePlaybackSessionTracker;
 import sagex.miniclient.pwa.ngcontext.NgPlaybackContextBridgeProvider;
 import sagex.miniclient.pwa.ngcontext.NgPlaybackContextServlet;
 import sagex.miniclient.pwa.ngcontext.NoopNgPlaybackContextBridgeProvider;
@@ -58,6 +59,7 @@ public class BridgeServer {
     private final String password;
     private Server server;
     private DiscoveryServlet discoveryServlet;
+    private ActivePlaybackSessionTracker sessionTracker;
 
     public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel,
                         String username, String password) {
@@ -150,10 +152,14 @@ public class BridgeServer {
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
 
         // NG Playback Context metadata endpoint — returns current context for
-        // the active PWA session, or unavailable with a reason. Phase 1 uses
-        // NoopProvider (always returns bridge_not_wired) until session mapping
-        // is connected.
-        NgPlaybackContextBridgeProvider ngProvider = new NoopNgPlaybackContextBridgeProvider();
+        // the active PWA session, or unavailable with a reason. Uses the session
+        // tracker to determine availability; returns context from provider when
+        // sessionId mapping is wired.
+        sessionTracker = new ActivePlaybackSessionTracker();
+        sessionTracker.start();
+        BridgeWebSocket.setSessionTracker(sessionTracker);
+
+        NgPlaybackContextBridgeProvider ngProvider = new TrackerAwareProvider(sessionTracker);
         NgPlaybackContextServlet ngContextServlet = new NgPlaybackContextServlet(ngProvider);
         context.addServlet(new ServletHolder("ng-context", ngContextServlet), "/ng/playback-context/current");
 
@@ -190,6 +196,9 @@ public class BridgeServer {
     public void stop() throws Exception {
         if (discoveryServlet != null) {
             discoveryServlet.stopBackgroundScanner();
+        }
+        if (sessionTracker != null) {
+            sessionTracker.stop();
         }
         if (server != null) {
             server.stop();
@@ -334,5 +343,30 @@ public class BridgeServer {
             throw new IOException("keytool failed to generate TLS keystore (exit " + exitCode + "): " + output);
         }
         log.info("Generated self-signed TLS keystore at {}", keystoreFile.getAbsolutePath());
+    }
+
+    /**
+     * Provider that delegates to the session tracker to determine availability.
+     * When an active session with a known sessionId exists, returns it.
+     * Otherwise returns unavailable with the appropriate reason.
+     */
+    private static class TrackerAwareProvider implements NgPlaybackContextBridgeProvider {
+        private final ActivePlaybackSessionTracker tracker;
+
+        TrackerAwareProvider(ActivePlaybackSessionTracker tracker) {
+            this.tracker = tracker;
+        }
+
+        @Override
+        public Result getCurrent() {
+            ActivePlaybackSessionTracker.ActiveSessionInfo active = tracker.getActiveSession();
+            if (active == null) {
+                return Result.unavailable(tracker.getUnavailableReason());
+            }
+            // TODO: Once server-side NG context HTTP endpoint exists, call it here
+            // with active.sessionId to get actual playback metadata. For now return
+            // an empty context to show the mapping is alive.
+            return Result.available(active.sessionId, "{}");
+        }
     }
 }

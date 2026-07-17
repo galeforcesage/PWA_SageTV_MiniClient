@@ -1,5 +1,7 @@
 package sagex.miniclient.pwa;
 
+import sagex.miniclient.pwa.ngcontext.ActivePlaybackSessionTracker;
+
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketListener;
 import org.slf4j.Logger;
@@ -48,10 +50,19 @@ public class BridgeWebSocket implements WebSocketListener {
     private Thread tcpReaderThread;
     private volatile boolean closed = false;
     private String channel;
+    private String connectionId;
     private long bytesSentToTcp = 0;
     private long bytesRecvFromTcp = 0;
     private long tcpReads = 0;
     private long wsFramesOut = 0;
+
+    // Shared session tracker — set via static setter (singleton per bridge instance)
+    private static volatile ActivePlaybackSessionTracker sessionTracker;
+
+    /** Set the shared session tracker (called once at bridge startup). */
+    public static void setSessionTracker(ActivePlaybackSessionTracker tracker) {
+        sessionTracker = tracker;
+    }
 
     /** Resolve an int knob from env var, then -D system property, then default. */
     private static int cfgInt(String envName, String propName, int defaultValue) {
@@ -91,6 +102,11 @@ public class BridgeWebSocket implements WebSocketListener {
         }
 
         log.info("[Bridge] New {} connection -> {}:{}", channel, sageHost, sagePort);
+
+        // Register with session tracker
+        if (sessionTracker != null) {
+            connectionId = sessionTracker.onConnect(channel);
+        }
 
         // Connect to SageTV TCP
         try {
@@ -240,6 +256,10 @@ public class BridgeWebSocket implements WebSocketListener {
 
     private void cleanup() {
         closed = true;
+        // Disconnect from session tracker (idempotent)
+        if (sessionTracker != null && connectionId != null) {
+            sessionTracker.onDisconnect(connectionId);
+        }
         try {
             if (tcpSocket != null && !tcpSocket.isClosed()) {
                 tcpSocket.close();

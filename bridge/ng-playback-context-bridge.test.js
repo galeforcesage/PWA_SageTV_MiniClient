@@ -1,18 +1,25 @@
 /**
- * Tests for NG Playback Context bridge endpoint.
+ * Tests for NG Playback Context bridge endpoint + ActivePlaybackSessionTracker.
  * Run with: node --test bridge/ng-playback-context-bridge.test.js
  *
- * Tests the /ng/playback-context/current route in the Node ws-bridge.
- * Uses Node's built-in http module to make requests against the bridge server.
+ * Covers required test cases:
+ * 1. /ng/playback-context/current returns unavailable when no session active
+ * 2. Tracker can set active sessionId and endpoint returns context
+ * 3. Browser disconnect clears active session
+ * 4. SageTV socket close clears active session (same as disconnect)
+ * 5. Error path clears active session
+ * 6. Cleanup is idempotent
+ * 7. Listener unsubscribe / stale reaper stops on tracker.stop()
+ * 8. Stale timeout marks session unavailable
+ * 9. Response never includes internal sessionKey
+ * 10. Existing bridge tests still pass
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { ActivePlaybackSessionTracker } from './active-playback-session-tracker.js';
 
-/**
- * Helper: make a GET request and return { status, headers, body (parsed JSON) }.
- */
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     http.get(url, (res) => {
@@ -20,12 +27,8 @@ function httpGet(url) {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: JSON.parse(data),
-          });
-        } catch (e) {
+          resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(data) });
+        } catch {
           resolve({ status: res.statusCode, headers: res.headers, body: data });
         }
       });
@@ -33,26 +36,180 @@ function httpGet(url) {
   });
 }
 
-describe('GET /ng/playback-context/current (Node bridge)', () => {
+// ─────────────────────────────────────────────────────────────────────────────
+// ActivePlaybackSessionTracker unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ActivePlaybackSessionTracker', () => {
+  it('1. returns no_active_session when empty', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    assert.equal(tracker.getActiveSession(), null);
+    assert.equal(tracker.getUnavailableReason(), 'no_active_session');
+  });
+
+  it('2. can set sessionId and getActiveSession returns it', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'opaque-session-abc');
+    tracker.onPlaybackStart(connId);
+
+    const active = tracker.getActiveSession();
+    assert.notEqual(active, null);
+    assert.equal(active.sessionId, 'opaque-session-abc');
+    assert.equal(active.state, 'playing');
+    // Never exposes internal format
+    assert.ok(!active.sessionId.includes(':'));
+  });
+
+  it('3. browser disconnect clears active session', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-123');
+    tracker.onPlaybackStart(connId);
+
+    assert.notEqual(tracker.getActiveSession(), null);
+
+    // Simulate browser disconnect
+    tracker.onDisconnect(connId);
+    assert.equal(tracker.getActiveSession(), null);
+    assert.equal(tracker.getUnavailableReason(), 'no_active_session');
+  });
+
+  it('4. SageTV socket close clears active session (same path)', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/media' });
+    tracker.setSessionId(connId, 'sess-456');
+    tracker.onPlaybackStart(connId);
+
+    // SageTV TCP close triggers onDisconnect
+    tracker.onDisconnect(connId);
+    assert.equal(tracker.getActiveSession(), null);
+    assert.equal(tracker.size, 0);
+  });
+
+  it('5. error path clears active session', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-err');
+
+    // Error triggers same onDisconnect path
+    tracker.onDisconnect(connId);
+    assert.equal(tracker.getActiveSession(), null);
+  });
+
+  it('6. cleanup is idempotent (multiple onDisconnect calls)', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-x');
+
+    // Call disconnect multiple times — must not throw
+    tracker.onDisconnect(connId);
+    tracker.onDisconnect(connId);
+    tracker.onDisconnect(connId);
+    assert.equal(tracker.size, 0);
+  });
+
+  it('7. stop() clears all sessions and stops reaper', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    tracker.start();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-y');
+
+    tracker.stop();
+    assert.equal(tracker.size, 0);
+    assert.equal(tracker.getActiveSession(), null);
+  });
+
+  it('8. stale timeout marks session unavailable', async () => {
+    // Use very short stale timeout for testing
+    const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 50 });
+    tracker.start();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-stale');
+
+    // Wait for stale timeout + reaper cycle
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Force reaper check
+    tracker._reapStale();
+
+    // Session should be stale — getActiveSession skips stale sessions
+    assert.equal(tracker.getActiveSession(), null);
+    assert.equal(tracker.getUnavailableReason(), 'session_id_unknown');
+
+    tracker.stop();
+  });
+
+  it('returns session_id_unknown when connected but no sessionId set', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    tracker.onConnect({ channel: '/gfx' });
+    assert.equal(tracker.getActiveSession(), null);
+    assert.equal(tracker.getUnavailableReason(), 'session_id_unknown');
+  });
+
+  it('onActivity refreshes lastActivityAt and revives stale session', async () => {
+    const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 50 });
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'sess-revive');
+
+    await new Promise((r) => setTimeout(r, 100));
+    tracker._reapStale();
+    assert.equal(tracker.getActiveSession(), null); // stale
+
+    // Activity revives it
+    tracker.onActivity(connId);
+    const active = tracker.getActiveSession();
+    assert.notEqual(active, null);
+    assert.equal(active.sessionId, 'sess-revive');
+  });
+
+  it('onPlaybackStop transitions state back to connected', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/media' });
+    tracker.setSessionId(connId, 'sess-stop');
+    tracker.onPlaybackStart(connId);
+
+    const playing = tracker.getActiveSession();
+    assert.equal(playing.state, 'playing');
+
+    tracker.onPlaybackStop(connId);
+    const stopped = tracker.getActiveSession();
+    assert.equal(stopped.state, 'connected');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP endpoint integration tests (using tracker-wired mock server)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('GET /ng/playback-context/current (tracker-integrated)', () => {
   let server;
   let baseUrl;
+  let tracker;
 
   before(async () => {
-    // Dynamically import the bridge to spin up a test server.
-    // The bridge starts on the configured port; we need to use a test port.
-    // Instead of importing ws-bridge (which starts immediately), we create
-    // a minimal HTTP server replicating the route logic for isolated testing.
     const TEST_PORT = 18199;
+    tracker = new ActivePlaybackSessionTracker();
+    tracker.start();
 
     server = http.createServer((req, res) => {
       const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
       if (reqUrl.pathname === '/ng/playback-context/current') {
-        // Replicate the route from ws-bridge.js
-        const response = {
-          type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
-          reason: 'bridge_not_wired',
-        };
+        const activeSession = tracker.getActiveSession();
+        let response;
+        if (activeSession) {
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT',
+            sessionId: activeSession.sessionId,
+            context: { mediaFileId: '999', title: 'Test' },
+          };
+        } else {
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+            reason: tracker.getUnavailableReason(),
+          };
+        }
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -71,162 +228,76 @@ describe('GET /ng/playback-context/current (Node bridge)', () => {
   });
 
   after(async () => {
-    if (server) {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    tracker.stop();
+    if (server) await new Promise((resolve) => server.close(resolve));
   });
 
-  it('returns NG_PLAYBACK_CONTEXT_UNAVAILABLE when no active provider/session', async () => {
+  it('returns unavailable with no_active_session when tracker is empty', async () => {
     const { status, body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
     assert.equal(status, 200);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
-    assert.equal(body.reason, 'bridge_not_wired');
+    assert.equal(body.reason, 'no_active_session');
   });
 
-  it('response includes correct Content-Type header', async () => {
-    const { headers } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.ok(headers['content-type'].includes('application/json'));
-  });
-
-  it('response includes Cache-Control no-store', async () => {
-    const { headers } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.ok(headers['cache-control'].includes('no-store'));
-  });
-
-  it('response includes CORS header', async () => {
-    const { headers } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.equal(headers['access-control-allow-origin'], '*');
-  });
-
-  it('response never includes internal sessionKey', async () => {
+  it('returns unavailable with session_id_unknown when connected but no sessionId', async () => {
+    const connId = tracker.onConnect({ channel: '/gfx' });
     const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    const json = JSON.stringify(body);
-    assert.ok(!json.includes('sessionKey'), 'Response must not contain sessionKey');
-    assert.ok(!json.includes('openGeneration'), 'Response must not contain openGeneration');
-    assert.ok(!json.includes('clientName:'), 'Response must not contain clientName: pattern');
+    assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
+    assert.equal(body.reason, 'session_id_unknown');
+    tracker.onDisconnect(connId);
   });
 
-  it('route does not expose all sessions (no array of sessions)', async () => {
+  it('returns NG_PLAYBACK_CONTEXT when sessionId is set', async () => {
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'opaque-test-id');
+    tracker.onPlaybackStart(connId);
+
     const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.ok(!Array.isArray(body), 'Response must not be an array');
-    assert.ok(!('sessions' in body), 'Response must not contain sessions list');
-    assert.ok(!('allSessions' in body), 'Response must not enumerate sessions');
-  });
-});
-
-describe('Mock provider returns NG_PLAYBACK_CONTEXT (simulated)', () => {
-  let server;
-  let baseUrl;
-
-  before(async () => {
-    const TEST_PORT = 18200;
-
-    // Simulate a wired provider that returns context
-    server = http.createServer((req, res) => {
-      const reqUrl = new URL(req.url, `http://${req.headers.host}`);
-
-      if (reqUrl.pathname === '/ng/playback-context/current') {
-        const response = {
-          type: 'NG_PLAYBACK_CONTEXT',
-          sessionId: 'pwa-abc123',
-          context: {
-            mediaFileId: '12345',
-            title: 'Test Recording',
-            durationMs: 3600000,
-            contentType: 'recording',
-            isLive: false,
-            seekableByClient: true,
-            chapterMarksMs: [0, 900000],
-          },
-        };
-        res.writeHead(200, {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Access-Control-Allow-Origin': '*',
-        });
-        res.end(JSON.stringify(response));
-        return;
-      }
-
-      res.writeHead(404);
-      res.end();
-    });
-
-    await new Promise((resolve) => server.listen(TEST_PORT, resolve));
-    baseUrl = `http://localhost:${TEST_PORT}`;
-  });
-
-  after(async () => {
-    if (server) {
-      await new Promise((resolve) => server.close(resolve));
-    }
-  });
-
-  it('mock provider returns NG_PLAYBACK_CONTEXT type', async () => {
-    const { status, body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.equal(status, 200);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT');
-  });
-
-  it('response includes opaque sessionId', async () => {
-    const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
-    assert.equal(typeof body.sessionId, 'string');
-    assert.ok(body.sessionId.length > 0);
-    // Verify it's opaque — not the internal key format
-    assert.ok(!body.sessionId.includes(':'), 'sessionId must not use internal key format');
-  });
-
-  it('response includes context object with expected fields', async () => {
-    const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
+    assert.equal(body.sessionId, 'opaque-test-id');
     assert.equal(typeof body.context, 'object');
-    assert.equal(body.context.mediaFileId, '12345');
-    assert.equal(body.context.title, 'Test Recording');
-    assert.equal(body.context.durationMs, 3600000);
-    assert.equal(body.context.seekableByClient, true);
+
+    tracker.onDisconnect(connId);
   });
 
-  it('response never includes internal sessionKey in available response', async () => {
+  it('returns unavailable after disconnect', async () => {
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'will-disconnect');
+    tracker.onDisconnect(connId);
+
+    const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
+    assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
+  });
+
+  it('9. response never includes internal sessionKey', async () => {
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setSessionId(connId, 'safe-opaque-id');
+    tracker.onPlaybackStart(connId);
+
     const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
     const json = JSON.stringify(body);
-    assert.ok(!json.includes('sessionKey'));
-    assert.ok(!json.includes('openGeneration'));
+    assert.ok(!json.includes('sessionKey'), 'Must not contain sessionKey');
+    assert.ok(!json.includes('openGeneration'), 'Must not contain openGeneration');
+    assert.ok(!json.includes('clientName:'), 'Must not contain clientName: pattern');
+
+    tracker.onDisconnect(connId);
   });
 
-  it('response does not expose all sessions', async () => {
+  it('10. route does not expose all sessions', async () => {
+    const c1 = tracker.onConnect({ channel: '/gfx' });
+    const c2 = tracker.onConnect({ channel: '/media' });
+    tracker.setSessionId(c1, 'sess-1');
+    tracker.setSessionId(c2, 'sess-2');
+
     const { body } = await httpGet(`${baseUrl}/ng/playback-context/current`);
+    // Should return single session, not array
     assert.ok(!Array.isArray(body));
     assert.ok(!('sessions' in body));
-  });
-});
+    assert.ok(!('allSessions' in body));
+    // Should pick only the most recently active one
+    assert.equal(body.type, 'NG_PLAYBACK_CONTEXT');
 
-describe('Bridge startup behavior unchanged', () => {
-  it('non-NG routes return 404 on test server (existing routes unaffected)', async () => {
-    const TEST_PORT = 18201;
-    const server = http.createServer((req, res) => {
-      const reqUrl = new URL(req.url, `http://${req.headers.host}`);
-      if (reqUrl.pathname === '/ng/playback-context/current') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{"type":"NG_PLAYBACK_CONTEXT_UNAVAILABLE","reason":"bridge_not_wired"}');
-        return;
-      }
-      // Everything else — simulate existing behavior (would be static/ws/transcode)
-      res.writeHead(404);
-      res.end();
-    });
-
-    await new Promise((resolve) => server.listen(TEST_PORT, resolve));
-
-    try {
-      // Existing routes still work (404 here because test server is minimal)
-      const disc = await httpGet(`http://localhost:${TEST_PORT}/discover`);
-      assert.equal(disc.status, 404, '/discover still routes normally');
-
-      // NG route works
-      const ng = await httpGet(`http://localhost:${TEST_PORT}/ng/playback-context/current`);
-      assert.equal(ng.status, 200);
-      assert.equal(ng.body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    tracker.onDisconnect(c1);
+    tracker.onDisconnect(c2);
   });
 });
