@@ -351,6 +351,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── Unknown /ng/* routes — always return JSON, never fall through to static ──
+  if (reqUrl.pathname.startsWith('/ng/')) {
+    res.writeHead(404, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify({
+      type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+      reason: 'unknown_ng_route',
+    }));
+    return;
+  }
+
   // ── CORS preflight ──────────────────────────────────────
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {

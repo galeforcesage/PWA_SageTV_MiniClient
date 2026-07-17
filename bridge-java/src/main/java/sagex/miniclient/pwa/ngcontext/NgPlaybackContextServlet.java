@@ -61,6 +61,23 @@ public class NgPlaybackContextServlet extends HttpServlet {
         resp.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         resp.setHeader("Access-Control-Allow-Origin", "*");
 
+        // Route within /ng/* prefix mapping
+        String pathInfo = req.getPathInfo();
+        if (pathInfo == null) pathInfo = "";
+        // Also check servletPath for exact-match deployments
+        String servletPath = req.getServletPath();
+        String fullPath = servletPath + pathInfo;
+
+        // Accept both /ng/playback-context/current (prefix) and the full path (exact)
+        if (!"/playback-context/current".equals(pathInfo)
+                && !"/ng/playback-context/current".equals(fullPath)
+                && !"/ng/playback-context/current".equals(servletPath)) {
+            // Unknown /ng/* route — return JSON 404, never HTML
+            resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            resp.getWriter().write("{\"type\":\"NG_PLAYBACK_CONTEXT_UNAVAILABLE\",\"reason\":\"unknown_ng_route\"}");
+            return;
+        }
+
         NgPlaybackContextBridgeProvider.Result result;
         try {
             result = provider.getCurrent();

@@ -162,7 +162,7 @@ public class BridgeServer {
 
         NgPlaybackContextBridgeProvider ngProvider = new InJvmNgPlaybackContextBridgeProvider(sessionTracker);
         NgPlaybackContextServlet ngContextServlet = new NgPlaybackContextServlet(ngProvider);
-        context.addServlet(new ServletHolder("ng-context", ngContextServlet), "/ng/playback-context/current");
+        context.addServlet(new ServletHolder("ng-context", ngContextServlet), "/ng/*");
 
         // LAN discovery — broadcasts SageTV locator probes so the PWA can
         // populate its server picker without needing UDP itself. Purely

@@ -356,8 +356,15 @@ describe('12. Existing bridge behavior preserved', () => {
         res.end(JSON.stringify({ type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE', reason: tracker.getUnavailableReason() }));
         return;
       }
-      res.writeHead(404);
-      res.end();
+      // Unknown /ng/* routes return JSON 404 (mirrors ws-bridge.js fix)
+      if (url.pathname.startsWith('/ng/')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE', reason: 'unknown_ng_route' }));
+        return;
+      }
+      // Simulate static file fallback — return HTML for unknown paths
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end('<html><body>Not Found</body></html>');
     });
 
     await new Promise((r) => server.listen(TEST_PORT, r));
@@ -373,5 +380,99 @@ describe('12. Existing bridge behavior preserved', () => {
     } finally {
       await new Promise((r) => server.close(r));
     }
+  });
+});
+
+describe('Runtime router: /ng/* never returns HTML', () => {
+  let routerServer;
+  let routerUrl;
+  let tracker;
+
+  before(async () => {
+    tracker = new ActivePlaybackSessionTracker();
+    tracker.start();
+
+    routerServer = http.createServer((req, res) => {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+
+      // ── /ng/playback-context/current route (same logic as ws-bridge.js) ──
+      if (url.pathname === '/ng/playback-context/current') {
+        const clientName = tracker.getActiveClientName();
+        let response;
+        if (!clientName) {
+          response = { type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE', reason: tracker.getUnavailableReason() };
+        } else {
+          response = { type: 'NG_PLAYBACK_CONTEXT', sessionId: `pwa-${clientName.replace(/:/g, '').toLowerCase()}`, context: {} };
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify(response));
+        return;
+      }
+
+      // ── Unknown /ng/* routes: JSON 404 ──
+      if (url.pathname.startsWith('/ng/')) {
+        res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE', reason: 'unknown_ng_route' }));
+        return;
+      }
+
+      // ── Simulate static file server fallback (HTML 404 for non-/ng paths) ──
+      if (url.pathname === '/' || url.pathname === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body>PWA MiniClient</body></html>');
+        return;
+      }
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end('<html><body>404 Not Found</body></html>');
+    });
+
+    await new Promise((r) => routerServer.listen(18303, r));
+    routerUrl = 'http://localhost:18303';
+  });
+
+  after(async () => {
+    tracker.stop();
+    await new Promise((r) => routerServer.close(r));
+  });
+
+  it('GET /ng/playback-context/current returns JSON (not HTML)', async () => {
+    const { status, headers, body } = await httpGet(`${routerUrl}/ng/playback-context/current`);
+    assert.equal(status, 200);
+    assert.ok(headers['content-type'].includes('application/json'));
+    assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
+    assert.equal(typeof body.reason, 'string');
+  });
+
+  it('GET /ng/playback-context/current does not fall through to static HTML 404', async () => {
+    const { body, headers } = await httpGet(`${routerUrl}/ng/playback-context/current`);
+    assert.ok(headers['content-type'].includes('application/json'));
+    assert.ok(!JSON.stringify(body).includes('<html'));
+  });
+
+  it('unknown /ng/foo returns JSON 404 (not HTML)', async () => {
+    const { status, headers, body } = await httpGet(`${routerUrl}/ng/foo`);
+    assert.equal(status, 404);
+    assert.ok(headers['content-type'].includes('application/json'));
+    assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
+    assert.equal(body.reason, 'unknown_ng_route');
+  });
+
+  it('unknown /ng/playback-context/nonexistent returns JSON 404', async () => {
+    const { status, headers, body } = await httpGet(`${routerUrl}/ng/playback-context/nonexistent`);
+    assert.equal(status, 404);
+    assert.ok(headers['content-type'].includes('application/json'));
+    assert.equal(body.reason, 'unknown_ng_route');
+  });
+
+  it('normal static files still return HTML (no /ng interference)', async () => {
+    const { status, headers } = await httpGet(`${routerUrl}/index.html`);
+    assert.equal(status, 200);
+    assert.ok(headers['content-type'].includes('text/html'));
+  });
+
+  it('non-/ng 404 still returns HTML (static fallback unchanged)', async () => {
+    const { status, headers } = await httpGet(`${routerUrl}/nonexistent-file.js`);
+    assert.equal(status, 404);
+    assert.ok(headers['content-type'].includes('text/html'));
   });
 });
