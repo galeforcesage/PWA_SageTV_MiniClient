@@ -267,31 +267,87 @@ const server = http.createServer((req, res) => {
 
   // ── NG Playback Context metadata endpoint ────────────────
   if (reqUrl.pathname === '/ng/playback-context/current') {
-    const activeSession = sessionTracker.getActiveSession();
+    const clientName = sessionTracker.getActiveClientName();
 
-    let response;
-    if (activeSession) {
-      // Future: call a provider to get actual context from the server
-      // For now, if we somehow have a sessionId, we'd return it — but since
-      // setSessionId is never called yet, this branch won't fire in phase 1.
-      response = {
-        type: 'NG_PLAYBACK_CONTEXT',
-        sessionId: activeSession.sessionId,
-        context: {},
-      };
-    } else {
-      response = {
+    if (!clientName) {
+      const response = {
         type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
         reason: sessionTracker.getUnavailableReason(),
       };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+      return;
     }
 
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Access-Control-Allow-Origin': '*',
+    // Node bridge: call the SageTV server HTTP endpoint with clientName.
+    // The server must expose GET /ng/playback-context/current?clientName=...
+    // If no SAGE_HOST is configured, we can't reach the server.
+    if (!SAGE_HOST) {
+      const response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: 'bridge_not_wired',
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+      return;
+    }
+
+    // Call the SageTV server's NG context endpoint
+    const encodedClientName = encodeURIComponent(clientName);
+    const serverUrl = `http://${SAGE_HOST}:${SAGE_PORT}/ng/playback-context/current?clientName=${encodedClientName}`;
+
+    const serverReq = http.get(serverUrl, { timeout: 3000 }, (serverRes) => {
+      let body = '';
+      serverRes.on('data', (chunk) => { body += chunk; });
+      serverRes.on('end', () => {
+        let response;
+        if (serverRes.statusCode === 200 && body) {
+          const opaqueSessionId = `pwa-${clientName.replace(/:/g, '').toLowerCase()}`;
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT',
+            sessionId: opaqueSessionId,
+            context: JSON.parse(body),
+          };
+        } else {
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+            reason: serverRes.statusCode === 404 ? 'no_active_session' : 'server_not_supported',
+          };
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify(response));
+      });
     });
-    res.end(JSON.stringify(response));
+
+    serverReq.on('error', () => {
+      const response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: 'server_not_supported',
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+    });
+
+    serverReq.on('timeout', () => {
+      serverReq.destroy();
+    });
+
     return;
   }
 
@@ -414,6 +470,7 @@ wss.on('connection', (ws, req) => {
   // Forward WebSocket data → TCP
   // IMPORTANT: In the ws library, `data` is always a Buffer for both text and
   // binary frames. Use `isBinary` (not instanceof) to distinguish them.
+  let handshakeSeen = false;
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
       // Text frame — handle control messages, NEVER forward to TCP
@@ -427,12 +484,23 @@ wss.on('connection', (ws, req) => {
       }
       return;
     }
+
+    // Extract MAC from first binary frame (8-byte handshake: [0x01][MAC x6][connType])
+    const buf = Buffer.from(data);
+    if (!handshakeSeen && buf.length >= 8 && buf[0] === 0x01) {
+      handshakeSeen = true;
+      const mac = [buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]]
+        .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
+        .join(':');
+      sessionTracker.setClientName(connectionId, mac);
+    }
+
     // Binary frame — forward to TCP
     if (tcpSocket.writable) {
-      bytesSentToTcp += data.length;
-      tcpSocket.write(Buffer.from(data));
+      bytesSentToTcp += buf.length;
+      tcpSocket.write(buf);
     } else {
-      console.warn(`[Bridge] TCP not writable for ${channelPath}, dropping ${data.length} bytes`);
+      console.warn(`[Bridge] TCP not writable for ${channelPath}, dropping ${buf.length} bytes`);
     }
   });
 

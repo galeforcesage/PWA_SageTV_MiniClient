@@ -51,6 +51,7 @@ public class BridgeWebSocket implements WebSocketListener {
     private volatile boolean closed = false;
     private String channel;
     private String connectionId;
+    private boolean handshakeSeen = false;
     private long bytesSentToTcp = 0;
     private long bytesRecvFromTcp = 0;
     private long tcpReads = 0;
@@ -133,6 +134,21 @@ public class BridgeWebSocket implements WebSocketListener {
     @Override
     public void onWebSocketBinary(byte[] payload, int offset, int len) {
         if (tcpOut == null || closed) return;
+
+        // Extract MAC address from the first binary frame (8-byte handshake:
+        // [0x01][MAC0][MAC1][MAC2][MAC3][MAC4][MAC5][connType]).
+        // This does NOT alter the relay — bytes still flow to TCP unchanged.
+        if (!handshakeSeen && len >= 8 && payload[offset] == 0x01) {
+            handshakeSeen = true;
+            String mac = String.format("%02X:%02X:%02X:%02X:%02X:%02X",
+                    payload[offset + 1] & 0xFF, payload[offset + 2] & 0xFF,
+                    payload[offset + 3] & 0xFF, payload[offset + 4] & 0xFF,
+                    payload[offset + 5] & 0xFF, payload[offset + 6] & 0xFF);
+            if (sessionTracker != null && connectionId != null) {
+                sessionTracker.setClientName(connectionId, mac);
+                log.debug("[Bridge] Extracted client MAC {} for {} on {}", mac, connectionId, channel);
+            }
+        }
 
         try {
             tcpOut.write(payload, offset, len);

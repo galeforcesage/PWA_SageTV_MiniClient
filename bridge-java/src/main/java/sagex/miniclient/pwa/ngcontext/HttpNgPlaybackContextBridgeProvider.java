@@ -36,28 +36,31 @@ public class HttpNgPlaybackContextBridgeProvider implements NgPlaybackContextBri
 
     private final String sageHost;
     private final int sagePort;
+    private final ActivePlaybackSessionTracker tracker;
 
     /**
      * @param sageHost SageTV server hostname
-     * @param sagePort SageTV server HTTP API port
+     * @param sagePort SageTV server HTTP API port (typically 31099 or custom)
+     * @param tracker  the session tracker providing clientName mapping
      */
-    public HttpNgPlaybackContextBridgeProvider(String sageHost, int sagePort) {
+    public HttpNgPlaybackContextBridgeProvider(String sageHost, int sagePort, ActivePlaybackSessionTracker tracker) {
         this.sageHost = sageHost;
         this.sagePort = sagePort;
+        this.tracker = tracker;
     }
 
     @Override
     public Result getCurrent() {
-        // TODO: Resolve active session ID for the requesting PWA client.
-        // Until session mapping is wired, we cannot determine which session to query.
-        // Return unavailable with a clear reason.
-        String activeSessionId = resolveActiveSessionId();
-        if (activeSessionId == null) {
-            return Result.unavailable("no_active_session");
+        String clientName = tracker != null ? tracker.getActiveClientName() : null;
+        if (clientName == null) {
+            String reason = tracker != null ? tracker.getUnavailableReason() : "bridge_not_wired";
+            return Result.unavailable(reason);
         }
 
         try {
-            String url = String.format("http://%s:%d/ng/playback-context/%s", sageHost, sagePort, activeSessionId);
+            String encodedClientName = java.net.URLEncoder.encode(clientName, "UTF-8");
+            String url = String.format("http://%s:%d/ng/playback-context/current?clientName=%s",
+                    sageHost, sagePort, encodedClientName);
             HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -67,7 +70,11 @@ public class HttpNgPlaybackContextBridgeProvider implements NgPlaybackContextBri
             int status = conn.getResponseCode();
             if (status == 200) {
                 String body = readBody(conn.getInputStream());
-                return Result.available(activeSessionId, body);
+                // The server response should already contain the opaque sessionId.
+                // Return the body as the context JSON. The sessionId is derived
+                // from clientName (opaque to the browser).
+                String opaqueSessionId = "pwa-" + clientName.replace(":", "").toLowerCase();
+                return Result.available(opaqueSessionId, body);
             } else if (status == 404) {
                 return Result.unavailable("no_active_session");
             } else {
@@ -78,18 +85,6 @@ public class HttpNgPlaybackContextBridgeProvider implements NgPlaybackContextBri
             log.warn("[NgContext] HTTP request failed: {}", e.getMessage());
             return Result.unavailable("server_not_supported");
         }
-    }
-
-    /**
-     * TODO: Implement active session resolution.
-     * This must map the current PWA client request to a specific SageTV session ID.
-     * Must NOT enumerate all sessions. Must NOT expose internal sessionKey.
-     *
-     * @return opaque session ID or null if mapping not available
-     */
-    private String resolveActiveSessionId() {
-        // Phase 1: no mapping exists yet
-        return null;
     }
 
     private String readBody(InputStream in) throws Exception {

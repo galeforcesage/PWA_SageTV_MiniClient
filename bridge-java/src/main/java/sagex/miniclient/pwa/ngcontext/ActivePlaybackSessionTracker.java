@@ -106,6 +106,38 @@ public class ActivePlaybackSessionTracker {
         s.lastActivityAt = System.currentTimeMillis();
     }
 
+    /**
+     * Set the clientName (MAC address) for a connection.
+     * Extracted from the first binary handshake frame.
+     * This is the identity the SageTV server uses to identify this MiniClient.
+     *
+     * @param connectionId the connection identifier
+     * @param clientName   MAC address in XX:XX:XX:XX:XX:XX format
+     */
+    public void setClientName(String connectionId, String clientName) {
+        TrackedSession s = sessions.get(connectionId);
+        if (s == null) return;
+        s.clientName = clientName;
+        s.lastActivityAt = System.currentTimeMillis();
+        log.debug("[SessionTracker] Client name set for {}: {}", connectionId, clientName);
+    }
+
+    /**
+     * Get the clientName for the most recently active connection.
+     * @return MAC-format clientName or null if not known
+     */
+    public String getActiveClientName() {
+        TrackedSession best = null;
+        for (TrackedSession s : sessions.values()) {
+            if (s.state == SessionState.DISCONNECTED || s.state == SessionState.STALE) continue;
+            if (s.clientName == null) continue;
+            if (best == null || s.lastActivityAt > best.lastActivityAt) {
+                best = s;
+            }
+        }
+        return best != null ? best.clientName : null;
+    }
+
     /** Mark playback started for a connection. */
     public void onPlaybackStart(String connectionId) {
         TrackedSession s = sessions.get(connectionId);
@@ -144,6 +176,7 @@ public class ActivePlaybackSessionTracker {
             s.state = SessionState.DISCONNECTED;
             s.playbackActive = false;
             s.sessionId = null;
+            s.clientName = null;
             log.debug("[SessionTracker] Disconnected {}", connectionId);
         }
     }
@@ -173,6 +206,7 @@ public class ActivePlaybackSessionTracker {
         if (sessions.isEmpty()) return "no_active_session";
         for (TrackedSession s : sessions.values()) {
             if (s.state != SessionState.DISCONNECTED) {
+                if (s.clientName == null) return "client_name_unknown";
                 return "session_id_unknown";
             }
         }
@@ -212,6 +246,7 @@ public class ActivePlaybackSessionTracker {
         final String connectionId;
         final String channel;
         volatile String sessionId;
+        volatile String clientName;
         volatile boolean playbackActive;
         volatile long lastActivityAt;
         volatile SessionState state;

@@ -102,6 +102,38 @@ export class ActivePlaybackSessionTracker {
   }
 
   /**
+   * Set the clientName (MAC address) for a connection.
+   * Extracted from the first binary handshake frame.
+   * This is the identity the SageTV server uses to identify this MiniClient.
+   *
+   * @param {string} connectionId
+   * @param {string} clientName - MAC address in XX:XX:XX:XX:XX:XX format
+   */
+  setClientName(connectionId, clientName) {
+    const entry = this._sessions.get(connectionId);
+    if (!entry) return;
+    entry.clientName = clientName;
+    entry.lastActivityAt = Date.now();
+  }
+
+  /**
+   * Get the clientName for the most recently active connection.
+   * Returns null if no connection has a known clientName.
+   * @returns {string|null}
+   */
+  getActiveClientName() {
+    let best = null;
+    for (const entry of this._sessions.values()) {
+      if (entry.state === 'disconnected' || entry.state === 'stale') continue;
+      if (!entry.clientName) continue;
+      if (!best || entry.lastActivityAt > best.lastActivityAt) {
+        best = entry;
+      }
+    }
+    return best ? best.clientName : null;
+  }
+
+  /**
    * Mark that playback has started for a connection.
    * @param {string} connectionId
    */
@@ -149,6 +181,7 @@ export class ActivePlaybackSessionTracker {
     entry.state = 'disconnected';
     entry.playbackActive = false;
     entry.sessionId = null;
+    entry.clientName = null;
     this._sessions.delete(connectionId);
   }
 
@@ -181,9 +214,9 @@ export class ActivePlaybackSessionTracker {
    */
   getUnavailableReason() {
     if (this._sessions.size === 0) return 'no_active_session';
-    // Check if any connections exist but none have sessionId
     for (const entry of this._sessions.values()) {
       if (entry.state !== 'disconnected') {
+        if (!entry.clientName) return 'client_name_unknown';
         return 'session_id_unknown';
       }
     }
