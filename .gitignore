@@ -22,3 +22,6 @@ deploy/tizen/tizen.local.json
 # Backups produced by the packaging/prepare step.
 *.original-backup
 
+
+# Local deploy/verify scratch scripts (host IPs, container names, paths) - never commit.
+tmp/
