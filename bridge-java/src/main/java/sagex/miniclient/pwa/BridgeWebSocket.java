@@ -56,6 +56,9 @@ public class BridgeWebSocket implements WebSocketListener {
     private long bytesRecvFromTcp = 0;
     private long tcpReads = 0;
     private long wsFramesOut = 0;
+    private long lastActivityRefresh = 0;
+
+    private static final long ACTIVITY_REFRESH_MS = 30_000;
 
     // Shared session tracker — set via static setter (singleton per bridge instance)
     private static volatile ActivePlaybackSessionTracker sessionTracker;
@@ -138,15 +141,29 @@ public class BridgeWebSocket implements WebSocketListener {
         // Extract MAC address from the first binary frame (8-byte handshake:
         // [0x01][MAC0][MAC1][MAC2][MAC3][MAC4][MAC5][connType]).
         // This does NOT alter the relay — bytes still flow to TCP unchanged.
+        // The clientName is normalized to lowercase hex WITHOUT colons to match
+        // the server's uiMgr.getLocalUIClientName() format (e.g. "32c6f98be520").
         if (!handshakeSeen && len >= 8 && payload[offset] == 0x01) {
             handshakeSeen = true;
-            String mac = String.format("%02X:%02X:%02X:%02X:%02X:%02X",
+            String clientName = String.format("%02x%02x%02x%02x%02x%02x",
                     payload[offset + 1] & 0xFF, payload[offset + 2] & 0xFF,
                     payload[offset + 3] & 0xFF, payload[offset + 4] & 0xFF,
                     payload[offset + 5] & 0xFF, payload[offset + 6] & 0xFF);
+            log.info("[Bridge] Extracted clientName={} for {} on {}", clientName, connectionId, channel);
             if (sessionTracker != null && connectionId != null) {
-                sessionTracker.setClientName(connectionId, mac);
-                log.debug("[Bridge] Extracted client MAC {} for {} on {}", mac, connectionId, channel);
+                sessionTracker.setClientName(connectionId, clientName);
+                sessionTracker.onPlaybackStart(connectionId);
+                log.info("[Bridge] Tracker: setClientName({}, {}) + onPlaybackStart", connectionId, clientName);
+            }
+        }
+
+        // Periodically refresh tracker activity to prevent stale timeout.
+        // Throttled to ~30s intervals to avoid per-frame overhead.
+        if (sessionTracker != null && connectionId != null) {
+            long now = System.currentTimeMillis();
+            if (now - lastActivityRefresh > ACTIVITY_REFRESH_MS) {
+                lastActivityRefresh = now;
+                sessionTracker.onActivity(connectionId);
             }
         }
 

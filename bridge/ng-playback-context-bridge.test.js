@@ -53,20 +53,20 @@ describe('ActivePlaybackSessionTracker clientName', () => {
   it('2. stores clientName per connection via setClientName', () => {
     const tracker = new ActivePlaybackSessionTracker();
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
-    assert.equal(tracker.getActiveClientName(), 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
+    assert.equal(tracker.getActiveClientName(), 'aabbccddeeff');
   });
 
   it('3. getActiveClientName returns most recently active connection clientName', async () => {
     const tracker = new ActivePlaybackSessionTracker();
     const c1 = tracker.onConnect({ channel: '/gfx' });
     const c2 = tracker.onConnect({ channel: '/media' });
-    tracker.setClientName(c1, '11:22:33:44:55:66');
-    tracker.setClientName(c2, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(c1, '112233445566');
+    tracker.setClientName(c2, 'aabbccddeeff');
     // Explicitly mark c2 as more recent
     await new Promise((r) => setTimeout(r, 5));
     tracker.onActivity(c2);
-    assert.equal(tracker.getActiveClientName(), 'AA:BB:CC:DD:EE:FF');
+    assert.equal(tracker.getActiveClientName(), 'aabbccddeeff');
   });
 
   it('6. returns no_active_session when tracker is empty', () => {
@@ -78,8 +78,8 @@ describe('ActivePlaybackSessionTracker clientName', () => {
   it('9. browser disconnect clears clientName mapping', () => {
     const tracker = new ActivePlaybackSessionTracker();
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
-    assert.equal(tracker.getActiveClientName(), 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
+    assert.equal(tracker.getActiveClientName(), 'aabbccddeeff');
 
     tracker.onDisconnect(connId);
     assert.equal(tracker.getActiveClientName(), null);
@@ -89,7 +89,7 @@ describe('ActivePlaybackSessionTracker clientName', () => {
   it('10. SageTV socket close/error clears clientName (idempotent)', () => {
     const tracker = new ActivePlaybackSessionTracker();
     const connId = tracker.onConnect({ channel: '/media' });
-    tracker.setClientName(connId, '11:22:33:44:55:66');
+    tracker.setClientName(connId, '112233445566');
 
     tracker.onDisconnect(connId);
     tracker.onDisconnect(connId); // idempotent
@@ -102,7 +102,7 @@ describe('ActivePlaybackSessionTracker clientName', () => {
     const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 50 });
     tracker.start();
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     await new Promise((r) => setTimeout(r, 100));
     tracker._reapStale();
@@ -115,7 +115,7 @@ describe('ActivePlaybackSessionTracker clientName', () => {
     const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 50 });
     tracker.start();
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     await new Promise((r) => setTimeout(r, 100));
     tracker._reapStale();
@@ -137,12 +137,56 @@ describe('ActivePlaybackSessionTracker clientName', () => {
 
     // Connected WITH clientName (getActiveClientName returns it, so
     // getUnavailableReason is only called when it doesn't — but verify anyway)
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
     assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
 
     // After disconnect
     tracker.onDisconnect(connId);
     assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+  });
+
+  it('clientName normalization: bridge extracts lowercase hex, no colons', () => {
+    // Simulate what ws-bridge.js now does: normalize MAC bytes to lowercase hex
+    const rawBytes = [0x32, 0xC6, 0xF9, 0x8B, 0xE5, 0x20];
+    const clientName = rawBytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+    assert.equal(clientName, '32c6f98be520');
+    assert.ok(!clientName.includes(':'));
+    assert.equal(clientName, clientName.toLowerCase());
+
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setClientName(connId, clientName);
+    assert.equal(tracker.getActiveClientName(), '32c6f98be520');
+    tracker.onDisconnect(connId);
+  });
+
+  it('onPlaybackStart makes session active alongside clientName', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setClientName(connId, 'aabbccddeeff');
+    tracker.onPlaybackStart(connId);
+
+    assert.equal(tracker.getActiveClientName(), 'aabbccddeeff');
+    // getActiveSession still requires sessionId (not wired), but
+    // getActiveClientName works on clientName alone
+    assert.equal(tracker.getActiveSession(), null); // sessionId not set
+  });
+
+  it('activity refresh prevents stale timeout', async () => {
+    const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 80 });
+    tracker.start();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setClientName(connId, 'aabbccddeeff');
+
+    // Refresh activity mid-way to prevent staleness
+    await new Promise((r) => setTimeout(r, 50));
+    tracker.onActivity(connId);
+    await new Promise((r) => setTimeout(r, 50));
+    tracker._reapStale();
+
+    // Still active because we refreshed
+    assert.equal(tracker.getActiveClientName(), 'aabbccddeeff');
+    tracker.stop();
   });
 });
 
@@ -165,7 +209,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
       if (url.pathname === '/ng/playback-context/current' && url.searchParams.get('clientName')) {
         const clientName = url.searchParams.get('clientName');
-        if (clientName === 'AA:BB:CC:DD:EE:FF') {
+        if (clientName === 'aabbccddeeff') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             mediaFileId: '12345',
@@ -274,21 +318,21 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('3. uses clientName to ask provider/server for context', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT');
 
     // 5. Verify the HTTP provider built the correct URL with clientName param
     assert.equal(lastServerRequest.pathname, '/ng/playback-context/current');
-    assert.equal(lastServerRequest.params.clientName, 'AA:BB:CC:DD:EE:FF');
+    assert.equal(lastServerRequest.params.clientName, 'aabbccddeeff');
 
     tracker.onDisconnect(connId);
   });
 
   it('4. mock provider returns NG_PLAYBACK_CONTEXT with context', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT');
@@ -301,7 +345,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('6. unknown clientName on server returns unavailable', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, '99:99:99:99:99:99');
+    tracker.setClientName(connId, '999999999999');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT_UNAVAILABLE');
@@ -312,7 +356,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('7. response includes opaque sessionId when context found', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     assert.equal(body.type, 'NG_PLAYBACK_CONTEXT');
@@ -327,7 +371,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('8. response never includes internal sessionKey', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     const json = JSON.stringify(body);
@@ -340,7 +384,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('9. disconnect clears clientName and returns unavailable', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
     tracker.onDisconnect(connId);
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
@@ -349,7 +393,7 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
 
   it('10. error path clears clientName (same as disconnect, idempotent)', async () => {
     const connId = tracker.onConnect({ channel: '/gfx' });
-    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    tracker.setClientName(connId, 'aabbccddeeff');
     tracker.onDisconnect(connId);
     tracker.onDisconnect(connId); // idempotent
 
@@ -361,8 +405,8 @@ describe('GET /ng/playback-context/current (clientName-wired)', () => {
   it('11. route does not expose all sessions or internal keys', async () => {
     const c1 = tracker.onConnect({ channel: '/gfx' });
     const c2 = tracker.onConnect({ channel: '/media' });
-    tracker.setClientName(c1, 'AA:BB:CC:DD:EE:FF');
-    tracker.setClientName(c2, '11:22:33:44:55:66');
+    tracker.setClientName(c1, 'aabbccddeeff');
+    tracker.setClientName(c2, '112233445566');
 
     const { body } = await httpGet(`${bridgeUrl}/ng/playback-context/current`);
     assert.ok(!Array.isArray(body));

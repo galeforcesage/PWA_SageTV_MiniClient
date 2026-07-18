@@ -485,6 +485,7 @@ wss.on('connection', (ws, req) => {
   // IMPORTANT: In the ws library, `data` is always a Buffer for both text and
   // binary frames. Use `isBinary` (not instanceof) to distinguish them.
   let handshakeSeen = false;
+  let lastActivityRefresh = 0;
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
       // Text frame — handle control messages, NEVER forward to TCP
@@ -500,13 +501,25 @@ wss.on('connection', (ws, req) => {
     }
 
     // Extract MAC from first binary frame (8-byte handshake: [0x01][MAC x6][connType])
+    // Normalized to lowercase hex WITHOUT colons to match the server's
+    // uiMgr.getLocalUIClientName() format (e.g. "32c6f98be520").
     const buf = Buffer.from(data);
     if (!handshakeSeen && buf.length >= 8 && buf[0] === 0x01) {
       handshakeSeen = true;
-      const mac = [buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]]
-        .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
-        .join(':');
-      sessionTracker.setClientName(connectionId, mac);
+      const clientName = [buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]]
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      console.log(`[Bridge] Extracted clientName=${clientName} for ${connectionId} on ${channelPath}`);
+      sessionTracker.setClientName(connectionId, clientName);
+      sessionTracker.onPlaybackStart(connectionId);
+      console.log(`[Bridge] Tracker: setClientName(${connectionId}, ${clientName}) + onPlaybackStart`);
+    }
+
+    // Periodically refresh tracker activity to prevent stale timeout (~30s)
+    const now = Date.now();
+    if (now - lastActivityRefresh > 30000) {
+      lastActivityRefresh = now;
+      sessionTracker.onActivity(connectionId);
     }
 
     // Binary frame — forward to TCP

@@ -26,6 +26,7 @@ public class InJvmNgPlaybackContextBridgeProvider implements NgPlaybackContextBr
     public Result getCurrent() {
         // Resolve the active clientName from the session tracker
         String clientName = tracker.getActiveClientName();
+        log.debug("[NgContext] Provider lookup clientName={}", clientName);
         if (clientName == null) {
             return Result.unavailable(tracker.getUnavailableReason());
         }
@@ -34,7 +35,8 @@ public class InJvmNgPlaybackContextBridgeProvider implements NgPlaybackContextBr
         // may not be deployed on this server). This avoids a hard compile-time
         // dependency on the NG context server plugin.
         try {
-            Class<?> serviceClass = Class.forName("sagex.miniclient.ngcontext.NgPlaybackContextService");
+            Class<?> serviceClass = Class.forName("sage.ng.NgPlaybackContextService");
+            log.debug("[NgContext] Reflection: loaded sage.ng.NgPlaybackContextService");
             Object instance = serviceClass.getMethod("getInstance").invoke(null);
 
             // Check if there's an active session for this clientName
@@ -67,10 +69,11 @@ public class InJvmNgPlaybackContextBridgeProvider implements NgPlaybackContextBr
             return Result.available(opaqueSessionId, contextJson);
 
         } catch (ClassNotFoundException e) {
-            log.debug("[NgContext] NgPlaybackContextService not available (class not found)");
+            log.info("[NgContext] sage.ng.NgPlaybackContextService not found on classpath — NG server plugin not deployed");
             return Result.unavailable("server_not_supported");
         } catch (Exception e) {
-            log.warn("[NgContext] Error calling NgPlaybackContextService: {}", e.getMessage());
+            log.warn("[NgContext] Reflection call to sage.ng.NgPlaybackContextService failed for clientName={}: {}",
+                    clientName, e.toString());
             return Result.unavailable("server_not_supported");
         }
     }
