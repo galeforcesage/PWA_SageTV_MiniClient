@@ -2754,11 +2754,14 @@ export class MiniClientConnection extends EventTarget {
       case 0: // MEDIACMD_INIT
         console.log('[Media] INIT');
         this._serverMuxTime = -1;
+        this._mediaOpened = false;
+        this._pushDataCount = 0;
         this._sendMediaReturn(1);
         break;
 
       case 1: // MEDIACMD_DEINIT
         console.log('[Media] DEINIT');
+        this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
@@ -2766,6 +2769,7 @@ export class MiniClientConnection extends EventTarget {
 
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
+        this._mediaOpened = true;
         if (len >= 4) {
           const strLen = readInt(0);
           let urlString = '';
@@ -2863,6 +2867,7 @@ export class MiniClientConnection extends EventTarget {
         break;
 
       case 19: // MEDIACMD_STOP
+        this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
@@ -2899,21 +2904,34 @@ export class MiniClientConnection extends EventTarget {
             console.log(`[Media] PUSH#${this._pushDataCount}: len=${len} bufSize=${bufSize} flags=0x${flags.toString(16)} raw=[${hex}]`);
           }
 
-          // With detailedBufferStats, extra 10-byte stats header precedes buffer data
-          if (this._detailedBufferStats && bufSize > 0 && len > bufSize + 13) {
-            bufDataOffset += 10;
-            const serverMuxTime = readInt(14);
-            if (this._serverMuxTime < 0 && serverMuxTime > 0) {
-              this._serverMuxTime = serverMuxTime;
+          // Bandwidth estimation probe: the server sends 4 dummy PUSHBUFFER
+          // frames BEFORE OPENURL to measure round-trip throughput. The payload
+          // is garbage ((byte)(i & 0xFF)). If no media URL has been opened yet,
+          // these are probe packets — just ACK them with bufferLeft and do NOT
+          // forward to the player (which would trigger a spurious "push data
+          // discarded" warning and can interrupt a subsequent play() promise).
+          if (!this._mediaOpened) {
+            if (this._pushDataCount <= 5) {
+              console.log(`[Media] Bandwidth probe #${this._pushDataCount} (${bufSize}B) — ACK only, no OPENURL yet`);
             }
-          }
+            // Fall through to send bufferLeft response below
+          } else {
+            // With detailedBufferStats, extra 10-byte stats header precedes buffer data
+            if (this._detailedBufferStats && bufSize > 0 && len > bufSize + 13) {
+              bufDataOffset += 10;
+              const serverMuxTime = readInt(14);
+              if (this._serverMuxTime < 0 && serverMuxTime > 0) {
+                this._serverMuxTime = serverMuxTime;
+              }
+            }
 
-          if (bufSize > 0 && len >= bufDataOffset + bufSize) {
-            const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
-            this.mediaPlayer.pushData(bufData, flags);
-          }
-          if (flags === 0x80) {
-            this.mediaPlayer.setServerEOS();
+            if (bufSize > 0 && len >= bufDataOffset + bufSize) {
+              const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
+              this.mediaPlayer.pushData(bufData, flags);
+            }
+            if (flags === 0x80) {
+              this.mediaPlayer.setServerEOS();
+            }
           }
         }
 
