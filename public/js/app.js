@@ -10,6 +10,7 @@ import { SpatialNavigation } from './input/spatial-nav.js';
 
 // ── Globals ──────────────────────────────────────────────
 
+const _isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
 const session = new SessionManager();
 let touchNavVisible = false;
 let wakeLockSentinel = null;
@@ -384,7 +385,6 @@ async function init() {
   // Register service worker. Skip on Tizen TV: it's a packaged local app
   // (no offline benefit) and aggressive SW caching defeats reinstall-based
   // updates of the wgt.
-  const _isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
   if ('serviceWorker' in navigator && !_isTizen) {
     try {
       await navigator.serviceWorker.register('sw.js');

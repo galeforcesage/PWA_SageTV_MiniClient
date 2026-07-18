@@ -271,19 +271,30 @@ export class MediaPlayer extends EventTarget {
     this.serverEOS = false;
     this._totalPushed = 0;
 
-    if (bridgeFilePath) {
-      console.log(`[MediaPlayer] BRIDGE mode: ${bridgeFilePath}`);
-      await this._loadBridgeMode(bridgeFilePath, hostname);
-    } else if (url.startsWith('push:')) {
-      // Push mode retired: Protocol 2.1 pwa_mse deliveryModes='pull' only.
-      // mux.js (the previous H.264+AAC MPEG-TS transmuxer) was removed. If the
-      // server still requested push despite empty PUSH_AV_CONTAINERS and the
-      // pwa_mse surface's pull-only declaration, fail loudly so the mismatch
-      // is visible instead of stalling silently.
-      console.error(`[MediaPlayer] Server requested PUSH mode (${url}) but PWA client no longer accepts push. Server should route pwa_mse via pull (bridge /transcode) or use pwa_native.`);
-      await this._loadPushMode(url, hostname);
-    } else {
-      await this._loadPullMode(url, hostname);
+    // Gate play() until load completes — the server sends MEDIACMD_PLAY
+    // immediately after OPENURL but the async load hasn't finished setting
+    // the video source yet, causing "play() interrupted by a new load request".
+    let resolveLoad;
+    this._loadingPromise = new Promise(r => { resolveLoad = r; });
+
+    try {
+      if (bridgeFilePath) {
+        console.log(`[MediaPlayer] BRIDGE mode: ${bridgeFilePath}`);
+        await this._loadBridgeMode(bridgeFilePath, hostname);
+      } else if (url.startsWith('push:')) {
+        // Push mode retired: Protocol 2.1 pwa_mse deliveryModes='pull' only.
+        // mux.js (the previous H.264+AAC MPEG-TS transmuxer) was removed. If the
+        // server still requested push despite empty PUSH_AV_CONTAINERS and the
+        // pwa_mse surface's pull-only declaration, fail loudly so the mismatch
+        // is visible instead of stalling silently.
+        console.error(`[MediaPlayer] Server requested PUSH mode (${url}) but PWA client no longer accepts push. Server should route pwa_mse via pull (bridge /transcode) or use pwa_native.`);
+        await this._loadPushMode(url, hostname);
+      } else {
+        await this._loadPullMode(url, hostname);
+      }
+    } finally {
+      resolveLoad();
+      this._loadingPromise = null;
     }
   }
 
@@ -1146,6 +1157,20 @@ export class MediaPlayer extends EventTarget {
   // ── Playback Controls ─────────────────────────────────────
 
   play() {
+    // If load() is still in progress (async source setup), defer play() until
+    // it finishes. The server sends MEDIACMD_PLAY immediately after OPENURL but
+    // the video element isn't ready yet — calling video.play() mid-load causes
+    // "The play() request was interrupted by a new load request".
+    if (this._loadingPromise) {
+      this._loadingPromise.then(() => this._doPlay());
+      this.state = PlayerState.PLAY;
+      return;
+    }
+    this._doPlay();
+    this.state = PlayerState.PLAY;
+  }
+
+  _doPlay() {
     const playPromise = this.video.play();
     if (playPromise) {
       playPromise.catch((err) => {
@@ -1160,7 +1185,6 @@ export class MediaPlayer extends EventTarget {
         this.dispatchEvent(new CustomEvent('playblocked'));
       });
     }
-    this.state = PlayerState.PLAY;
   }
 
   _retryTizenPlay(attempt) {
