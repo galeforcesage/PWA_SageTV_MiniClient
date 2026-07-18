@@ -209,18 +209,28 @@ export class ActivePlaybackSessionTracker {
   }
 
   /**
-   * Get the unavailable reason if no active session is available.
+   * Get the unavailable reason when getActiveClientName() returns null.
+   *
+   * The /current route resolves by clientName, never by sessionId, so the only
+   * meaningful reasons are:
+   *   - no_active_session  — no tracked connections, or all are stale/disconnected
+   *   - client_name_unknown — a live connection exists but clientName hasn't been
+   *                           extracted from the handshake yet
+   *
    * @returns {string} reason code
    */
   getUnavailableReason() {
     if (this._sessions.size === 0) return 'no_active_session';
+    let hasLiveWithoutClientName = false;
     for (const entry of this._sessions.values()) {
-      if (entry.state !== 'disconnected') {
-        if (!entry.clientName) return 'client_name_unknown';
-        return 'session_id_unknown';
+      if (entry.state === 'disconnected' || entry.state === 'stale') continue;
+      if (!entry.clientName) {
+        hasLiveWithoutClientName = true;
       }
+      // If a live session HAS clientName, getActiveClientName() would have
+      // returned it — so we only reach here when none do.
     }
-    return 'no_active_session';
+    return hasLiveWithoutClientName ? 'client_name_unknown' : 'no_active_session';
   }
 
   /**

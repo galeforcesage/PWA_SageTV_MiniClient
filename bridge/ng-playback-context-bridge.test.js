@@ -110,6 +110,40 @@ describe('ActivePlaybackSessionTracker clientName', () => {
     assert.equal(tracker.getActiveClientName(), null);
     tracker.stop();
   });
+
+  it('stale session with clientName returns no_active_session, never session_id_unknown', async () => {
+    const tracker = new ActivePlaybackSessionTracker({ staleTimeoutMs: 50 });
+    tracker.start();
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+
+    await new Promise((r) => setTimeout(r, 100));
+    tracker._reapStale();
+
+    assert.equal(tracker.getActiveClientName(), null);
+    assert.equal(tracker.getUnavailableReason(), 'no_active_session');
+    assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+    tracker.stop();
+  });
+
+  it('getUnavailableReason never returns session_id_unknown', () => {
+    const tracker = new ActivePlaybackSessionTracker();
+    // Empty tracker
+    assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+
+    // Connected, no clientName
+    const connId = tracker.onConnect({ channel: '/gfx' });
+    assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+
+    // Connected WITH clientName (getActiveClientName returns it, so
+    // getUnavailableReason is only called when it doesn't — but verify anyway)
+    tracker.setClientName(connId, 'AA:BB:CC:DD:EE:FF');
+    assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+
+    // After disconnect
+    tracker.onDisconnect(connId);
+    assert.notEqual(tracker.getUnavailableReason(), 'session_id_unknown');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

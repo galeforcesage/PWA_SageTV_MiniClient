@@ -200,17 +200,28 @@ public class ActivePlaybackSessionTracker {
     }
 
     /**
-     * Get the unavailable reason if no active session is available.
+     * Get the unavailable reason when getActiveClientName() returns null.
+     * <p>
+     * The /current route resolves by clientName, never by sessionId, so the only
+     * meaningful reasons are:
+     * <ul>
+     *   <li>{@code no_active_session} — no tracked connections, or all are stale/disconnected</li>
+     *   <li>{@code client_name_unknown} — a live connection exists but clientName
+     *       hasn't been extracted from the handshake yet</li>
+     * </ul>
      */
     public String getUnavailableReason() {
         if (sessions.isEmpty()) return "no_active_session";
+        boolean hasLiveWithoutClientName = false;
         for (TrackedSession s : sessions.values()) {
-            if (s.state != SessionState.DISCONNECTED) {
-                if (s.clientName == null) return "client_name_unknown";
-                return "session_id_unknown";
+            if (s.state == SessionState.DISCONNECTED || s.state == SessionState.STALE) continue;
+            if (s.clientName == null) {
+                hasLiveWithoutClientName = true;
             }
+            // If a live session HAS clientName, getActiveClientName() would have
+            // returned it — so we only reach here when none do.
         }
-        return "no_active_session";
+        return hasLiveWithoutClientName ? "client_name_unknown" : "no_active_session";
     }
 
     /** Get count of tracked connections. */
