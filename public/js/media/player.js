@@ -150,7 +150,14 @@ export class MediaPlayer extends EventTarget {
         const path = this._pullFilePath;
         const host = this._pullHostname;
         console.warn(`[MediaPlayer] Native pull decode failed (code=${this.video.error?.code} msg=${this.video.error?.message}); retrying via bridge transcode for ${path}`);
-        this._loadBridgeMode(path, host).catch((err) => {
+        this._loadBridgeMode(path, host).then(() => {
+          // The server already sent MEDIACMD_PLAY before the native decode
+          // error triggered this fallback. Resume playback automatically —
+          // the server won't re-send PLAY.
+          if (this.state === PlayerState.PLAY || this.state === PlayerState.LOADED) {
+            this._doPlay();
+          }
+        }).catch((err) => {
           console.error('[MediaPlayer] Bridge transcode fallback failed:', err);
           this.state = PlayerState.STOPPED;
           this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
@@ -371,6 +378,10 @@ export class MediaPlayer extends EventTarget {
    * @param {string} hostname - SageTV server hostname
    * @param {number} [seekSec=0] - initial seek position
    */
+  /**
+   * Load media via bridge transcode by SageTV MediaFile ID.
+   * Wraps _loadBridgeMode with the same _loadingPromise gate as load().
+   */
   async loadBridgeMfid(mfid, hostname, seekSec = 0) {
     this.stop();
     this.serverEOS = false;
@@ -379,10 +390,17 @@ export class MediaPlayer extends EventTarget {
     this._pullFallbackTried = false;
     this._hlsFatalFallbackTried = false;
     console.log(`[MediaPlayer] BRIDGE-MFID mode: mfid=${mfid} seek=${seekSec}s`);
-    await this._loadBridgeMode(null, hostname, mfid);
-    if (seekSec > 0 && this.bridgeMode) {
-      // Restart at the requested position once the initial stream is set up.
-      this._flushAndRestart(null, seekSec);
+
+    let resolveLoad;
+    this._loadingPromise = new Promise(r => { resolveLoad = r; });
+    try {
+      await this._loadBridgeMode(null, hostname, mfid);
+      if (seekSec > 0 && this.bridgeMode) {
+        this._flushAndRestart(null, seekSec);
+      }
+    } finally {
+      resolveLoad();
+      this._loadingPromise = null;
     }
   }
 
@@ -410,28 +428,36 @@ export class MediaPlayer extends EventTarget {
     this._pullFallbackTried = false;
     this._hlsFatalFallbackTried = false;
 
-    const base = (this._bridgeBase || '').replace(/\/$/, '');
-    const msUrl = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}`;
-    console.log(`[MediaPlayer] MSPROXY mode=${mode}: ${msUrl}`);
+    let resolveLoad;
+    this._loadingPromise = new Promise(r => { resolveLoad = r; });
 
-    if (mode && mode.startsWith('xcode:')) {
-      // Server emits fragmented MP4 — feed MSE via the shared bridge machinery,
-      // but sourced from /msproxy (override consumed by _startBridgeStream).
-      this._msproxyStreamUrl = msUrl;
-      this._msproxyAbsPath = absPath;   // for the force-full-transcode safety net
-      this._msproxyMode = mode;
-      await this._loadBridgeMode(absPath, hostname, null);
-      if (seekSec > 0 && this.bridgeMode) {
-        this._flushAndRestart(absPath, seekSec);
+    try {
+      const base = (this._bridgeBase || '').replace(/\/$/, '');
+      const msUrl = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}`;
+      console.log(`[MediaPlayer] MSPROXY mode=${mode}: ${msUrl}`);
+
+      if (mode && mode.startsWith('xcode:')) {
+        // Server emits fragmented MP4 — feed MSE via the shared bridge machinery,
+        // but sourced from /msproxy (override consumed by _startBridgeStream).
+        this._msproxyStreamUrl = msUrl;
+        this._msproxyAbsPath = absPath;   // for the force-full-transcode safety net
+        this._msproxyMode = mode;
+        await this._loadBridgeMode(absPath, hostname, null);
+        if (seekSec > 0 && this.bridgeMode) {
+          this._flushAndRestart(absPath, seekSec);
+        }
+        return;
       }
-      return;
-    }
 
-    // direct / remux: native decode via <video src>.
-    this.pushMode = false;
-    this.video.src = msUrl;
-    this.video.load();
-    this.state = PlayerState.LOADED;
+      // direct / remux: native decode via <video src>.
+      this.pushMode = false;
+      this.video.src = msUrl;
+      this.video.load();
+      this.state = PlayerState.LOADED;
+    } finally {
+      resolveLoad();
+      this._loadingPromise = null;
+    }
   }
 
   /**
