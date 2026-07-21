@@ -1451,13 +1451,15 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController = null;
     }
 
-    // Debounce: reset on each press, only fire after 300ms of no new seeks so a
+    // Debounce: reset on each press, only fire after coalesce window of no new seeks so a
     // fast FF scrub coalesces into a single restart at the final position.
+    // NG context may provide maxClientCoalesceMs; falls back to 300ms.
+    const coalesceMs = this._seekCoalesceMs ?? 300;
     if (this._seekDebounceTimer) clearTimeout(this._seekDebounceTimer);
     this._seekDebounceTimer = setTimeout(() => {
       this._seekDebounceTimer = null;
       this._flushAndRestart(this._bridgeFilePath, timeSec);
-    }, 300);
+    }, coalesceMs);
   }
 
   /**

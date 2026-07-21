@@ -2723,8 +2723,9 @@ export class MiniClientConnection extends EventTarget {
           const hdr = Array.from(payload.subarray(0, Math.min(24, payload.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ');
           console.log(`[Media] PUSHBUFFER #${this._pushCount} len=${len} bufSize=${bufSize} flags=0x${(flags>>>0).toString(16)} raw=[${hdr}]`);
         }
-      } else if (cmd !== 24 && cmd !== 0) {
-        console.log(`[Media] cmd=${cmd} len=${len}`);
+      } else if (cmd !== 24) {
+        // Log ALL non-PUSHBUFFER, non-GETVIDEORECT commands (including INIT=0)
+        console.log(`[Media] cmd=${cmd} len=${len} mediaPlayer=${!!this.mediaPlayer} mediaOpened=${!!this._mediaOpened}`);
       }
       this._handleMediaCommand(cmd, len, payload);
     }
@@ -2764,6 +2765,7 @@ export class MiniClientConnection extends EventTarget {
         this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
+        this.dispatchEvent(new CustomEvent('mediaclose'));
         this._sendMediaReturn(1);
         break;
 
@@ -2791,6 +2793,7 @@ export class MiniClientConnection extends EventTarget {
 
           // Notify NG playback context manager of the media open
           this.playbackContextManager.onMediaOpen(urlString);
+          this.dispatchEvent(new CustomEvent('mediaopen', { detail: { url: urlString } }));
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
@@ -2870,6 +2873,7 @@ export class MiniClientConnection extends EventTarget {
         this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
+        this.dispatchEvent(new CustomEvent('mediaclose'));
         this._sendMediaReturn(1);
         break;
 

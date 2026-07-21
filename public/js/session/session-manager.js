@@ -15,6 +15,7 @@ import { MiniClientConnection } from '../protocol/connection.js';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { WebGLRenderer } from '../ui/webgl-renderer.js';
 import { MediaPlayer } from '../media/player.js';
+import { NgPlaybackContextConsumer } from '../media/ng-playback-context-consumer.js';
 import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';
 import { SettingsManager } from '../settings/settings-manager.js';
@@ -294,6 +295,23 @@ export class SessionManager extends EventTarget {
       this.mediaPlayer.setVideoRectangles(e.detail.src, e.detail.dest);
     });
 
+    // NG Playback Context Consumer — applies server seek/flow hints to player.
+    // Created per-connection; destroyed on disconnect. Against legacy servers
+    // (no NG support) it fetches once, gets "server_not_supported", and does nothing.
+    if (this._ngConsumer) { this._ngConsumer.destroy(); }
+    this._ngConsumer = new NgPlaybackContextConsumer(this.mediaPlayer, {
+      bridgeOrigin: bridgeHttpBase,
+      contextManager: this.connection.playbackContextManager,
+    });
+
+    // Wire media open/close lifecycle to the consumer.
+    this.connection.addEventListener('mediaopen', () => {
+      if (this._ngConsumer) this._ngConsumer.onMediaOpen();
+    });
+    this.connection.addEventListener('mediaclose', () => {
+      if (this._ngConsumer) this._ngConsumer.onMediaClose();
+    });
+
     // Connect!
     try {
       this.dispatchEvent(new CustomEvent('connecting'));
@@ -321,6 +339,11 @@ export class SessionManager extends EventTarget {
    * Disconnect from the current server.
    */
   disconnect() {
+    if (this._ngConsumer) {
+      this._ngConsumer.destroy();
+      this._ngConsumer = null;
+    }
+
     if (this.inputManager) {
       this.inputManager.stop();
       this.inputManager = null;
