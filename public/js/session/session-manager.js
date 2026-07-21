@@ -309,6 +309,15 @@ export class SessionManager extends EventTarget {
   }
 
   /**
+   * Get the NG playback context store from the active connection.
+   * Returns null if not connected or connection has no store.
+   * @returns {import('../media/ng-playback-context-manager.js').NgPlaybackContextManager|null}
+   */
+  get playbackContextManager() {
+    return this.connection?.playbackContextManager || null;
+  }
+
+  /**
    * Disconnect from the current server.
    */
   disconnect() {

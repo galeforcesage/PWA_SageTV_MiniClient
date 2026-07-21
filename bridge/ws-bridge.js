@@ -16,6 +16,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { discoverServers } from './discovery.js';
+import { ActivePlaybackSessionTracker } from './active-playback-session-tracker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +48,10 @@ const MIME_TYPES = {
 
 // Track active transcode processes
 const activeTranscodes = new Map();
+
+// ── Active playback session tracker ────────────────────────
+const sessionTracker = new ActivePlaybackSessionTracker();
+sessionTracker.start();
 
 // ── LAN discovery cache ────────────────────────────────────
 // The UDP probe takes ~2 s. Cache results briefly so a stream of clients
@@ -260,6 +265,106 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── NG Playback Context metadata endpoint ────────────────
+  if (reqUrl.pathname === '/ng/playback-context/current') {
+    const clientName = sessionTracker.getActiveClientName();
+
+    if (!clientName) {
+      const response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: sessionTracker.getUnavailableReason(),
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+      return;
+    }
+
+    // Node bridge: call the SageTV server HTTP endpoint with clientName.
+    // The server must expose GET /ng/playback-context/current?clientName=...
+    // If no SAGE_HOST is configured, we can't reach the server.
+    if (!SAGE_HOST) {
+      const response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: 'bridge_not_wired',
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+      return;
+    }
+
+    // Call the SageTV server's NG context endpoint
+    const encodedClientName = encodeURIComponent(clientName);
+    const serverUrl = `http://${SAGE_HOST}:${SAGE_PORT}/ng/playback-context/current?clientName=${encodedClientName}`;
+
+    const serverReq = http.get(serverUrl, { timeout: 3000 }, (serverRes) => {
+      let body = '';
+      serverRes.on('data', (chunk) => { body += chunk; });
+      serverRes.on('end', () => {
+        let response;
+        if (serverRes.statusCode === 200 && body) {
+          const opaqueSessionId = `pwa-${clientName.replace(/:/g, '').toLowerCase()}`;
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT',
+            sessionId: opaqueSessionId,
+            context: JSON.parse(body),
+          };
+        } else {
+          response = {
+            type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+            reason: serverRes.statusCode === 404 ? 'no_active_session' : 'server_not_supported',
+          };
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify(response));
+      });
+    });
+
+    serverReq.on('error', () => {
+      const response = {
+        type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+        reason: 'server_not_supported',
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(response));
+    });
+
+    serverReq.on('timeout', () => {
+      serverReq.destroy();
+    });
+
+    return;
+  }
+
+  // ── Unknown /ng/* routes — always return JSON, never fall through to static ──
+  if (reqUrl.pathname.startsWith('/ng/')) {
+    res.writeHead(404, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify({
+      type: 'NG_PLAYBACK_CONTEXT_UNAVAILABLE',
+      reason: 'unknown_ng_route',
+    }));
+    return;
+  }
+
   // ── CORS preflight ──────────────────────────────────────
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -340,16 +445,21 @@ wss.on('connection', (ws, req) => {
 
   console.log(`[Bridge] New ${channelPath} connection → ${sageHost}:${sagePort}`);
 
+  // ── Session tracking ──────────────────────────────────────
+  const connectionId = sessionTracker.onConnect({ channel: channelPath, host: sageHost, port: sagePort });
+
   const tcpStartTime = Date.now();
   let bytesSentToTcp = 0;
   let bytesRecvFromTcp = 0;
 
   const tcpSocket = net.createConnection({ host: sageHost, port: sagePort }, () => {
     console.log(`[Bridge] TCP connected to ${sageHost}:${sagePort} for ${channelPath} (${Date.now() - tcpStartTime}ms)`);
+    sessionTracker.onActivity(connectionId);
   });
 
   tcpSocket.on('error', (err) => {
     console.error(`[Bridge] TCP error (${channelPath}):`, err.message);
+    sessionTracker.onDisconnect(connectionId);
     if (ws.readyState === WebSocket.OPEN) {
       ws.close(4003, `TCP error: ${err.message}`);
     }
@@ -357,6 +467,7 @@ wss.on('connection', (ws, req) => {
 
   tcpSocket.on('close', () => {
     console.log(`[Bridge] TCP closed for ${channelPath}`);
+    sessionTracker.onDisconnect(connectionId);
     if (ws.readyState === WebSocket.OPEN) {
       ws.close(1000, 'TCP connection closed');
     }
@@ -373,6 +484,8 @@ wss.on('connection', (ws, req) => {
   // Forward WebSocket data → TCP
   // IMPORTANT: In the ws library, `data` is always a Buffer for both text and
   // binary frames. Use `isBinary` (not instanceof) to distinguish them.
+  let handshakeSeen = false;
+  let lastActivityRefresh = 0;
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
       // Text frame — handle control messages, NEVER forward to TCP
@@ -386,22 +499,47 @@ wss.on('connection', (ws, req) => {
       }
       return;
     }
+
+    // Extract MAC from first binary frame (8-byte handshake: [0x01][MAC x6][connType])
+    // Normalized to lowercase hex WITHOUT colons to match the server's
+    // uiMgr.getLocalUIClientName() format (e.g. "32c6f98be520").
+    const buf = Buffer.from(data);
+    if (!handshakeSeen && buf.length >= 8 && buf[0] === 0x01) {
+      handshakeSeen = true;
+      const clientName = [buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]]
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      console.log(`[Bridge] Extracted clientName=${clientName} for ${connectionId} on ${channelPath}`);
+      sessionTracker.setClientName(connectionId, clientName);
+      sessionTracker.onPlaybackStart(connectionId);
+      console.log(`[Bridge] Tracker: setClientName(${connectionId}, ${clientName}) + onPlaybackStart`);
+    }
+
+    // Periodically refresh tracker activity to prevent stale timeout (~30s)
+    const now = Date.now();
+    if (now - lastActivityRefresh > 30000) {
+      lastActivityRefresh = now;
+      sessionTracker.onActivity(connectionId);
+    }
+
     // Binary frame — forward to TCP
     if (tcpSocket.writable) {
-      bytesSentToTcp += data.length;
-      tcpSocket.write(Buffer.from(data));
+      bytesSentToTcp += buf.length;
+      tcpSocket.write(buf);
     } else {
-      console.warn(`[Bridge] TCP not writable for ${channelPath}, dropping ${data.length} bytes`);
+      console.warn(`[Bridge] TCP not writable for ${channelPath}, dropping ${buf.length} bytes`);
     }
   });
 
   ws.on('close', (code, reason) => {
     console.log(`[Bridge] WebSocket closed for ${channelPath} (code=${code}, sent=${bytesSentToTcp}B, recv=${bytesRecvFromTcp}B)`);
+    sessionTracker.onDisconnect(connectionId);
     tcpSocket.destroy();
   });
 
   ws.on('error', (err) => {
     console.error(`[Bridge] WebSocket error (${channelPath}):`, err.message);
+    sessionTracker.onDisconnect(connectionId);
     tcpSocket.destroy();
   });
 });

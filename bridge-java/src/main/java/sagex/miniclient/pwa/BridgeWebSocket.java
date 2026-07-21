@@ -1,5 +1,7 @@
 package sagex.miniclient.pwa;
 
+import sagex.miniclient.pwa.ngcontext.ActivePlaybackSessionTracker;
+
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketListener;
 import org.slf4j.Logger;
@@ -48,10 +50,23 @@ public class BridgeWebSocket implements WebSocketListener {
     private Thread tcpReaderThread;
     private volatile boolean closed = false;
     private String channel;
+    private String connectionId;
+    private boolean handshakeSeen = false;
     private long bytesSentToTcp = 0;
     private long bytesRecvFromTcp = 0;
     private long tcpReads = 0;
     private long wsFramesOut = 0;
+    private long lastActivityRefresh = 0;
+
+    private static final long ACTIVITY_REFRESH_MS = 30_000;
+
+    // Shared session tracker — set via static setter (singleton per bridge instance)
+    private static volatile ActivePlaybackSessionTracker sessionTracker;
+
+    /** Set the shared session tracker (called once at bridge startup). */
+    public static void setSessionTracker(ActivePlaybackSessionTracker tracker) {
+        sessionTracker = tracker;
+    }
 
     /** Resolve an int knob from env var, then -D system property, then default. */
     private static int cfgInt(String envName, String propName, int defaultValue) {
@@ -92,6 +107,11 @@ public class BridgeWebSocket implements WebSocketListener {
 
         log.info("[Bridge] New {} connection -> {}:{}", channel, sageHost, sagePort);
 
+        // Register with session tracker
+        if (sessionTracker != null) {
+            connectionId = sessionTracker.onConnect(channel);
+        }
+
         // Connect to SageTV TCP
         try {
             tcpSocket = new Socket(sageHost, sagePort);
@@ -117,6 +137,35 @@ public class BridgeWebSocket implements WebSocketListener {
     @Override
     public void onWebSocketBinary(byte[] payload, int offset, int len) {
         if (tcpOut == null || closed) return;
+
+        // Extract MAC address from the first binary frame (8-byte handshake:
+        // [0x01][MAC0][MAC1][MAC2][MAC3][MAC4][MAC5][connType]).
+        // This does NOT alter the relay — bytes still flow to TCP unchanged.
+        // The clientName is normalized to lowercase hex WITHOUT colons to match
+        // the server's uiMgr.getLocalUIClientName() format (e.g. "32c6f98be520").
+        if (!handshakeSeen && len >= 8 && payload[offset] == 0x01) {
+            handshakeSeen = true;
+            String clientName = String.format("%02x%02x%02x%02x%02x%02x",
+                    payload[offset + 1] & 0xFF, payload[offset + 2] & 0xFF,
+                    payload[offset + 3] & 0xFF, payload[offset + 4] & 0xFF,
+                    payload[offset + 5] & 0xFF, payload[offset + 6] & 0xFF);
+            log.info("[Bridge] Extracted clientName={} for {} on {}", clientName, connectionId, channel);
+            if (sessionTracker != null && connectionId != null) {
+                sessionTracker.setClientName(connectionId, clientName);
+                sessionTracker.onPlaybackStart(connectionId);
+                log.info("[Bridge] Tracker: setClientName({}, {}) + onPlaybackStart", connectionId, clientName);
+            }
+        }
+
+        // Periodically refresh tracker activity to prevent stale timeout.
+        // Throttled to ~30s intervals to avoid per-frame overhead.
+        if (sessionTracker != null && connectionId != null) {
+            long now = System.currentTimeMillis();
+            if (now - lastActivityRefresh > ACTIVITY_REFRESH_MS) {
+                lastActivityRefresh = now;
+                sessionTracker.onActivity(connectionId);
+            }
+        }
 
         try {
             tcpOut.write(payload, offset, len);
@@ -240,6 +289,10 @@ public class BridgeWebSocket implements WebSocketListener {
 
     private void cleanup() {
         closed = true;
+        // Disconnect from session tracker (idempotent)
+        if (sessionTracker != null && connectionId != null) {
+            sessionTracker.onDisconnect(connectionId);
+        }
         try {
             if (tcpSocket != null && !tcpSocket.isClosed()) {
                 tcpSocket.close();

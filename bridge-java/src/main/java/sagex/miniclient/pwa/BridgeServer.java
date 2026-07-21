@@ -20,6 +20,12 @@ import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import sagex.miniclient.pwa.ngcontext.ActivePlaybackSessionTracker;
+import sagex.miniclient.pwa.ngcontext.InJvmNgPlaybackContextBridgeProvider;
+import sagex.miniclient.pwa.ngcontext.NgPlaybackContextBridgeProvider;
+import sagex.miniclient.pwa.ngcontext.NgPlaybackContextServlet;
+import sagex.miniclient.pwa.ngcontext.NoopNgPlaybackContextBridgeProvider;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -54,6 +60,7 @@ public class BridgeServer {
     private final String password;
     private Server server;
     private DiscoveryServlet discoveryServlet;
+    private ActivePlaybackSessionTracker sessionTracker;
 
     public BridgeServer(int port, String webRoot, String ffmpegPath, String hwAccel,
                         String username, String password) {
@@ -145,6 +152,18 @@ public class BridgeServer {
         // Secure proxy for Sage transfer download endpoints.
         context.addServlet(new ServletHolder("transfer-proxy", new TransferProxyServlet("localhost", 31099)), "/api/transfers/*");
 
+        // NG Playback Context metadata endpoint — returns current context for
+        // the active PWA session, or unavailable with a reason. Uses the in-JVM
+        // provider to call NgPlaybackContextService directly (reflection-based,
+        // graceful fallback if service not deployed).
+        sessionTracker = new ActivePlaybackSessionTracker();
+        sessionTracker.start();
+        BridgeWebSocket.setSessionTracker(sessionTracker);
+
+        NgPlaybackContextBridgeProvider ngProvider = new InJvmNgPlaybackContextBridgeProvider(sessionTracker);
+        NgPlaybackContextServlet ngContextServlet = new NgPlaybackContextServlet(ngProvider);
+        context.addServlet(new ServletHolder("ng-context", ngContextServlet), "/ng/*");
+
         // LAN discovery — broadcasts SageTV locator probes so the PWA can
         // populate its server picker without needing UDP itself. Purely
         // ON-DEMAND: the bridge scans only when a client calls /discover, and
@@ -178,6 +197,9 @@ public class BridgeServer {
     public void stop() throws Exception {
         if (discoveryServlet != null) {
             discoveryServlet.stopBackgroundScanner();
+        }
+        if (sessionTracker != null) {
+            sessionTracker.stop();
         }
         if (server != null) {
             server.stop();

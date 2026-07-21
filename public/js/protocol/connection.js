@@ -24,6 +24,7 @@ import { CryptoManager } from './crypto.js';
 import { StreamInflater, initCompression } from './compression.js';
 import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
+import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -228,6 +229,9 @@ export class MiniClientConnection extends EventTarget {
     this._lastPlaybackFailure = null;
     this._capabilityFeedbackSeq = 0;
     this._feedbackEndpointSupported = true;
+
+    // NG Playback Context manager (receives metadata from server SET_PROPERTY)
+    this.playbackContextManager = new NgPlaybackContextManager();
 
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
@@ -1554,6 +1558,9 @@ export class MiniClientConnection extends EventTarget {
       case 'DOWNLOAD_CAPABILITIES':
         this._markNgNegotiated(name);
         return this._buildDownloadCapabilities();
+      case 'NG_PLAYBACK_CONTEXT_SUPPORTED':
+        this._markNgNegotiated(name);
+        return 'TRUE';
 
       case 'GFX_TEXTMODE':
         return ClientProperty.GFX_TEXTMODE;
@@ -1816,6 +1823,9 @@ export class MiniClientConnection extends EventTarget {
       }
       case 'CMD_DOWNLOAD_REQUEST':
         this._handleDownloadRequestProperty(value);
+        return 0;
+      case 'NG_PLAYBACK_CONTEXT':
+        this.playbackContextManager.onPropertyReceived(value);
         return 0;
       default:
         return 0;
@@ -2744,17 +2754,22 @@ export class MiniClientConnection extends EventTarget {
       case 0: // MEDIACMD_INIT
         console.log('[Media] INIT');
         this._serverMuxTime = -1;
+        this._mediaOpened = false;
+        this._pushDataCount = 0;
         this._sendMediaReturn(1);
         break;
 
       case 1: // MEDIACMD_DEINIT
         console.log('[Media] DEINIT');
+        this._mediaOpened = false;
         this.mediaPlayer.stop();
+        this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
         break;
 
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
+        this._mediaOpened = true;
         if (len >= 4) {
           const strLen = readInt(0);
           let urlString = '';
@@ -2773,6 +2788,9 @@ export class MiniClientConnection extends EventTarget {
           const isStv = urlString.startsWith('stv://');
           const isAbsPath = urlString.startsWith('/');
           console.log(`[Media] OPENURL: ${urlString} (push=${isPush}, stv=${isStv}, absPath=${isAbsPath})`);
+
+          // Notify NG playback context manager of the media open
+          this.playbackContextManager.onMediaOpen(urlString);
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
@@ -2849,7 +2867,9 @@ export class MiniClientConnection extends EventTarget {
         break;
 
       case 19: // MEDIACMD_STOP
+        this._mediaOpened = false;
         this.mediaPlayer.stop();
+        this.playbackContextManager.onMediaClose();
         this._sendMediaReturn(1);
         break;
 
@@ -2884,21 +2904,34 @@ export class MiniClientConnection extends EventTarget {
             console.log(`[Media] PUSH#${this._pushDataCount}: len=${len} bufSize=${bufSize} flags=0x${flags.toString(16)} raw=[${hex}]`);
           }
 
-          // With detailedBufferStats, extra 10-byte stats header precedes buffer data
-          if (this._detailedBufferStats && bufSize > 0 && len > bufSize + 13) {
-            bufDataOffset += 10;
-            const serverMuxTime = readInt(14);
-            if (this._serverMuxTime < 0 && serverMuxTime > 0) {
-              this._serverMuxTime = serverMuxTime;
+          // Bandwidth estimation probe: the server sends 4 dummy PUSHBUFFER
+          // frames BEFORE OPENURL to measure round-trip throughput. The payload
+          // is garbage ((byte)(i & 0xFF)). If no media URL has been opened yet,
+          // these are probe packets — just ACK them with bufferLeft and do NOT
+          // forward to the player (which would trigger a spurious "push data
+          // discarded" warning and can interrupt a subsequent play() promise).
+          if (!this._mediaOpened) {
+            if (this._pushDataCount <= 5) {
+              console.log(`[Media] Bandwidth probe #${this._pushDataCount} (${bufSize}B) — ACK only, no OPENURL yet`);
             }
-          }
+            // Fall through to send bufferLeft response below
+          } else {
+            // With detailedBufferStats, extra 10-byte stats header precedes buffer data
+            if (this._detailedBufferStats && bufSize > 0 && len > bufSize + 13) {
+              bufDataOffset += 10;
+              const serverMuxTime = readInt(14);
+              if (this._serverMuxTime < 0 && serverMuxTime > 0) {
+                this._serverMuxTime = serverMuxTime;
+              }
+            }
 
-          if (bufSize > 0 && len >= bufDataOffset + bufSize) {
-            const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
-            this.mediaPlayer.pushData(bufData, flags);
-          }
-          if (flags === 0x80) {
-            this.mediaPlayer.setServerEOS();
+            if (bufSize > 0 && len >= bufDataOffset + bufSize) {
+              const bufData = data.subarray(bufDataOffset, bufDataOffset + bufSize);
+              this.mediaPlayer.pushData(bufData, flags);
+            }
+            if (flags === 0x80) {
+              this.mediaPlayer.setServerEOS();
+            }
           }
         }
 
