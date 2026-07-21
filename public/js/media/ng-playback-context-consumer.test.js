@@ -89,7 +89,7 @@ describe('NgPlaybackContextConsumer', () => {
     await consumer.onMediaOpen();
 
     assert.equal(lastRequest, '/ng/playback-context/current');
-    assert.equal(player._seekCoalesceMs, 1500);
+    assert.equal(player._seekCoalesceMs, 500); // capped from server's 1500
     assert.equal(player._minSeekIntervalMs, 250);
     assert.equal(player._seekGranularityMs, 5000);
     assert.equal(player._ngDurationMs, 3600000);
@@ -120,7 +120,7 @@ describe('NgPlaybackContextConsumer', () => {
     });
 
     await consumer.onMediaOpen();
-    assert.equal(player._seekCoalesceMs, 1500);
+    assert.equal(player._seekCoalesceMs, 500); // capped from 1500
 
     consumer.onMediaClose();
     assert.equal(player._seekCoalesceMs, undefined);

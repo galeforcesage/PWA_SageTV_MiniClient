@@ -65,6 +65,7 @@ export class NgPlaybackContextConsumer {
     this._active = false;
     this._lastContext = null;
     this._abortFetch();
+    this._stopLiveRefresh();
     this._resetPlayerDefaults();
   }
 
@@ -129,6 +130,9 @@ export class NgPlaybackContextConsumer {
 
       this._lastContext = json.context;
       this._applyToPlayer(json.context);
+
+      // For live content, start periodic refresh so playableEndMs stays current
+      this._manageLiveRefresh(json.context);
     } catch (err) {
       if (err.name !== 'AbortError') {
         console.debug('[NgContextConsumer] fetch failed:', err.message);
@@ -148,6 +152,33 @@ export class NgPlaybackContextConsumer {
   }
 
   /**
+   * Start/stop periodic refresh for live content so playableEndMs stays current.
+   */
+  _manageLiveRefresh(ctx) {
+    const isLive = ctx.live && ctx.live.isLive;
+    if (isLive && !this._liveRefreshTimer) {
+      // Poll at (granularity - 500ms) so playableEndMs stays fresh enough to
+      // prevent edge overshoot. Clamp to [1000, 10000] for sanity.
+      const gran = (ctx.seek && ctx.seek.preferredGranularityMs) || 5000;
+      const interval = Math.max(1000, Math.min(gran - 500, 10000));
+      console.debug(`[NgContextConsumer] live refresh every ${interval}ms (granularity=${gran}ms)`);
+      this._liveRefreshTimer = setInterval(() => {
+        if (this._active) this._fetchAndApply();
+      }, interval);
+    } else if (!isLive && this._liveRefreshTimer) {
+      clearInterval(this._liveRefreshTimer);
+      this._liveRefreshTimer = null;
+    }
+  }
+
+  _stopLiveRefresh() {
+    if (this._liveRefreshTimer) {
+      clearInterval(this._liveRefreshTimer);
+      this._liveRefreshTimer = null;
+    }
+  }
+
+  /**
    * Apply context values to player tunables.
    * Only sets values that the server provides; player uses ?? defaults for missing.
    */
@@ -158,10 +189,15 @@ export class NgPlaybackContextConsumer {
     // ── Seek hints ──
     const seek = ctx.seek;
     if (seek) {
-      // maxClientCoalesceMs → seek debounce timeout (player hardcodes 300ms)
+      // maxClientCoalesceMs → seek debounce timeout (player hardcodes 300ms).
+      // Cap at 500ms: the server advertises the MAX the client is ALLOWED to
+      // coalesce, but the PWA's stream-restart architecture (abort immediately,
+      // restart after debounce) means long windows leave the user staring at
+      // "Loading..." with no video. 500ms is enough to coalesce rapid FF bursts
+      // without the UX penalty of 1500ms.
       if (typeof seek.maxClientCoalesceMs === 'number' && seek.maxClientCoalesceMs > 0) {
-        player._seekCoalesceMs = seek.maxClientCoalesceMs;
-        console.debug(`[NgContextConsumer] seekCoalesceMs=${seek.maxClientCoalesceMs}`);
+        player._seekCoalesceMs = Math.min(seek.maxClientCoalesceMs, 500);
+        console.debug(`[NgContextConsumer] seekCoalesceMs=${player._seekCoalesceMs} (server max=${seek.maxClientCoalesceMs})`);
       }
 
       // minSeekIntervalMs → minimum time between seeks (for rate limiting)
@@ -196,11 +232,27 @@ export class NgPlaybackContextConsumer {
       player._ngDurationMs = ctx.durationMs;
     }
 
+    // ── Live edge ──
+    const live = ctx.live;
+    if (live && live.isLive) {
+      if (typeof live.safeSeekEndMs === 'number' && live.safeSeekEndMs > 0) {
+        player._ngLiveSafeSeekEndMs = live.safeSeekEndMs;
+      }
+      if (typeof live.playableEndMs === 'number' && live.playableEndMs > 0) {
+        player._ngLivePlayableEndMs = live.playableEndMs;
+      }
+      console.debug(`[NgContextConsumer] live: safeSeekEnd=${live.safeSeekEndMs}ms playableEnd=${live.playableEndMs}ms`);
+    } else {
+      player._ngLiveSafeSeekEndMs = null;
+      player._ngLivePlayableEndMs = null;
+    }
+
     console.debug('[NgContextConsumer] Applied context:', {
       seekCoalesceMs: player._seekCoalesceMs,
       prebufferSec: player._prebufferSec,
       seekGranularityMs: player._seekGranularityMs,
       durationMs: player._ngDurationMs,
+      livePlayableEndMs: player._ngLivePlayableEndMs,
     });
   }
 
@@ -215,5 +267,7 @@ export class NgPlaybackContextConsumer {
     player._seekGranularityMs = undefined;
     player._prebufferSec = undefined;
     player._ngDurationMs = undefined;
+    player._ngLivePlayableEndMs = null;
+    player._ngLiveSafeSeekEndMs = null;
   }
 }

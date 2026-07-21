@@ -132,6 +132,10 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.video.addEventListener('ended', () => {
+      // In bridge mode, endOfStream() is called during MediaSource teardown on
+      // seek — the video fires 'ended' but we are about to restart the stream.
+      // Only transition to EOS when NOT mid-seek (seeking flag or debounce timer).
+      if (this.bridgeMode && (this.seeking || this._seekDebounceTimer)) return;
       this.state = PlayerState.EOS;
       this.dispatchEvent(new CustomEvent('eos'));
     });
@@ -685,9 +689,15 @@ export class MediaPlayer extends EventTarget {
         // decodable). Fallbacks: a fuller buffer if readyState lags, and a byte
         // ceiling so odd/short sources never hang. All thresholds overridable
         // via _fastStartSec / _prebufferSec.
+        // For seek restarts (_wasPlayingBeforeSeek), use aggressive thresholds —
+        // we already proved the stream works; minimize Loading... time.
         if (!autoPlayed && (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
-          const FAST_START_SEC = this._fastStartSec ?? 0.25;   // min margin above frame 1
-          const PREBUFFER_SEC = this._prebufferSec ?? 0.6;     // full-buffer fallback (was 1.2)
+          // Use aggressive seek thresholds only when NG context confirmed the
+          // stream (server-authoritative seek). Legacy servers keep safe defaults.
+          const isSeekResume = this._wasPlayingBeforeSeek;
+          const hasNgContext = (this._seekCoalesceMs != null);
+          const FAST_START_SEC = (isSeekResume && hasNgContext) ? 0.1 : (this._fastStartSec ?? 0.25);
+          const PREBUFFER_SEC = (isSeekResume && hasNgContext) ? 0.3 : (this._prebufferSec ?? 0.6);
           const br = this.sourceBuffer && this.sourceBuffer.buffered;
           const bufferedSec = (br && br.length) ? (br.end(br.length - 1) - br.start(0)) : 0;
           const ready =
@@ -696,7 +706,7 @@ export class MediaPlayer extends EventTarget {
             this.video.readyState >= 4 /* HAVE_ENOUGH_DATA */ ||
             totalBytes > 4 * 1024 * 1024;
           if (ready) {
-            console.log(`[MediaPlayer] Bridge auto-playing: buffered=${bufferedSec.toFixed(2)}s bytes=${(totalBytes / 1024).toFixed(0)}KB readyState=${this.video.readyState}`);
+            console.log(`[MediaPlayer] Bridge auto-playing: buffered=${bufferedSec.toFixed(2)}s bytes=${(totalBytes / 1024).toFixed(0)}KB readyState=${this.video.readyState}${isSeekResume ? ' (seek fast-start)' : ''}`);
             this._wasPlayingBeforeSeek = false;
             this.play();
             autoPlayed = true;
@@ -786,6 +796,8 @@ export class MediaPlayer extends EventTarget {
       // A decode/append error on a remux stream: force a full transcode.
       this._forceMsproxyTranscodeFallback();
     });
+    // Cache the successful MIME so seek restarts can skip codec sniffing
+    this._cachedBridgeMime = mime;
     console.log(`[MediaPlayer] Dynamic SourceBuffer: ${mime}`);
     return true;
   }
@@ -1366,6 +1378,23 @@ export class MediaPlayer extends EventTarget {
     if (!isFinite(timeSec) || timeSec < 0) return;
 
     if (this.bridgeMode && this._bridgeFilePath) {
+      // ── Live-edge guard (applies to ALL seek paths) ──
+      // Uses server-authoritative safeSeekEndMs from NG context.
+      if (this._ngLiveSafeSeekEndMs && timeMS > this._ngLiveSafeSeekEndMs) {
+        const currentPosMs = this.getMediaTimeMillis();
+        const nearEdge = currentPosMs >= (this._ngLiveSafeSeekEndMs - (this._seekGranularityMs || 5000));
+        if (nearEdge) {
+          // Already at the edge — ignore the seek entirely
+          console.debug(`[MediaPlayer] Live-edge ignore: at ${currentPosMs}ms, target ${timeMS}ms > safeEnd ${this._ngLiveSafeSeekEndMs}ms — already at edge`);
+          return;
+        } else {
+          // Far from edge — clamp to the safe boundary (skip lands at live edge)
+          console.debug(`[MediaPlayer] Live-edge clamp: target ${timeMS}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
+          timeMS = this._ngLiveSafeSeekEndMs;
+          timeSec = timeMS / 1000;
+        }
+      }
+
       // ── 0) SERVER-AUTHORITATIVE PULL-XCODE (/msproxy) INITIAL SEEK ──
       // The initial seek (resume position or 0) arrives right after OPENURL,
       // while the first fetch is still deferred by _startInitialBridgeFetch.
@@ -1520,20 +1549,38 @@ export class MediaPlayer extends EventTarget {
     // Check again after async wait
     if (this._currentRestartId !== restartId) return;
 
-    // Defer SourceBuffer creation to the dynamic init-segment sniff in
-    // _startBridgeStream -> _ensureDynamicSourceBuffer, EXACTLY like the initial
-    // load. The restarted server transcode emits a fresh init segment whose REAL
-    // codec must be matched: browserhd (h264_nvenc) produces H.264 High@L5.0
-    // (avc1.6400xx) for a 2560x1440 source, but a hardcoded avc1.42E01E
-    // (Constrained Baseline L3.0, max 720x576) SourceBuffer rejects that first
-    // fragment — which tore the /msproxy stream down (MediaServer EOFException,
-    // transcode destroyed, endless spin) on any resume/out-of-buffer seek.
-    this.sourceBuffer = null;
-    this._sbPending = true;
-    this._initAccum = [];
-    this._initAccumLen = 0;
+    // If we have a cached MIME from the initial play of this file, create the
+    // SourceBuffer immediately (skip accumulation + codec sniffing). The server
+    // transcode produces the same codec for the same file, so the cached MIME is
+    // safe. Data flows straight to the SourceBuffer as it arrives — no JS-side
+    // moov accumulation delay. Falls back to dynamic sniffing if addSourceBuffer
+    // fails (shouldn't happen for same-file seeks).
+    if (this._cachedBridgeMime) {
+      try {
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(this._cachedBridgeMime);
+        this.sourceBuffer.mode = 'segments';
+        this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+        this.sourceBuffer.addEventListener('error', (e) => {
+          console.error('[MediaPlayer] SourceBuffer error:', e);
+          this._forceMsproxyTranscodeFallback();
+        });
+        this._sbPending = false;
+        console.log(`[MediaPlayer] Seek fast-path: reused cached MIME ${this._cachedBridgeMime}`);
+      } catch (e) {
+        console.warn(`[MediaPlayer] Cached MIME failed (${e && e.message}); falling back to sniff`);
+        this.sourceBuffer = null;
+        this._sbPending = true;
+        this._initAccum = [];
+        this._initAccumLen = 0;
+      }
+    } else {
+      this.sourceBuffer = null;
+      this._sbPending = true;
+      this._initAccum = [];
+      this._initAccumLen = 0;
+    }
 
-    // Now start the new stream (SourceBuffer created from the sniffed codecs).
+    // Now start the new stream.
     this._startBridgeStream(filePath, seekSec);
   }
 
