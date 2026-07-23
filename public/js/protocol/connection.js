@@ -25,6 +25,7 @@ import { StreamInflater, initCompression } from './compression.js';
 import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
+import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -951,83 +952,121 @@ export class MiniClientConnection extends EventTarget {
     const canNative = (mime) => {
       try { return v.canPlayType(mime) === 'probably'; } catch { return false; }
     };
-    // For NON-TIZEN native surface, 'maybe' is acceptable for HEVC/EAC3 when
-    // the browser has a hardware decoder. Chrome reports 'maybe' for HEVC even
-    // with working GPU decode. Tizen has its own whitelist system — never
-    // override it. The caller must await _validateHwDecode() before trusting.
     const isTizen = !!(this.platformDetector && this.platformDetector.isTizen && this.platformDetector.isTizen());
     const canNativeMaybe = (mime) => {
-      if (isTizen) return false;  // Tizen uses its own whitelist
+      if (isTizen) return false;
       try { return !!v.canPlayType(mime); } catch { return false; }
     };
     const canMse = (mime) => {
       try { return !!(MS && MS.isTypeSupported && MS.isTypeSupported(mime)); } catch { return false; }
     };
 
-    // ── pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer ──
-    const mse = { video: [], audio: [], containers: [] };
-    if (canMse('video/mp4; codecs="avc1.42E01E"')) mse.video.push('H264');
-    if (canMse('video/mp4; codecs="hvc1.1.6.L120.90"') ||
-        canMse('video/mp4; codecs="hev1.1.6.L120.90"')) mse.video.push('HEVC');
-    if (canMse('video/mp4; codecs="vp09.00.10.08"')) mse.video.push('VP9');
-    if (canMse('video/mp4; codecs="av01.0.08M.08"')) mse.video.push('AV1');
-    if (canMse('audio/mp4; codecs="mp4a.40.2"')) mse.audio.push('AAC');
-    if (canMse('audio/mp4; codecs="mp4a.40.5"')) mse.audio.push('HE-AAC');
-    if (canMse('audio/mpeg')) mse.audio.push('MP3');
-    if (canMse('audio/mp4; codecs="ac-3"')) mse.audio.push('AC3');
-    if (canMse('audio/mp4; codecs="ec-3"')) mse.audio.push('EAC3');
-    if (canMse('audio/mp4; codecs="opus"')) mse.audio.push('OPUS');
-    // MSE ingestion is fMP4 only. Only advertise MP4 when the surface can
-    // decode anything at all.
-    if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+    // ── Fast path: use pre-computed codec probe results ───────────────
+    // The codec probe (codec-probe.js) ran during app init while the
+    // connect screen was visible. If complete, its results are more
+    // thorough (includes decodingInfo hardware validation) than the
+    // inline canPlayType checks below.
+    const probeResults = getProbeResults();
+    let mse, native;
 
-    // ── pwa_native: what <video src=...> can decode via native decoder ──
-    const native = { video: [], audio: [], containers: [] };
-    if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
-    // HEVC: accept 'maybe' — Chrome/Edge reports 'maybe' for HEVC even with working
-    // GPU hardware decode (HEVC Video Extensions). Native pull/<video src> handles it
-    // fine; bridge transcode fallback exists for MSE path.
-    if (canNativeMaybe('video/mp4; codecs="hvc1"') || canNativeMaybe('video/mp4; codecs="hev1"') ||
-        canNativeMaybe('video/mp4; codecs="hvc1.1.6.L120.90"')) {
-      native.video.push('HEVC');
-      this._hevcPendingValidation = true;  // will be removed if GPU check fails
-    }
-    if (canNative('video/mp4; codecs="mp4v.20.8"') ||
-        canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
-    if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
-    if (canNative('video/webm; codecs="vp9"') ||
-        canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
-    if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
-    if (canNative('audio/mp4; codecs="mp4a.40.2"') || canNative('audio/mp4')) native.audio.push('AAC');
-    if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
-    if (canNative('audio/mpeg')) native.audio.push('MP3');
-    if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
-    // EAC3: accept 'maybe' — same reasoning as HEVC. Windows Chrome can decode
-    // E-AC-3 natively via platform codecs but reports 'maybe'.
-    if (canNativeMaybe('audio/eac3') || canNativeMaybe('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
-    if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
-        canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
-    if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
-    // Chrome/Edge return 'maybe' (not 'probably') for generic 'video/mp4' —
-    // canNative rejects it. But if any MP4-based codec passed its probe above
-    // (H264, HEVC, AAC, etc.) then the MP4 container is obviously supported.
-    // Without MP4 here, the server's surfaceWantsFmp4() never fires and the
-    // native xcode path (HEVC copy + audio transcode → fMP4) can't activate.
-    if (canNative('video/mp4') || canNativeMaybe('video/mp4') ||
-        native.video.length || native.audio.length) {
-      native.containers.push('MP4');
-    }
-    if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
-    if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
-    if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
-    // HLS is a container-like delivery mode. Reported here as a container so
-    // the server can match .m3u8 sources; also declared as a delivery mode on
-    // the surface itself.
-    if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
-      // HLS carries MPEG2-TS segments; the mp2t container check above already
-      // covers native TS decode, but declare HLS explicitly so a Sage HLS URL
-      // resolves as a valid pull target.
-      if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
+    if (probeResults && probeResults.complete) {
+      console.log('[PlaybackSurfaces] Using pre-computed codec probe results');
+      // Build MSE codec list from probe
+      mse = { video: [], audio: [], containers: [] };
+      for (const r of probeResults.video) {
+        if (r.mse) {
+          const name = r.name.startsWith('HEVC') ? 'HEVC' : (r.name.startsWith('H264') ? 'H264' : r.name);
+          if (!mse.video.includes(name)) mse.video.push(name);
+        }
+      }
+      for (const r of probeResults.audio) {
+        if (r.mse) {
+          if (!mse.audio.includes(r.name)) mse.audio.push(r.name);
+        }
+      }
+      if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+
+      // Build native codec list from probe
+      native = { video: [], audio: [], containers: [] };
+      for (const r of probeResults.video) {
+        if (r.native) {
+          const name = r.name.startsWith('HEVC') ? 'HEVC' : (r.name.startsWith('H264') ? 'H264' : r.name);
+          if (!native.video.includes(name)) {
+            native.video.push(name);
+            if (name === 'HEVC') this._hevcPendingValidation = true;
+          }
+        }
+      }
+      for (const r of probeResults.audio) {
+        if (r.native && !native.audio.includes(r.name)) native.audio.push(r.name);
+      }
+      for (const r of probeResults.containers) {
+        if (r.native && !native.containers.includes(r.name)) native.containers.push(r.name);
+      }
+      // MP4 container inference (same as inline path below)
+      if (!native.containers.includes('MP4') && (native.video.length || native.audio.length)) {
+        native.containers.push('MP4');
+      }
+
+      // Log suspicious codecs (canPlayType yes but decodingInfo no)
+      for (const r of [...probeResults.video, ...probeResults.audio]) {
+        if (r.confidence === 'suspicious') {
+          console.warn(`[PlaybackSurfaces] ${r.name}: canPlayType=${r.nativeVal} but decodingInfo.supported=false — SUSPICIOUS`);
+        }
+      }
+    } else {
+      // ── Inline fallback: probe hasn't completed yet ──────────────
+      if (probeResults) {
+        console.log('[PlaybackSurfaces] Codec probe not yet complete — using inline canPlayType');
+      }
+
+      // pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer
+      mse = { video: [], audio: [], containers: [] };
+      if (canMse('video/mp4; codecs="avc1.42E01E"')) mse.video.push('H264');
+      if (canMse('video/mp4; codecs="hvc1.1.6.L120.90"') ||
+          canMse('video/mp4; codecs="hev1.1.6.L120.90"')) mse.video.push('HEVC');
+      if (canMse('video/mp4; codecs="vp09.00.10.08"')) mse.video.push('VP9');
+      if (canMse('video/mp4; codecs="av01.0.08M.08"')) mse.video.push('AV1');
+      if (canMse('audio/mp4; codecs="mp4a.40.2"')) mse.audio.push('AAC');
+      if (canMse('audio/mp4; codecs="mp4a.40.5"')) mse.audio.push('HE-AAC');
+      if (canMse('audio/mpeg')) mse.audio.push('MP3');
+      if (canMse('audio/mp4; codecs="ac-3"')) mse.audio.push('AC3');
+      if (canMse('audio/mp4; codecs="ec-3"')) mse.audio.push('EAC3');
+      if (canMse('audio/mp4; codecs="opus"')) mse.audio.push('OPUS');
+      if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+
+      // pwa_native: what <video src=...> can decode via native decoder
+      native = { video: [], audio: [], containers: [] };
+      if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
+      if (canNativeMaybe('video/mp4; codecs="hvc1"') || canNativeMaybe('video/mp4; codecs="hev1"') ||
+          canNativeMaybe('video/mp4; codecs="hvc1.1.6.L120.90"')) {
+        native.video.push('HEVC');
+        this._hevcPendingValidation = true;
+      }
+      if (canNative('video/mp4; codecs="mp4v.20.8"') ||
+          canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
+      if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
+      if (canNative('video/webm; codecs="vp9"') ||
+          canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
+      if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
+      if (canNative('audio/mp4; codecs="mp4a.40.2"') || canNative('audio/mp4')) native.audio.push('AAC');
+      if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
+      if (canNative('audio/mpeg')) native.audio.push('MP3');
+      if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
+      if (canNativeMaybe('audio/eac3') || canNativeMaybe('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
+      if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
+          canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
+      if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
+      if (canNative('video/mp4') || canNativeMaybe('video/mp4') ||
+          native.video.length || native.audio.length) {
+        native.containers.push('MP4');
+      }
+      if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
+      if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
+      if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
+      if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
+        if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
+      }
     }
 
     // Native surface capability pipeline:  (query ∪ whitelist) − blacklist

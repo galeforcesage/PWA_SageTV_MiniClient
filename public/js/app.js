@@ -7,6 +7,7 @@
 import { SessionManager } from './session/session-manager.js';
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js';
+import { runCodecProbe } from './media/codec-probe.js';
 
 // ── Globals ──────────────────────────────────────────────
 
@@ -382,6 +383,11 @@ async function runDiscovery({ force = false, silent = false, timeout = 0 } = {})
 // ── Initialization ───────────────────────────────────────
 
 async function init() {
+  // Codec smoke test — runs in background while connect screen loads.
+  // Results feed into _probePlaybackSurfaces() for truthful surface declarations.
+  // Fire-and-forget: completes in <250ms, cached for later use.
+  runCodecProbe().catch((e) => console.warn('[App] Codec probe failed:', e));
+
   // Register service worker. Skip on Tizen TV: it's a packaged local app
   // (no offline benefit) and aggressive SW caching defeats reinstall-based
   // updates of the wgt.
