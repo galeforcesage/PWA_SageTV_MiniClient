@@ -951,6 +951,15 @@ export class MiniClientConnection extends EventTarget {
     const canNative = (mime) => {
       try { return v.canPlayType(mime) === 'probably'; } catch { return false; }
     };
+    // For NON-TIZEN native surface, 'maybe' is acceptable for HEVC/EAC3 when
+    // the browser has a hardware decoder. Chrome reports 'maybe' for HEVC even
+    // with working GPU decode. Tizen has its own whitelist system — never
+    // override it. The caller must await _validateHwDecode() before trusting.
+    const isTizen = !!(this.platformDetector && this.platformDetector.isTizen && this.platformDetector.isTizen());
+    const canNativeMaybe = (mime) => {
+      if (isTizen) return false;  // Tizen uses its own whitelist
+      try { return !!v.canPlayType(mime); } catch { return false; }
+    };
     const canMse = (mime) => {
       try { return !!(MS && MS.isTypeSupported && MS.isTypeSupported(mime)); } catch { return false; }
     };
@@ -975,8 +984,14 @@ export class MiniClientConnection extends EventTarget {
     // ── pwa_native: what <video src=...> can decode via native decoder ──
     const native = { video: [], audio: [], containers: [] };
     if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
-    if (canNative('video/mp4; codecs="hvc1"') || canNative('video/mp4; codecs="hev1"') ||
-        canNative('video/mp4; codecs="hvc1.1.6.L120.90"')) native.video.push('HEVC');
+    // HEVC: accept 'maybe' — Chrome/Edge reports 'maybe' for HEVC even with working
+    // GPU hardware decode (HEVC Video Extensions). Native pull/<video src> handles it
+    // fine; bridge transcode fallback exists for MSE path.
+    if (canNativeMaybe('video/mp4; codecs="hvc1"') || canNativeMaybe('video/mp4; codecs="hev1"') ||
+        canNativeMaybe('video/mp4; codecs="hvc1.1.6.L120.90"')) {
+      native.video.push('HEVC');
+      this._hevcPendingValidation = true;  // will be removed if GPU check fails
+    }
     if (canNative('video/mp4; codecs="mp4v.20.8"') ||
         canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
     if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
@@ -987,11 +1002,21 @@ export class MiniClientConnection extends EventTarget {
     if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
     if (canNative('audio/mpeg')) native.audio.push('MP3');
     if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
-    if (canNative('audio/eac3') || canNative('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
+    // EAC3: accept 'maybe' — same reasoning as HEVC. Windows Chrome can decode
+    // E-AC-3 natively via platform codecs but reports 'maybe'.
+    if (canNativeMaybe('audio/eac3') || canNativeMaybe('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
     if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
         canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
     if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
-    if (canNative('video/mp4')) native.containers.push('MP4');
+    // Chrome/Edge return 'maybe' (not 'probably') for generic 'video/mp4' —
+    // canNative rejects it. But if any MP4-based codec passed its probe above
+    // (H264, HEVC, AAC, etc.) then the MP4 container is obviously supported.
+    // Without MP4 here, the server's surfaceWantsFmp4() never fires and the
+    // native xcode path (HEVC copy + audio transcode → fMP4) can't activate.
+    if (canNative('video/mp4') || canNativeMaybe('video/mp4') ||
+        native.video.length || native.audio.length) {
+      native.containers.push('MP4');
+    }
     if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
     if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
     if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
@@ -1055,11 +1080,15 @@ export class MiniClientConnection extends EventTarget {
       pwa_native: {
         route: 'native',
         priority: 100,
-        // Pull only. We deliberately do NOT advertise 'hls': the server's HLS
-        // path routes through the legacy iOS HTTPLS subsystem (480x272 stale
-        // tiers). Non-natively-decodable content goes to pwa_mse (bridge
-        // transcode) instead, which produces proper HD fMP4.
-        deliveryModes: 'pull',
+        // pull: direct-play (no transcode). The native <video> element decodes
+        //       the raw bitstream.
+        // pull-xcode: audio-transcode / remux. The server conditions the stream
+        //       (e.g. HEVC video copy + AC-4→AAC audio transcode) into fMP4 via
+        //       MediaServer, and the native <video> element decodes it. This
+        //       avoids MSE HEVC limitations — native <video src=url> handles
+        //       HEVC when the browser has platform decoder support (HEVC Video
+        //       Extensions on Windows Edge/Chrome).
+        deliveryModes: 'pull,pull-xcode',
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
@@ -1138,8 +1167,56 @@ export class MiniClientConnection extends EventTarget {
 
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
     console.log('[PlaybackSurfaces] pwa_mse:   ', JSON.stringify(this._playbackSurfaces.pwa_mse));
+
+    // GPU validation via mediaCapabilities.decodingInfo() is advisory only.
+    // On Edge/Windows it often returns supported=false for HEVC even though
+    // canPlayType returns 'maybe' and native <video> playback works fine.
+    // canPlayType is authoritative for native pull — don't let decodingInfo veto it.
+    if (this._hevcPendingValidation) {
+      if (MiniClientConnection._hevcHwValidated === false) {
+        console.warn('[PlaybackSurfaces] HEVC GPU pre-validate FAIL — keeping HEVC anyway (canPlayType authoritative for native pull)');
+      }
+      this._hevcPendingValidation = false;
+    }
+
     return this._playbackSurfaces;
   }
+
+  /**
+   * Validate HEVC hardware decode via MediaCapabilities API.
+   * Returns true if the GPU can decode HEVC; false otherwise.
+   */
+  async _validateHevcHwDecode() {
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
+      // API not available — trust the 'maybe' (fallback exists at runtime)
+      console.log('[PlaybackSurfaces] mediaCapabilities unavailable — trusting HEVC maybe');
+      return true;
+    }
+    try {
+      const result = await navigator.mediaCapabilities.decodingInfo({
+        type: 'file',
+        video: {
+          contentType: 'video/mp4; codecs="hvc1.1.6.L120.90"',
+          width: 1920,
+          height: 1080,
+          framerate: 30,
+          bitrate: 10000000,
+        },
+      });
+      const ok = result.supported && result.powerEfficient;
+      console.log(`[PlaybackSurfaces] HEVC GPU validate: supported=${result.supported} smooth=${result.smooth} powerEfficient=${result.powerEfficient} → ${ok ? 'PASS' : 'FAIL'}`);
+      return ok;
+    } catch (e) {
+      console.warn('[PlaybackSurfaces] HEVC GPU validate error:', e.message);
+      return true;  // err on side of trying — runtime fallback exists
+    }
+  }
+
+  /**
+   * Run GPU validation at class load time so result is available synchronously
+   * when _probePlaybackSurfaces() runs during connection setup.
+   */
+  static _hevcHwValidated = null; // null = pending, true = hw ok, false = no hw
 
   /**
    * Resolve the client's preferred audio language as an ISO 639-2 3-letter
@@ -2786,6 +2863,17 @@ export class MiniClientConnection extends EventTarget {
             const hostPort = `${this.serverHost}:${this.serverPort}`;
             urlString = urlString.split('HOSTNAME').join(hostPort);
           }
+          // ── NG Format Hint (ng_fmt) ──────────────────────────────────────
+          // NG servers append ?ng_fmt=containerMime,videoMime,audioMime to the
+          // OPENURL so the client can configure its decoder pipeline immediately
+          // without probing/sniffing the stream. Strip it before passing the URL
+          // to the player (it's metadata, not part of the media path).
+          const ngFmt = this._parseNgFmt(urlString);
+          if (ngFmt.hint) {
+            urlString = ngFmt.cleanUrl;
+            console.log(`[Media] ng_fmt: container=${ngFmt.hint.container || '?'} video=${ngFmt.hint.video || '?'} audio=${ngFmt.hint.audio || '?'}`);
+          }
+
           const isPush = urlString.startsWith('push:');
           const isStv = urlString.startsWith('stv://');
           const isAbsPath = urlString.startsWith('/');
@@ -2795,6 +2883,9 @@ export class MiniClientConnection extends EventTarget {
           this.playbackContextManager.onMediaOpen(urlString);
           this.dispatchEvent(new CustomEvent('mediaopen', { detail: { url: urlString } }));
 
+          // Pass format hint to the media player for fast-path decoder setup.
+          this.mediaPlayer.setFormatHint(ngFmt.hint);
+
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
           // it verbatim via the /msproxy thin proxy and skip all client-side
@@ -2802,8 +2893,8 @@ export class MiniClientConnection extends EventTarget {
           // stv://); push is retired and iosstream is a legacy-only construct.
           const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
           if (msRoute) {
-            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
-            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0);
+            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
             this._sendMediaReturn(1);
             break;
           }
@@ -3077,6 +3168,43 @@ export class MiniClientConnection extends EventTarget {
     else if (token === 'mpeg2psremux' || token === 'remux:ps') mode = 'remux:ps';
     else mode = 'xcode:' + token; // browserhd, browserhd_copyv, or any quality key
     return { path, mode: mode + params };
+  }
+
+  /**
+   * Parse the NG format hint (ng_fmt) from a URL string.
+   * Returns { hint: {container, video, audio} | null, cleanUrl: string }.
+   * If ng_fmt is absent, hint is null and cleanUrl === input.
+   */
+  _parseNgFmt(url) {
+    // Match ?ng_fmt=... or &ng_fmt=... (value is up to next & or end)
+    const re = /([?&])ng_fmt=([^&]*)/;
+    const m = url.match(re);
+    if (!m) return { hint: null, cleanUrl: url };
+
+    const raw = decodeURIComponent(m[2]);
+    const parts = raw.split(',');
+    const hint = {
+      container: (parts[0] || '').trim() || null,
+      video: (parts[1] || '').trim() || null,
+      audio: (parts[2] || '').trim() || null,
+    };
+
+    // Strip ng_fmt param from URL
+    let clean = url;
+    if (m[1] === '?') {
+      // ng_fmt was the first (or only) query param
+      const after = url.substring(m.index + m[0].length);
+      if (after.startsWith('&')) {
+        clean = url.substring(0, m.index) + '?' + after.substring(1);
+      } else {
+        clean = url.substring(0, m.index) + after;
+      }
+    } else {
+      // ng_fmt was a subsequent &param
+      clean = url.substring(0, m.index) + url.substring(m.index + m[0].length);
+    }
+
+    return { hint, cleanUrl: clean };
   }
 
   _sendMediaReturnLong(value) {
@@ -3714,6 +3842,32 @@ export class MiniClientConnection extends EventTarget {
     this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'user' } }));
   }
 }
+
+// ── Static HEVC GPU validation (runs once at module load) ──────────────
+// Probes the MediaCapabilities API to confirm hardware HEVC decode.
+// Result is available synchronously when _probePlaybackSurfaces() runs.
+(async () => {
+  if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
+    MiniClientConnection._hevcHwValidated = true; // trust 'maybe' when API unavailable
+    return;
+  }
+  try {
+    const result = await navigator.mediaCapabilities.decodingInfo({
+      type: 'file',
+      video: {
+        contentType: 'video/mp4; codecs="hvc1.1.6.L120.90"',
+        width: 1920,
+        height: 1080,
+        framerate: 30,
+        bitrate: 10000000,
+      },
+    });
+    MiniClientConnection._hevcHwValidated = !!(result.supported && result.powerEfficient);
+    console.log(`[PlaybackSurfaces] HEVC GPU pre-validate: supported=${result.supported} powerEfficient=${result.powerEfficient} → ${MiniClientConnection._hevcHwValidated ? 'PASS' : 'FAIL'}`);
+  } catch (e) {
+    MiniClientConnection._hevcHwValidated = true; // err on trying
+  }
+})();
 
 // ── Utility ──────────────────────────────────────────────
 

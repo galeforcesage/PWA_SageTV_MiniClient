@@ -99,8 +99,74 @@ export class MediaPlayer extends EventTarget {
     this._telemetrySequence = 0;
     this._reportedFailureKeys = new Set();
 
+    // NG format hint (ng_fmt) — set by connection.js before load
+    this._formatHint = null;
+
     // Bind video events
     this._setupVideoEvents();
+  }
+
+  // ── NG Format Hint (ng_fmt) ──────────────────────────────────────────────
+  // Server-provided container/video/audio MIME types that let us configure
+  // the decoder pipeline immediately without sniffing the init segment.
+
+  /**
+   * Set the format hint for the next media load. Called by connection.js
+   * after parsing ng_fmt from the OPENURL. Null clears any previous hint.
+   */
+  setFormatHint(hint) {
+    this._formatHint = hint || null;
+  }
+
+  /**
+   * Map ng_fmt MIME types to MSE-compatible codec strings for SourceBuffer
+   * creation. Returns {video, audio} with MSE codec strings or null.
+   * These are "good enough" defaults — the exact profile/level from the
+   * init segment may differ, but MSE SourceBuffer is flexible within the
+   * same codec family.
+   */
+  _ngFmtToMseCodecs(hint) {
+    if (!hint) return null;
+    const videoMap = {
+      'video/hevc': 'hvc1.1.6.L120.90',
+      'video/avc': 'avc1.640028',
+      'video/mp4v-es': 'mp4v.20.8',
+      'video/x-ms-wmv': null,  // VC1 — not MSE-compatible
+      'video/mpeg2': null,     // MPEG-2 — not MSE-compatible
+    };
+    const audioMap = {
+      'audio/mp4a-latm': 'mp4a.40.2',
+      'audio/ac3': 'ac-3',
+      'audio/eac3': 'ec-3',
+      'audio/ac4': 'ac-4',
+      'audio/mpeg': 'mp3',
+      'audio/mpeg-L2': null,   // MP2 — not MSE-compatible
+      'audio/flac': 'flac',
+      'audio/vorbis': 'vorbis',
+      'audio/vnd.dts': null,   // DTS — not MSE-compatible
+      'audio/vnd.dts.hd': null,
+      'audio/alac': 'alac',
+    };
+    return {
+      video: (hint.video && videoMap[hint.video] !== undefined) ? videoMap[hint.video] : null,
+      audio: (hint.audio && audioMap[hint.audio] !== undefined) ? audioMap[hint.audio] : null,
+    };
+  }
+
+  /**
+   * Map ng_fmt MIME types to canPlayType()-compatible MIME strings for native
+   * <video src> validation. Returns the full MIME with codecs, or null.
+   */
+  _ngFmtToNativeMime(hint) {
+    if (!hint) return null;
+    const codecs = this._ngFmtToMseCodecs(hint);
+    if (!codecs) return null;
+    const parts = [];
+    if (codecs.video) parts.push(codecs.video);
+    if (codecs.audio) parts.push(codecs.audio);
+    if (!parts.length) return null;
+    // Use video/mp4 as the container for canPlayType validation
+    return `video/mp4; codecs="${parts.join(',')}"`;
   }
 
   _setupVideoEvents() {
@@ -120,6 +186,9 @@ export class MediaPlayer extends EventTarget {
       if (!this._userMuted && this.video.muted) {
         try { this.video.muted = false; } catch { /* ignore */ }
       }
+      // Start gap monitor for bridge mode — catches tiny timestamp
+      // discontinuities that MSE decoders stall or click on.
+      if (this.bridgeMode) this._startGapMonitor();
     });
 
     this.video.addEventListener('pause', () => {
@@ -154,14 +223,25 @@ export class MediaPlayer extends EventTarget {
         const path = this._pullFilePath;
         const host = this._pullHostname;
         console.warn(`[MediaPlayer] Native pull decode failed (code=${this.video.error?.code} msg=${this.video.error?.message}); retrying via bridge transcode for ${path}`);
+        // Gate any server PLAY that arrives while bridge setup is async.
+        // Without this, play() calls video.play() on a MediaSource still in
+        // 'closed' state, which poisons sourceopen and hangs forever.
+        let resolveLoad;
+        this._loadingPromise = new Promise(r => { resolveLoad = r; });
         this._loadBridgeMode(path, host).then(() => {
-          // The server already sent MEDIACMD_PLAY before the native decode
-          // error triggered this fallback. Resume playback automatically —
-          // the server won't re-send PLAY.
-          if (this.state === PlayerState.PLAY || this.state === PlayerState.LOADED) {
-            this._doPlay();
+          resolveLoad();
+          this._loadingPromise = null;
+          // Don't call _doPlay() here — the MediaSource has no data yet.
+          // Instead, mark the intent; the bridge data loop's auto-play
+          // (in _startBridgeStream) will call play() once enough data is
+          // buffered and readyState is adequate.
+          if (this.state !== PlayerState.PLAY) {
+            this.state = PlayerState.PLAY;
           }
+          console.log('[MediaPlayer] Bridge fallback ready, waiting for data to auto-play');
         }).catch((err) => {
+          resolveLoad();
+          this._loadingPromise = null;
           console.error('[MediaPlayer] Bridge transcode fallback failed:', err);
           this.state = PlayerState.STOPPED;
           this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
@@ -182,6 +262,11 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.video.addEventListener('waiting', () => {
+      // In bridge mode, try to jump past small buffered gaps caused by
+      // timestamp discontinuities (ffmpeg aresample=async inserts tiny gaps
+      // when correcting audio drift). MSE decoders stall on these gaps
+      // unlike native decoders which absorb them silently.
+      if (this.bridgeMode && this._tryJumpGap()) return;
       this.dispatchEvent(new CustomEvent('buffering'));
     });
   }
@@ -361,6 +446,20 @@ export class MediaPlayer extends EventTarget {
 
     console.log(`[MediaPlayer] PULL mode: ${mediaUrl}`);
 
+    // ng_fmt pre-validation: if the hint tells us this container+codec combo
+    // isn't natively decodable, skip the attempt and route directly to bridge
+    // transcode. Avoids the "try native → error → bridge fallback" cycle.
+    if (this._formatHint && absPath && !mediaUrl.includes('.m3u8') && !mediaUrl.includes('format=hls')) {
+      const nativeMime = this._ngFmtToNativeMime(this._formatHint);
+      if (nativeMime && !this.video.canPlayType(nativeMime)) {
+        console.warn(`[MediaPlayer] ng_fmt pre-validate FAIL for pull: ${nativeMime} — routing to bridge transcode`);
+        this._pullFallbackTried = true;  // skip the error-handler retry
+        await this._loadBridgeMode(absPath, hostname);
+        this.state = PlayerState.LOADED;
+        return;
+      }
+    }
+
     // Check if HLS
     if (mediaUrl.includes('.m3u8') || mediaUrl.includes('format=hls')) {
       await this._loadHLS(mediaUrl);
@@ -423,7 +522,7 @@ export class MediaPlayer extends EventTarget {
    * @param {string} hostname SageTV host
    * @param {number} [seekSec=0]
    */
-  async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
+  async loadMsProxy(absPath, mode, hostname, seekSec = 0, surface = '') {
     this.stop();
     this.serverEOS = false;
     this._totalPushed = 0;
@@ -438,11 +537,43 @@ export class MediaPlayer extends EventTarget {
     try {
       const base = (this._bridgeBase || '').replace(/\/$/, '');
       const msUrl = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}`;
-      console.log(`[MediaPlayer] MSPROXY mode=${mode}: ${msUrl}`);
+      console.log(`[MediaPlayer] MSPROXY mode=${mode} surface=${surface}: ${msUrl}`);
 
       if (mode && mode.startsWith('xcode:')) {
-        // Server emits fragmented MP4 — feed MSE via the shared bridge machinery,
-        // but sourced from /msproxy (override consumed by _startBridgeStream).
+        // pwa_native + xcode: the server conditioned the stream (e.g. HEVC copy +
+        // audio transcode) into fMP4 for native <video> decode. Route to native
+        // element — avoids MSE HEVC limitations. The native decoder handles HEVC
+        // when the browser has platform support (HEVC Video Extensions on Windows).
+        if (surface === 'pwa_native') {
+          // ng_fmt pre-validation: if the hint says the video codec is something
+          // this browser can't natively play, skip the attempt and route through
+          // MSE bridge transcode instead of waiting for a silent videoWidth=0 failure.
+          if (this._formatHint && this._formatHint.video) {
+            const nativeMime = this._ngFmtToNativeMime(this._formatHint);
+            if (nativeMime && !this.video.canPlayType(nativeMime)) {
+              console.warn(`[MediaPlayer] ng_fmt pre-validate FAIL for native: ${nativeMime} — routing to MSE bridge`);
+              this._msproxyStreamUrl = msUrl;
+              this._msproxyAbsPath = absPath;
+              this._msproxyMode = mode;
+              await this._loadBridgeMode(absPath, hostname, null);
+              return;
+            }
+          }
+
+          console.log(`[MediaPlayer] Native xcode path (surface=pwa_native): <video src> for ${mode}`);
+          this.pushMode = false;
+          this.bridgeMode = false;
+          this._nativeXcodeMode = true;  // track for seek handling
+          this._msproxyAbsPath = absPath;
+          this._msproxyMode = mode;
+          this.video.src = msUrl;
+          this.video.load();
+          this.state = PlayerState.LOADED;
+          return;
+        }
+
+        // pwa_mse + xcode: feed MSE via the shared bridge machinery,
+        // sourced from /msproxy (override consumed by _startBridgeStream).
         this._msproxyStreamUrl = msUrl;
         this._msproxyAbsPath = absPath;   // for the force-full-transcode safety net
         this._msproxyMode = mode;
@@ -475,6 +606,7 @@ export class MediaPlayer extends EventTarget {
     this._bridgeFilePath = filePath;
     this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
+    this._ngFmtAttempted = false;  // allow ng_fmt fast-path for this stream
     // Set up MSE
     const MSClass = this._getMediaSourceClass();
     if (!MSClass) {
@@ -527,6 +659,7 @@ export class MediaPlayer extends EventTarget {
     if (this._initialFetchTimer) { clearTimeout(this._initialFetchTimer); this._initialFetchTimer = null; }
     this._initialFetchStarted = false;
     this._pendingInitialSeekSec = 0;
+    console.log(`[MediaPlayer] _startInitialBridgeFetch: msproxyStreamUrl=${!!this._msproxyStreamUrl} bridgeBase=${this._bridgeBase}`);
     if (!this._msproxyStreamUrl) {
       this._initialFetchStarted = true;
       this._startBridgeStream(filePath, 0);
@@ -691,7 +824,7 @@ export class MediaPlayer extends EventTarget {
         // via _fastStartSec / _prebufferSec.
         // For seek restarts (_wasPlayingBeforeSeek), use aggressive thresholds —
         // we already proved the stream works; minimize Loading... time.
-        if (!autoPlayed && (this.state === PlayerState.LOADED || this._wasPlayingBeforeSeek)) {
+        if (!autoPlayed && (this.state === PlayerState.LOADED || this.state === PlayerState.PLAY || this._wasPlayingBeforeSeek)) {
           // Use aggressive seek thresholds only when NG context confirmed the
           // stream (server-authoritative seek). Legacy servers keep safe defaults.
           const isSeekResume = this._wasPlayingBeforeSeek;
@@ -742,11 +875,56 @@ export class MediaPlayer extends EventTarget {
    * true when created, false when the moov isn't complete yet (keep reading),
    * or the string 'fallback' when it triggered a full-transcode reload (caller
    * must stop processing this stream).
+   *
+   * Fast path: when ng_fmt hint is available, attempts to create the
+   * SourceBuffer immediately using the hinted codec strings. If the hint
+   * fails validation or addSourceBuffer, falls through to normal sniffing.
    */
   _ensureDynamicSourceBuffer() {
     const MSClass = this._getMediaSourceClass();
     if (!MSClass || !this.mediaSource || this.mediaSource.readyState !== 'open') return false;
 
+    // ── Fast path: ng_fmt hint ──────────────────────────────────────────
+    // If the server provided format info, try to create SourceBuffer without
+    // waiting for the full moov. This eliminates init-segment sniff latency.
+    if (this._formatHint && !this._ngFmtAttempted) {
+      this._ngFmtAttempted = true;
+      const hintCodecs = this._ngFmtToMseCodecs(this._formatHint);
+      if (hintCodecs && (hintCodecs.video || hintCodecs.audio)) {
+        const parts = [];
+        if (hintCodecs.video) parts.push(hintCodecs.video);
+        if (hintCodecs.audio) parts.push(hintCodecs.audio);
+        const hintMime = `video/mp4; codecs="${parts.join(',')}"`;
+        try {
+          if (MSClass.isTypeSupported(hintMime)) {
+            this.sourceBuffer = this.mediaSource.addSourceBuffer(hintMime);
+            this.sourceBuffer.mode = 'segments';
+            this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+            this.sourceBuffer.addEventListener('error', (e) => {
+              console.error('[MediaPlayer] SourceBuffer error:', e);
+              this._forceMsproxyTranscodeFallback();
+            });
+            this._cachedBridgeMime = hintMime;
+            console.log(`[MediaPlayer] ng_fmt fast-path SourceBuffer: ${hintMime}`);
+            return true;
+          } else {
+            console.log(`[MediaPlayer] ng_fmt hint not supported by MSE: ${hintMime} — will sniff`);
+          }
+        } catch (e) {
+          console.warn(`[MediaPlayer] ng_fmt addSourceBuffer(${hintMime}) failed:`, e && e.message, '— will sniff');
+        }
+      } else if (hintCodecs) {
+        // Hint resolved but codecs are null (e.g. MPEG-2/VC1 not MSE-compatible).
+        // Pre-validation: if the video codec is unsupported by MSE, force full
+        // transcode immediately instead of waiting for sniff → fail → retry.
+        if (this._formatHint.video && !hintCodecs.video) {
+          console.warn(`[MediaPlayer] ng_fmt: video codec ${this._formatHint.video} is not MSE-compatible — forcing transcode`);
+          if (this._forceMsproxyTranscodeFallback()) return 'fallback';
+        }
+      }
+    }
+
+    // ── Normal path: sniff codecs from init segment ─────────────────────
     const bytes = this._concatChunks(this._initAccum, this._initAccumLen);
     let codecs = null;
     try { codecs = this._extractMp4Codecs(bytes); } catch (e) {
@@ -1292,6 +1470,7 @@ export class MediaPlayer extends EventTarget {
   stop() {
     this.video.pause();
     this._stopBandwidthTracking();
+    this._stopGapMonitor();
 
     // Clear seeking state
     if (this.seeking) {
@@ -1317,6 +1496,8 @@ export class MediaPlayer extends EventTarget {
       fetch(`${this._bridgeBase}/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
     }
     this.bridgeMode = false;
+    this._nativeXcodeMode = false;
+    this._nativeXcodeOffsetMs = 0;
     this._bridgeFilePath = null;
     this._bridgeTimeOffsetMs = 0;
     this._bridgeNeedTimeReset = false;
@@ -1326,6 +1507,8 @@ export class MediaPlayer extends EventTarget {
     this._sbPending = false;
     this._initAccum = null;
     this._initAccumLen = 0;
+    this._ngFmtAttempted = false;
+    this._formatHint = null;
 
     if (this._hls) {
       this._hls.destroy();
@@ -1374,35 +1557,31 @@ export class MediaPlayer extends EventTarget {
    * Seek to a position in milliseconds.
    */
   seek(timeMS) {
-    const timeSec = timeMS / 1000;
+    let timeSec = timeMS / 1000;
     if (!isFinite(timeSec) || timeSec < 0) return;
 
-    if (this.bridgeMode && this._bridgeFilePath) {
-      // ── Live-edge guard (applies to ALL seek paths) ──
-      // Uses server-authoritative safeSeekEndMs from NG context.
-      if (this._ngLiveSafeSeekEndMs && timeMS > this._ngLiveSafeSeekEndMs) {
-        const currentPosMs = this.getMediaTimeMillis();
-        const nearEdge = currentPosMs >= (this._ngLiveSafeSeekEndMs - (this._seekGranularityMs || 5000));
-        if (nearEdge) {
-          // Already at the edge — ignore the seek entirely
-          console.debug(`[MediaPlayer] Live-edge ignore: at ${currentPosMs}ms, target ${timeMS}ms > safeEnd ${this._ngLiveSafeSeekEndMs}ms — already at edge`);
-          return;
-        } else {
-          // Far from edge — clamp to the safe boundary (skip lands at live edge)
-          console.debug(`[MediaPlayer] Live-edge clamp: target ${timeMS}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
-          timeMS = this._ngLiveSafeSeekEndMs;
-          timeSec = timeMS / 1000;
-        }
+    // ── Live-edge guard (applies to bridge AND native xcode) ──
+    if ((this.bridgeMode || this._nativeXcodeMode) && this._ngLiveSafeSeekEndMs && timeMS > this._ngLiveSafeSeekEndMs) {
+      const currentPosMs = this.getMediaTimeMillis();
+      const nearEdge = currentPosMs >= (this._ngLiveSafeSeekEndMs - (this._seekGranularityMs || 5000));
+      if (nearEdge) {
+        console.debug(`[MediaPlayer] Live-edge ignore: at ${currentPosMs}ms, target ${timeMS}ms > safeEnd ${this._ngLiveSafeSeekEndMs}ms — already at edge`);
+        return;
+      } else {
+        console.debug(`[MediaPlayer] Live-edge clamp: target ${timeMS}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
+        timeMS = this._ngLiveSafeSeekEndMs;
+        timeSec = timeMS / 1000;
       }
+    }
 
+    if (this.bridgeMode && this._bridgeFilePath) {
       // ── 0) SERVER-AUTHORITATIVE PULL-XCODE (/msproxy) INITIAL SEEK ──
       // The initial seek (resume position or 0) arrives right after OPENURL,
       // while the first fetch is still deferred by _startInitialBridgeFetch.
       // FOLD it into that first request so the server transcode STARTS at the
       // target (XCODE_SETUP + -ss on the server) instead of starting at 0 and
       // then tearing the fetch down mid-startup — which aborts the server
-      // transcode before its first READ and wedges it. Genuine mid-playback
-      // seeks (after bytes have flowed) fall through to the restart path below.
+      // transcode before its first READ and wedges it.
       if (this._msproxyStreamUrl && this._initialFetchTimer && !this._initialFetchStarted) {
         clearTimeout(this._initialFetchTimer);
         this._initialFetchTimer = null;
@@ -1417,11 +1596,6 @@ export class MediaPlayer extends EventTarget {
       }
 
       // ── A) IN-BUFFER FAST PATH ──
-      // If the target is already transcoded into the SourceBuffer, jump there
-      // INSTANTLY (like a native/ExoPlayer seekTo) with NO ffmpeg restart. This
-      // is what makes small forward FF / REW skips smooth on the transcode
-      // lane. Uses the CURRENT segment offset (from the last restart), so it
-      // must run BEFORE _scheduleBridgeRestartSeek() mutates _bridgeTimeOffsetMs.
       const curOffsetMs = this._bridgeTimeOffsetMs || 0;
       const relSec = (timeMS - curOffsetMs) / 1000;
       if (relSec >= 0 && this._isWithinBuffered(relSec)) {
@@ -1440,6 +1614,16 @@ export class MediaPlayer extends EventTarget {
       // ── Out of buffer → heavy path: debounced flush + ffmpeg restart ──
       console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s (out of buffer — restart)`);
       this._scheduleBridgeRestartSeek(timeMS, timeSec);
+    } else if (this._nativeXcodeMode && this._msproxyAbsPath) {
+      // Native xcode mode: can't HTTP-range seek within a streaming transcode.
+      // Reload the msproxy URL with &seek=<ms> so the server starts a new
+      // transcode at the target position.
+      this._nativeXcodeOffsetMs = timeMS;
+      const base = (this._bridgeBase || '').replace(/\/$/, '');
+      const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${timeMS}`;
+      console.log(`[MediaPlayer] Native xcode seek to ${timeSec.toFixed(1)}s — reloading msproxy`);
+      this.video.src = seekUrl;
+      this.video.load();
     } else {
       this.video.currentTime = timeSec;
     }
@@ -1459,6 +1643,63 @@ export class MediaPlayer extends EventTarget {
       if (relSec >= b.start(i) && relSec <= b.end(i) - 0.25) return true;
     }
     return false;
+  }
+
+  /**
+   * Detect and jump past small gaps in the SourceBuffer's buffered ranges.
+   * ffmpeg's aresample=async=100 corrects audio clock drift by inserting tiny
+   * timestamp discontinuities. Native decoders absorb these silently; MSE
+   * decoders stall, click, or insert silence. This method detects when
+   * currentTime is at the trailing edge of one buffered range with another
+   * range starting nearby, and jumps past the gap.
+   *
+   * Returns true if a gap was jumped (caller should NOT emit 'buffering').
+   */
+  _tryJumpGap() {
+    const sb = this.sourceBuffer;
+    if (!sb) return false;
+    const b = sb.buffered;
+    if (!b || b.length < 2) return false;
+
+    const ct = this.video.currentTime;
+    const MAX_GAP = 0.5; // Only jump gaps smaller than 500ms
+
+    for (let i = 0; i < b.length - 1; i++) {
+      const rangeEnd = b.end(i);
+      const nextStart = b.start(i + 1);
+      const gap = nextStart - rangeEnd;
+
+      // currentTime is near the end of this range and the gap is small
+      if (gap > 0 && gap <= MAX_GAP && ct >= rangeEnd - 0.05 && ct <= nextStart) {
+        const jumpTo = nextStart + 0.01; // tiny offset past the gap boundary
+        console.debug(`[MediaPlayer] Gap jump: ${ct.toFixed(3)}s → ${jumpTo.toFixed(3)}s (gap=${(gap * 1000).toFixed(1)}ms)`);
+        this.video.currentTime = jumpTo;
+        this._gapJumpCount = (this._gapJumpCount || 0) + 1;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Start periodic gap-detection during bridge playback. Catches gaps that
+   * don't trigger a 'waiting' event (browser inserts silence instead of
+   * stalling). Runs every 500ms; lightweight — just checks buffered ranges.
+   */
+  _startGapMonitor() {
+    this._stopGapMonitor();
+    this._gapMonitorTimer = setInterval(() => {
+      if (this.state !== PlayerState.PLAY || !this.bridgeMode) return;
+      if (this.video.paused || this.video.ended) return;
+      this._tryJumpGap();
+    }, 500);
+  }
+
+  _stopGapMonitor() {
+    if (this._gapMonitorTimer) {
+      clearInterval(this._gapMonitorTimer);
+      this._gapMonitorTimer = null;
+    }
   }
 
   /**
@@ -1594,7 +1835,11 @@ export class MediaPlayer extends EventTarget {
     const rawMs = Math.floor((this.video.currentTime || 0) * 1000);
     // In bridge mode, ffmpeg outputs timestamps starting from 0 after each seek,
     // so we add the seek offset to report the correct file position.
-    return this.bridgeMode ? this._bridgeTimeOffsetMs + rawMs : rawMs;
+    if (this.bridgeMode) return this._bridgeTimeOffsetMs + rawMs;
+    // Native xcode mode: same — server transcode starts at seek point, fMP4
+    // timestamps begin at 0.
+    if (this._nativeXcodeMode) return (this._nativeXcodeOffsetMs || 0) + rawMs;
+    return rawMs;
   }
 
   getState() {

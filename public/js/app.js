@@ -1303,13 +1303,8 @@ function openSettings() {
     : memInfo;
   document.getElementById('set-available-memory').textContent = jsHeap;
 
-  // Expand every collapsible group. On TV/D-pad the user can't reach items
-  // inside a closed <details> (they render with offsetParent=null, so the
-  // spatial navigator skips them); expanding on open makes every option
-  // reachable via arrow keys.
-  for (const d of settingsDialog.querySelectorAll('details.settings-group')) {
-    d.open = true;
-  }
+  // All settings sections start collapsed. Users click/tap (or D-pad Enter on
+  // Tizen) on a section heading to expand only what they need.
 
   settingsDialog.hidden = false;
 }
