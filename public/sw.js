@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.44.1-bwprobe-fix';
+const CACHE_NAME = 'sagetv-miniclient-8.45.0-eq';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
@@ -34,6 +34,12 @@ const STATIC_ASSETS = [
   '/js/session/session-manager.js',
   '/js/session/download-manager.js',
   '/js/settings/settings-manager.js',
+  '/js/audio-processing/models.js',
+  '/js/audio-processing/presets.js',
+  '/js/audio-processing/settings-store.js',
+  '/js/audio-processing/web-audio-engine.js',
+  '/js/audio-processing/capability-reporter.js',
+  '/js/audio-processing/equalizer-panel.js',
   '/manifest.json',
 ];
 

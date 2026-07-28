@@ -780,6 +780,170 @@ html, body {
   opacity: 1;
 }
 
+/* ── Equalizer Panel ─────────────────────────────────── */
+
+.eq-panel {
+  max-width: 640px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.eq-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.eq-header h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.eq-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.eq-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: rgba(255,255,255,0.9);
+}
+
+.eq-toggle input[type="checkbox"] {
+  accent-color: rgba(255, 160, 40, 0.9);
+  width: 16px;
+  height: 16px;
+}
+
+.eq-sliders {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: flex-end;
+  padding: 8px 0;
+  min-height: 200px;
+}
+
+.eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.eq-separator {
+  width: 1px;
+  background: rgba(255, 160, 40, 0.3);
+  align-self: stretch;
+  margin: 0 4px;
+}
+
+.eq-band-value {
+  font-size: 10px;
+  color: rgba(255, 160, 40, 0.8);
+  min-height: 14px;
+  text-align: center;
+}
+
+.eq-slider {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 28px;
+  height: 160px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.eq-slider::-webkit-slider-runnable-track {
+  width: 4px;
+  background: rgba(255, 160, 40, 0.25);
+  border-radius: 2px;
+}
+
+.eq-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255, 160, 40, 0.9);
+  border: 2px solid rgba(255, 200, 100, 0.8);
+  cursor: pointer;
+}
+
+.eq-slider:focus,
+.eq-slider:focus-visible {
+  outline: 3px solid rgba(120, 200, 255, 0.95);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.eq-band-label {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.7);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.eq-preamp-band .eq-band-label {
+  color: rgba(255, 160, 40, 0.9);
+  font-weight: 600;
+}
+
+.eq-night-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.eq-night-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 160, 40, 0.9);
+  margin-bottom: 8px;
+}
+
+.eq-night-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.eq-night-schedule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.eq-night-to {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.eq-status {
+  margin-top: 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+  text-align: center;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+}
+
 /* ── Client Screen ───────────────────────────────────── */
 
 #client-screen {

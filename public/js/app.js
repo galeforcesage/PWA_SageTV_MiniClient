@@ -8,6 +8,11 @@ import { SessionManager } from './session/session-manager.js';
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js';
 import { runCodecProbe } from './media/codec-probe.js';
+import { SettingsStore } from './audio-processing/settings-store.js';
+import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
+import { EqualizerPanel } from './audio-processing/equalizer-panel.js';
+import { CapabilityReporter } from './audio-processing/capability-reporter.js';
+import { toServerPayload, computeEffectiveNow } from './audio-processing/models.js';
 
 // ── Globals ──────────────────────────────────────────────
 
@@ -18,6 +23,14 @@ let wakeLockSentinel = null;
 let hadActiveSession = false;
 let resumeCheckTimer = null;
 let _spatnav = null;
+
+// ── Audio Processing / Equalizer subsystem ───────────────
+
+const _eqSettingsStore = new SettingsStore();
+const _eqEngine = new WebAudioEngine();
+const _eqPanel = new EqualizerPanel({ settingsStore: _eqSettingsStore, engine: _eqEngine, isTizen: _isTizen });
+const _eqCapReporter = new CapabilityReporter();
+let _eqNightModeTimer = null;
 
 // ── DOM References ───────────────────────────────────────
 
@@ -482,7 +495,129 @@ async function init() {
   // Wire up events
   setupEventHandlers();
 
+  // Initialise equalizer subsystem (safe even before any connection)
+  initEqualizer();
+
   console.log('[App] SageTV MiniClient PWA initialized');
+}
+
+// ── Audio Processing / Equalizer lifecycle ────────────────
+
+/**
+ * Initialise the EQ subsystem: load settings, bind panel events, wire the
+ * EQ button in the nav-drawer. Called once from init().
+ */
+function initEqualizer() {
+  _eqPanel.init();
+
+  // EQ button in nav-drawer → open/close panel
+  const eqBtn = document.getElementById('btn-eq');
+  if (eqBtn) {
+    eqBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      // Close the nav drawer first so they don't overlap
+      document.dispatchEvent(new CustomEvent('sagetv:close-nav-drawer'));
+      _eqPanel.show();
+    });
+  }
+
+  // Panel emits 'settingschanged' when user adjusts sliders, preset, etc.
+  // The panel already saves to store and applies to engine internally.
+  // We only need to push the update to the server.
+  _eqPanel.addEventListener('settingschanged', (e) => {
+    const { settings: updated } = e.detail;
+    // Push to server (fire-and-forget; server ignores until coded)
+    const conn = session.connection;
+    if (conn) {
+      conn.pushAudioProcessingUpdate('settings', toServerPayload(updated)).catch(() => {});
+    }
+  });
+
+  // Page visibility: suspend/resume AudioContext
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      _eqEngine.suspend();
+      // Push DSP inactive
+      const conn = session.connection;
+      if (conn) {
+        conn.pushAudioProcessingUpdate('dsp_active', { active: false, reason: 'page_hidden' }).catch(() => {});
+      }
+    } else {
+      _eqEngine.resume();
+      if (_eqEngine.isAttached()) {
+        const conn = session.connection;
+        if (conn) {
+          conn.pushAudioProcessingUpdate('dsp_active', { active: true, reason: 'page_visible' }).catch(() => {});
+        }
+      }
+    }
+  });
+
+  // Night mode schedule timer: check every 60s if effectiveNow changed
+  _eqNightModeTimer = setInterval(() => {
+    const current = _eqSettingsStore.getCurrentSettings();
+    if (!current || !current.nightMode || !current.nightMode.scheduled) return;
+    const newEffective = computeEffectiveNow(current.nightMode);
+    if (newEffective !== current.nightMode.effectiveNow) {
+      _eqSettingsStore.updateEffectiveNow(newEffective);
+      const updated = _eqSettingsStore.getCurrentSettings();
+      if (_eqEngine.isAttached()) {
+        _eqEngine.applySettings(updated);
+      }
+      // Panel will pick up changes from store on next show()
+      // Push to server
+      const conn = session.connection;
+      if (conn) {
+        conn.pushAudioProcessingUpdate('settings', toServerPayload(updated)).catch(() => {});
+      }
+    }
+  }, 60_000);
+
+  console.log('[App] Equalizer subsystem initialised');
+}
+
+/**
+ * Attach the Web Audio DSP engine to the current video element.
+ * Called when media playback starts.
+ */
+function attachEqEngine() {
+  const videoEl = session.mediaPlayer?.getVideoElement?.();
+  if (!videoEl || _eqEngine.isAttached()) return;
+
+  const settings = _eqSettingsStore.getCurrentSettings();
+  try {
+    _eqEngine.attach(videoEl, settings);
+    console.log('[App] EQ engine attached to video element');
+    // Push DSP active
+    const conn = session.connection;
+    if (conn) {
+      conn.pushAudioProcessingUpdate('dsp_active', { active: true, mode: 'client' }).catch(() => {});
+    }
+    _eqPanel.updateStatus({ eqActive: true });
+  } catch (err) {
+    console.warn('[App] EQ engine attach failed:', err?.message || err);
+    _eqPanel.updateStatus({ eqActive: false });
+  }
+}
+
+/**
+ * Register the audio processing delegate on the connection so
+ * GET_PROPERTY responses work, and push initial capabilities.
+ */
+function wireEqToConnection(conn) {
+  if (!conn) return;
+  conn.setAudioProcessingDelegate({
+    capabilities: () => _eqCapReporter.getCapabilities(),
+    settings: () => {
+      const s = _eqSettingsStore.getCurrentSettings();
+      return s ? toServerPayload(s) : {};
+    },
+    dspActive: () => ({ active: _eqEngine.isAttached(), mode: 'client' }),
+  });
+
+  // Push capabilities immediately
+  conn.pushAudioProcessingUpdate('capabilities', _eqCapReporter.getCapabilities()).catch(() => {});
 }
 
 async function refreshWakeLock(forceRelease = false) {
@@ -789,6 +924,9 @@ function setupEventHandlers() {
     clientScreen.addEventListener('pointerdown', () => {
       session.mediaPlayer?.primePlayback?.().catch?.(() => {});
     }, { capture: true, once: true });
+
+    // Register audio processing delegate on new connection
+    wireEqToConnection(session.connection);
   });
 
   session.addEventListener('firstframe', () => {
@@ -904,6 +1042,8 @@ function setupEventHandlers() {
     session.mediaPlayer.addEventListener('firstframe', () => {
       loadingOverlay.hidden = true;
       playOverlay.hidden = true;
+      // Attach EQ engine when first media frame arrives (video element ready)
+      attachEqEngine();
     });
     session.mediaPlayer.addEventListener('seeking', () => {
       seekingOverlay.hidden = false;
@@ -1125,6 +1265,12 @@ function exitTizenApp() {
  * do we return false and let the WebView exit the app.
  */
 function handleTizenBack() {
+  // Close EQ panel if open.
+  const eqOverlay = document.getElementById('eq-overlay');
+  if (eqOverlay && !eqOverlay.hidden) {
+    _eqPanel.hide();
+    return true;
+  }
   // Close nav drawer if open.
   const drawer = document.getElementById('nav-drawer');
   if (drawer && !drawer.hidden && drawer.classList.contains('open')) {

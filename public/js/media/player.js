@@ -154,19 +154,17 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
-   * Map ng_fmt MIME types to canPlayType()-compatible MIME strings for native
-   * <video src> validation. Returns the full MIME with codecs, or null.
+   * Map ng_fmt video MIME to canPlayType()-compatible MIME string for native
+   * <video src> validation. Only checks the VIDEO codec — audio is the
+   * server's responsibility (xcode transcodes unsupported audio to AAC).
+   * Testing video+audio combined would false-fail on unsupported audio
+   * codecs like AC-4 that the server will transcode anyway.
    */
   _ngFmtToNativeMime(hint) {
     if (!hint) return null;
     const codecs = this._ngFmtToMseCodecs(hint);
-    if (!codecs) return null;
-    const parts = [];
-    if (codecs.video) parts.push(codecs.video);
-    if (codecs.audio) parts.push(codecs.audio);
-    if (!parts.length) return null;
-    // Use video/mp4 as the container for canPlayType validation
-    return `video/mp4; codecs="${parts.join(',')}"`;
+    if (!codecs || !codecs.video) return null;
+    return `video/mp4; codecs="${codecs.video}"`;
   }
 
   _setupVideoEvents() {
@@ -1857,6 +1855,15 @@ export class MediaPlayer extends EventTarget {
 
   setVolume(normalized) {
     this.video.volume = Math.max(0, Math.min(1, normalized));
+  }
+
+  /**
+   * Get the underlying HTMLVideoElement for Web Audio attachment.
+   * Used by the audio processing engine to call createMediaElementSource().
+   * @returns {HTMLVideoElement}
+   */
+  getVideoElement() {
+    return this.video;
   }
 
   setServerEOS() {

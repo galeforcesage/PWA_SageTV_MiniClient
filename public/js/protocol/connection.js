@@ -234,6 +234,10 @@ export class MiniClientConnection extends EventTarget {
     // NG Playback Context manager (receives metadata from server SET_PROPERTY)
     this.playbackContextManager = new NgPlaybackContextManager();
 
+    // Audio Processing delegate (set by app.js when EQ subsystem is initialised).
+    // Provides: capabilities(), settings(), dspActive() for GET_PROPERTY responses.
+    this._audioProcessing = null;
+
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
     this._bytesReceivedMedia = 0;
@@ -1507,6 +1511,26 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
+  // ── Audio Processing delegate registration ──
+
+  /**
+   * Register audio processing delegate for GET_PROPERTY responses.
+   * Called by app.js after EQ subsystem initialisation.
+   * @param {{ capabilities: Function, settings: Function, dspActive: Function }} delegate
+   */
+  setAudioProcessingDelegate(delegate) {
+    this._audioProcessing = delegate;
+  }
+
+  /**
+   * Push audio processing state to the server via client feedback channel.
+   * @param {'capabilities'|'settings'|'dsp_active'} type
+   * @param {Object} payload
+   */
+  async pushAudioProcessingUpdate(type, payload) {
+    await this._postCapabilityFeedback(`AUDIO_PROCESSING_${type.toUpperCase()}`, payload);
+  }
+
   /**
    * Resolve a property value for GET_PROPERTY.
    */
@@ -1677,6 +1701,20 @@ export class MiniClientConnection extends EventTarget {
       case 'NG_PLAYBACK_CONTEXT_SUPPORTED':
         this._markNgNegotiated(name);
         return 'TRUE';
+
+      // ── Audio Processing / Equalizer ──
+      case 'AUDIO_PROCESSING_CAPABILITIES':
+        return this._audioProcessing?.capabilities
+          ? JSON.stringify(this._audioProcessing.capabilities())
+          : '';
+      case 'AUDIO_PROCESSING_SETTINGS':
+        return this._audioProcessing?.settings
+          ? JSON.stringify(this._audioProcessing.settings())
+          : '';
+      case 'AUDIO_PROCESSING_DSP_ACTIVE':
+        return this._audioProcessing?.dspActive
+          ? JSON.stringify(this._audioProcessing.dspActive())
+          : '';
 
       case 'GFX_TEXTMODE':
         return ClientProperty.GFX_TEXTMODE;
