@@ -594,10 +594,10 @@ function attachEqEngine() {
     if (conn) {
       conn.pushAudioProcessingUpdate('dsp_active', { active: true, mode: 'client' }).catch(() => {});
     }
-    _eqPanel.updateStatus({ eqActive: true });
+    _eqPanel.updateStatus();
   } catch (err) {
     console.warn('[App] EQ engine attach failed:', err?.message || err);
-    _eqPanel.updateStatus({ eqActive: false });
+    _eqPanel.updateStatus();
   }
 }
 

@@ -832,6 +832,13 @@ html, body {
   min-height: 200px;
 }
 
+.eq-slider-caption {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 4px 0 2px;
+}
+
 .eq-band {
   display: flex;
   flex-direction: column;
@@ -855,30 +862,53 @@ html, body {
   text-align: center;
 }
 
+/* Vertical range sliders.
+ *
+ * Uses the standardized `writing-mode: vertical-rl` mechanism (Chrome 121+,
+ * Firefox 129+, Safari 17.4+, iPad Safari 17.4+) rather than the removed
+ * `-webkit-appearance: slider-vertical`. The `orient="vertical"` HTML
+ * attribute in the markup keeps older Firefox vertical as a fallback. Top of
+ * the track = max gain. */
 .eq-slider {
-  -webkit-appearance: slider-vertical;
-  appearance: slider-vertical;
-  writing-mode: vertical-lr;
-  direction: rtl;
-  width: 28px;
+  -webkit-appearance: none;
+  appearance: none;
+  writing-mode: vertical-rl;
+  width: 8px;
   height: 160px;
-  background: transparent;
+  background: rgba(255, 160, 40, 0.22);
+  border-radius: 4px;
   cursor: pointer;
 }
 
+/* WebKit/Blink track + thumb */
 .eq-slider::-webkit-slider-runnable-track {
-  width: 4px;
-  background: rgba(255, 160, 40, 0.25);
-  border-radius: 2px;
+  width: 8px;
+  background: transparent;
+  border-radius: 4px;
 }
-
 .eq-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
+  appearance: none;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background: rgba(255, 160, 40, 0.9);
-  border: 2px solid rgba(255, 200, 100, 0.8);
+  background: rgba(255, 160, 40, 0.95);
+  border: 2px solid rgba(255, 200, 100, 0.9);
+  cursor: pointer;
+}
+
+/* Firefox track + thumb */
+.eq-slider::-moz-range-track {
+  width: 8px;
+  background: transparent;
+  border-radius: 4px;
+}
+.eq-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 160, 40, 0.95);
+  border: 2px solid rgba(255, 200, 100, 0.9);
   cursor: pointer;
 }
 
@@ -912,6 +942,18 @@ html, body {
   font-weight: 600;
   color: rgba(255, 160, 40, 0.9);
   margin-bottom: 8px;
+}
+
+.eq-night-caption {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 10px;
+}
+
+.eq-night-controls select:disabled,
+.eq-night-controls option:disabled {
+  color: rgba(255, 255, 255, 0.35);
 }
 
 .eq-night-controls {

@@ -137,8 +137,30 @@ export class EqualizerPanel extends EventTarget {
       } catch { /* ignore on non-Tizen */ }
     }
 
+    // Restrict night-mode options to what the client can actually do.
+    this._disableUnimplementedNightModes();
+
     // Load initial state
     this._syncFromSettings();
+  }
+
+  /**
+   * Disable night-mode techniques the client can't actually perform yet.
+   * Only DRC (DynamicsCompressorNode) is implemented client-side; Loudness
+   * leveling and platform night mode are placeholders. Disabling them keeps
+   * the UI honest (we never claim DSP we can't do).
+   */
+  _disableUnimplementedNightModes() {
+    if (!this._nightMode) return;
+    for (const opt of this._nightMode.options) {
+      if (opt.value !== 'DYNAMIC_RANGE_COMPRESSION') {
+        opt.disabled = true;
+      }
+    }
+    // Force any stale persisted selection back to the working mode.
+    if (this._nightMode.value !== 'DYNAMIC_RANGE_COMPRESSION') {
+      this._nightMode.value = 'DYNAMIC_RANGE_COMPRESSION';
+    }
   }
 
   /**
@@ -185,20 +207,43 @@ export class EqualizerPanel extends EventTarget {
    * @param {boolean} status.nightModeActive
    * @param {boolean} status.serverProcessing  True when server handles EQ (AVPlay)
    */
-  updateStatus({ eqActive = false, nightModeActive = false, serverProcessing = false } = {}) {
+  /**
+   * Update the status indicator. Derives the displayed state from the user's
+   * intent (persisted settings) plus the engine's real state, so the badge is
+   * honest: "on but waiting for playback" is distinct from "actively
+   * processing" and from "off".
+   *
+   * @param {Object} [opts]
+   * @param {boolean} [opts.serverProcessing]  True when the server handles EQ
+   *   (e.g. Tizen AVPlay, where the browser can't attach Web Audio).
+   */
+  updateStatus({ serverProcessing = false } = {}) {
     const el = document.getElementById('eq-status');
     if (!el) return;
 
-    let text = '';
+    const settings = this._store.getCurrentSettings();
+    const enabled = !!settings.enabled;
+    const attached = this._engine.isAttached();
+
+    let text;
     if (serverProcessing) {
-      text = '🟡 EQ via Server';
-    } else if (eqActive) {
+      // Client can't run DSP for this playback path; server applies it.
+      text = enabled ? '🟡 EQ via Server' : '⚪ EQ Off';
+    } else if (!enabled) {
+      text = '⚪ EQ Off';
+    } else if (attached) {
       text = '🟢 EQ Active (Client)';
     } else {
-      text = '⚪ EQ Off';
+      // Enabled, but no media graph yet — Web Audio attaches when video plays.
+      text = '🟡 EQ On · starts when video plays';
     }
 
-    if (nightModeActive) {
+    // Night-mode suffix. When attached use the engine's real state; otherwise
+    // reflect the user's intent as pending.
+    const nightOn = attached
+      ? this._engine.isNightModeActive()
+      : (enabled && settings.nightMode && settings.nightMode.enabled);
+    if (nightOn) {
       text += ' · 🌙 Night Mode';
     }
 
@@ -237,10 +282,7 @@ export class EqualizerPanel extends EventTarget {
     if (this._nightStart) this._nightStart.value = settings.nightMode.nightStartTime;
     if (this._nightEnd) this._nightEnd.value = settings.nightMode.nightEndTime;
 
-    this.updateStatus({
-      eqActive: this._engine.isActive(),
-      nightModeActive: this._engine.isNightModeActive(),
-    });
+    this.updateStatus();
   }
 
   // ── Internal: Event handlers ─────────────────────────────────
@@ -323,10 +365,7 @@ export class EqualizerPanel extends EventTarget {
   _saveAndApply(settings) {
     this._store.save(settings);
     this._engine.applySettings(settings);
-    this.updateStatus({
-      eqActive: this._engine.isActive(),
-      nightModeActive: this._engine.isNightModeActive(),
-    });
+    this.updateStatus();
     this._emitSettingsChanged(settings);
   }
 
