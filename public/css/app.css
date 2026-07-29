@@ -872,7 +872,8 @@ html, body {
 .eq-slider {
   -webkit-appearance: none;
   appearance: none;
-  writing-mode: vertical-rl;
+  writing-mode: vertical-lr;
+  direction: rtl;
   width: 8px;
   height: 160px;
   background: rgba(255, 160, 40, 0.22);
@@ -927,8 +928,31 @@ html, body {
 }
 
 .eq-preamp-band .eq-band-label {
-  color: rgba(255, 160, 40, 0.9);
+  color: rgba(120, 200, 255, 0.95);
   font-weight: 600;
+}
+
+/* Preamp = volume boost: light-blue track + a horizontal-line "fader" thumb
+ * to visually distinguish it from the orange EQ band sliders. */
+.eq-preamp-band .eq-slider {
+  background: rgba(120, 200, 255, 0.22);
+}
+.eq-preamp-band .eq-slider::-webkit-slider-thumb {
+  width: 22px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(120, 200, 255, 0.98);
+  border: 1px solid rgba(180, 220, 255, 0.95);
+}
+.eq-preamp-band .eq-slider::-moz-range-thumb {
+  width: 22px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(120, 200, 255, 0.98);
+  border: 1px solid rgba(180, 220, 255, 0.95);
+}
+.eq-preamp-band .eq-band-value {
+  color: rgba(120, 200, 255, 0.95);
 }
 
 .eq-night-section {

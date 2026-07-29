@@ -30,7 +30,9 @@ export const PRESETS = Object.freeze([
   },
   {
     name: 'Pop',
-    gains: [1, 2, 3, 2, 0, -1, 0, 2, 3, 3],
+    // Warm low-mids + forward vocals + airy top; gentle sub-bass trim.
+    // 31 63 125 250 500  1K  2K  4K  8K 16K
+    gains: [-1, 0, 2, 3, 2, 0, 1, 3, 4, 3],
     preamp: 0,
   },
   {
@@ -40,7 +42,9 @@ export const PRESETS = Object.freeze([
   },
   {
     name: 'Classical',
-    gains: [4, 3, 1, 0, 0, 0, 1, 2, 3, 4],
+    // Natural balance with gentle, smooth high extension; no harshness.
+    // 31 63 125 250 500  1K  2K  4K  8K 16K
+    gains: [3, 2, 1, 0, 0, 0, 1, 2, 3, 3],
     preamp: 0,
   },
   {
@@ -55,7 +59,10 @@ export const PRESETS = Object.freeze([
   },
   {
     name: 'Vocal',
-    gains: [-2, -1, 1, 3, 4, 4, 3, 1, -1, -2],
+    // Speech intelligibility: cut sub-bass rumble, add body at 250,
+    // peak presence at 1-4 kHz (consonants/clarity), tame sibilant top.
+    // 31 63 125 250 500  1K  2K  4K  8K 16K
+    gains: [-4, -3, -1, 1, 2, 3, 4, 3, 1, -2],
     preamp: 0,
   },
   {

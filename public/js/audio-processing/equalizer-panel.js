@@ -252,6 +252,29 @@ export class EqualizerPanel extends EventTarget {
 
   // ── Internal: Settings ↔ UI sync ─────────────────────────────
 
+  /** Format a dB value for display, e.g. "+3", "0", "-2.5". */
+  _formatDb(v) {
+    const n = Math.round(v * 10) / 10;
+    if (n === 0) return '0';
+    return (n > 0 ? '+' : '') + n;
+  }
+
+  /**
+   * Update the numeric label above a slider.
+   * @param {number|'preamp'} key  Band index or 'preamp'
+   * @param {number} value  Gain in dB
+   */
+  _updateValueLabel(key, value) {
+    const span = this._overlay?.querySelector(`[data-value-for="${key}"]`);
+    if (span) span.textContent = this._formatDb(value);
+  }
+
+  /** Refresh every numeric label (preamp + all bands) from current settings. */
+  _refreshAllValueLabels(settings) {
+    this._updateValueLabel('preamp', settings.preampDb);
+    settings.bands.forEach((band, i) => this._updateValueLabel(i, band.gain));
+  }
+
   /** Sync all UI elements from current settings. */
   _syncFromSettings() {
     const settings = this._store.getCurrentSettings();
@@ -273,6 +296,8 @@ export class EqualizerPanel extends EventTarget {
         slider.value = String(settings.bands[i].gain);
       }
     });
+
+    this._refreshAllValueLabels(settings);
 
     // Night mode
     if (this._nightEnabled) this._nightEnabled.checked = settings.nightMode.enabled;
@@ -310,6 +335,7 @@ export class EqualizerPanel extends EventTarget {
     if (this._preampSlider) {
       this._preampSlider.value = String(settings.preampDb);
     }
+    this._refreshAllValueLabels(settings);
 
     this._saveAndApply(settings);
   }
@@ -317,6 +343,7 @@ export class EqualizerPanel extends EventTarget {
   _onBandChange(index, gain) {
     const settings = this._store.getCurrentSettings();
     settings.bands[index].gain = clampGain(gain);
+    this._updateValueLabel(index, settings.bands[index].gain);
 
     // Detect if it still matches a preset
     settings.presetName = detectPreset(settings.bands, settings.preampDb);
@@ -332,6 +359,7 @@ export class EqualizerPanel extends EventTarget {
   _onPreampChange(db) {
     const settings = this._store.getCurrentSettings();
     settings.preampDb = clampGain(db);
+    this._updateValueLabel('preamp', settings.preampDb);
 
     settings.presetName = detectPreset(settings.bands, settings.preampDb);
     if (this._presetSelect) {
