@@ -54,10 +54,10 @@ cd bridge-java
 .\gradlew.bat shadowJar
 
 # 2. Transfer JAR to server
-scp build\libs\pwa-miniclient-bridge-<ver>.jar user@192.168.0.75:/tmp/
+scp build\libs\pwa-miniclient-bridge-<ver>.jar user@<sagetv-host>:/tmp/
 
 # 3. SSH to server — stop, swap, start
-ssh user@192.168.0.75
+ssh user@<sagetv-host>
 ```
 
 ```bash
@@ -84,18 +84,18 @@ sudo /opt/sagetv/server/startsage
 
 ```powershell
 # From repo root on Windows:
-scp -r public/* user@192.168.0.75:/opt/sagetv/server/pwa-miniclient/public/
+scp -r public/* user@<sagetv-host>:/opt/sagetv/server/pwa-miniclient/public/
 ```
 
 Or for a single file:
 ```powershell
-scp public\js\media\ng-playback-context-client.js user@192.168.0.75:/opt/sagetv/server/pwa-miniclient/public/js/media/
+scp public\js\media\ng-playback-context-client.js user@<sagetv-host>:/opt/sagetv/server/pwa-miniclient/public/js/media/
 ```
 
 **Verify the deploy (from Windows):**
 ```powershell
 # Check a file you just deployed has the expected content
-ssh user@192.168.0.75 "md5sum /opt/sagetv/server/pwa-miniclient/public/js/media/ng-playback-context-client.js"
+ssh user@<sagetv-host> "md5sum /opt/sagetv/server/pwa-miniclient/public/js/media/ng-playback-context-client.js"
 # Compare with local:
 Get-FileHash public\js\media\ng-playback-context-client.js -Algorithm MD5
 ```
@@ -111,8 +111,8 @@ cd bridge-java
 cd ..
 
 # 2. Transfer everything
-scp bridge-java\build\libs\pwa-miniclient-bridge-<ver>.jar user@192.168.0.75:/tmp/
-scp -r public user@192.168.0.75:/tmp/pwa-public-deploy/
+scp bridge-java\build\libs\pwa-miniclient-bridge-<ver>.jar user@<sagetv-host>:/tmp/
+scp -r public user@<sagetv-host>:/tmp/pwa-public-deploy/
 ```
 
 ```bash
@@ -166,7 +166,7 @@ curl -k -o /dev/null -w "%{http_code}" https://localhost:8099/index.html
 
 ### From the browser
 ```
-https://192.168.0.75:8099/ng/playback-context/current
+https://<sagetv-host>:8099/ng/playback-context/current
 → JSON response (not HTML 404)
 ```
 

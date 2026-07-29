@@ -527,6 +527,22 @@ function initEqualizer() {
   // We only need to push the update to the server.
   _eqPanel.addEventListener('settingschanged', (e) => {
     const { settings: updated } = e.detail;
+
+    // Engage / adjust / bypass the client DSP graph live so changes are audible
+    // immediately (not only on the next playback).
+    const clientDsp = updated.enabled && updated.clientProcessing !== false;
+    if (clientDsp) {
+      if (!_eqEngine.isAttached()) {
+        attachEqEngine();
+      }
+    } else if (_eqEngine.isAttached()) {
+      // Disabled or handed off to the server: make the client graph transparent
+      // so we never double-process. (No detach — createMediaElementSource is
+      // one-shot; flat pass-through is the safe bypass.)
+      _eqEngine.applySettings({ ...updated, enabled: false });
+    }
+    _eqPanel.updateStatus();
+
     // Push to server (fire-and-forget; server ignores until coded)
     const conn = session.connection;
     if (conn) {
@@ -582,10 +598,15 @@ function initEqualizer() {
  * Called when media playback starts.
  */
 function attachEqEngine() {
+  const settings = _eqSettingsStore.getCurrentSettings();
+  // Only route audio through Web Audio when the user actually wants client-side
+  // processing. This keeps the default (direct) audio path byte-for-byte
+  // unchanged for everyone who never turns the EQ on. (guardrail: net-neutral)
+  if (!settings.enabled || settings.clientProcessing === false) return;
+
   const videoEl = session.mediaPlayer?.getVideoElement?.();
   if (!videoEl || _eqEngine.isAttached()) return;
 
-  const settings = _eqSettingsStore.getCurrentSettings();
   try {
     _eqEngine.attach(videoEl, settings);
     console.log('[App] EQ engine attached to video element');
