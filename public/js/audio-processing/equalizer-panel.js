@@ -130,6 +130,19 @@ export class EqualizerPanel extends EventTarget {
       this._nightEnd.addEventListener('change', () => this._onNightModeChange());
     }
 
+    // Client-vs-server processing toggle
+    this._clientProcessingCheckbox = document.getElementById('eq-client-processing');
+    this._clientToggleWrap = document.getElementById('eq-client-toggle');
+    this._serverNote = document.getElementById('eq-server-note');
+    if (this._clientProcessingCheckbox) {
+      this._clientProcessingCheckbox.addEventListener('change', () => this._onClientProcessingChange());
+    }
+    // On Tizen the client can't run Web Audio DSP for the AVPlay path, so the
+    // choice is meaningless — hide the toggle and keep client-capable UI only.
+    if (this._isTizen && this._clientToggleWrap) {
+      this._clientToggleWrap.hidden = true;
+    }
+
     // Tizen remote key handling
     if (this._isTizen && typeof tizen !== 'undefined') {
       try {
@@ -137,10 +150,7 @@ export class EqualizerPanel extends EventTarget {
       } catch { /* ignore on non-Tizen */ }
     }
 
-    // Restrict night-mode options to what the client can actually do.
-    this._disableUnimplementedNightModes();
-
-    // Load initial state
+    // Load initial state (also applies the client/server processing-mode UI).
     this._syncFromSettings();
   }
 
@@ -160,6 +170,32 @@ export class EqualizerPanel extends EventTarget {
     // Force any stale persisted selection back to the working mode.
     if (this._nightMode.value !== 'DYNAMIC_RANGE_COMPRESSION') {
       this._nightMode.value = 'DYNAMIC_RANGE_COMPRESSION';
+    }
+  }
+
+  /**
+   * Apply UI state that depends on where processing happens (client vs server).
+   *
+   * - Client mode: only the client-capable night-mode technique (DRC) is
+   *   offered; the "server not available" note is hidden.
+   * - Server mode: the two server-only techniques (loudness leveling, platform
+   *   night mode) become selectable, and an honest note explains that the
+   *   server EQ isn't wired up yet so nothing is audible until it is.
+   */
+  _applyProcessingModeUI() {
+    const settings = this._store.getCurrentSettings();
+    const client = settings.clientProcessing !== false;
+
+    if (this._nightMode) {
+      if (client) {
+        this._disableUnimplementedNightModes();
+      } else {
+        for (const opt of this._nightMode.options) opt.disabled = false;
+      }
+    }
+    if (this._serverNote) {
+      // Only nag when EQ is actually on but pointed at the (absent) server.
+      this._serverNote.hidden = client || !settings.enabled;
     }
   }
 
@@ -223,10 +259,16 @@ export class EqualizerPanel extends EventTarget {
 
     const settings = this._store.getCurrentSettings();
     const enabled = !!settings.enabled;
+    const clientProcessing = settings.clientProcessing !== false;
     const attached = this._engine.isAttached();
 
     let text;
-    if (serverProcessing) {
+    if (!clientProcessing) {
+      // User handed processing to the server (which isn't wired up yet).
+      text = enabled
+        ? '🔵 Set to Server EQ · server EQ not available yet'
+        : '⚪ EQ Off';
+    } else if (serverProcessing) {
       // Client can't run DSP for this playback path; server applies it.
       text = enabled ? '🟡 EQ via Server' : '⚪ EQ Off';
     } else if (!enabled) {
@@ -238,11 +280,11 @@ export class EqualizerPanel extends EventTarget {
       text = '🟡 EQ On · starts when video plays';
     }
 
-    // Night-mode suffix. When attached use the engine's real state; otherwise
-    // reflect the user's intent as pending.
-    const nightOn = attached
+    // Night-mode suffix (client mode only). When attached use the engine's real
+    // state; otherwise reflect the user's intent as pending.
+    const nightOn = clientProcessing && !serverProcessing && (attached
       ? this._engine.isNightModeActive()
-      : (enabled && settings.nightMode && settings.nightMode.enabled);
+      : (enabled && settings.nightMode && settings.nightMode.enabled));
     if (nightOn) {
       text += ' · 🌙 Night Mode';
     }
@@ -283,6 +325,10 @@ export class EqualizerPanel extends EventTarget {
       this._enabledCheckbox.checked = settings.enabled;
     }
 
+    if (this._clientProcessingCheckbox) {
+      this._clientProcessingCheckbox.checked = settings.clientProcessing !== false;
+    }
+
     if (this._presetSelect) {
       this._presetSelect.value = settings.presetName;
     }
@@ -307,6 +353,7 @@ export class EqualizerPanel extends EventTarget {
     if (this._nightStart) this._nightStart.value = settings.nightMode.nightStartTime;
     if (this._nightEnd) this._nightEnd.value = settings.nightMode.nightEndTime;
 
+    this._applyProcessingModeUI();
     this.updateStatus();
   }
 
@@ -316,6 +363,18 @@ export class EqualizerPanel extends EventTarget {
     const settings = this._store.getCurrentSettings();
     settings.enabled = this._enabledCheckbox.checked;
     this._saveAndApply(settings);
+    // Enabling/disabling can change whether the server note should show.
+    this._applyProcessingModeUI();
+  }
+
+  _onClientProcessingChange() {
+    const settings = this._store.getCurrentSettings();
+    settings.clientProcessing = !!this._clientProcessingCheckbox.checked;
+    this._store.save(settings);
+    this._applyProcessingModeUI();
+    this.updateStatus();
+    // app.js listens for this to attach (client) or bypass (server) the engine.
+    this._emitSettingsChanged(settings);
   }
 
   _onPresetChange() {

@@ -187,6 +187,14 @@ export class MediaPlayer extends EventTarget {
       // Start gap monitor for bridge mode — catches tiny timestamp
       // discontinuities that MSE decoders stall or click on.
       if (this.bridgeMode) this._startGapMonitor();
+
+      // Mirror the AVPlay backend: emit a one-time `firstframe` on the player
+      // itself the first time native playback begins. App-level consumers (EQ
+      // engine attach, overlay teardown) listen for this on both backends.
+      if (!this._firstFrameFired) {
+        this._firstFrameFired = true;
+        this.dispatchEvent(new CustomEvent('firstframe'));
+      }
     });
 
     this.video.addEventListener('pause', () => {

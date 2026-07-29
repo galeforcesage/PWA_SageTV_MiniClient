@@ -448,9 +448,14 @@
             <input type="checkbox" id="eq-enabled" checked>
             <span>Enabled</span>
           </label>
+          <label class="eq-toggle" id="eq-client-toggle" title="On: this device processes audio (Web Audio). Off: hand off to the SageTV server.">
+            <input type="checkbox" id="eq-client-processing" checked>
+            <span>Client EQ</span>
+          </label>
           <select id="eq-preset" class="form-select"></select>
           <button id="eq-reset" class="action-btn">Reset</button>
         </div>
+        <div class="eq-server-note" id="eq-server-note" hidden>⚠️ Server EQ isn't available yet — your settings are saved and sent, but the server doesn't apply them. Turn <strong>Client EQ</strong> back on to hear changes.</div>
         <div class="eq-slider-caption"><strong style="color:#7ec8ff">Pre</strong> (light blue) is a volume boost — raise it to make SageTV audio louder than normal, up to +12 dB. Each orange band boosts or cuts that frequency ±12 dB. Drag up to boost, down to cut.</div>
         <div class="eq-sliders">
           <div class="eq-band eq-preamp-band">

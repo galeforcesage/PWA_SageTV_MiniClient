@@ -133,6 +133,7 @@ export function createDefaultSettings() {
   const settings = {
     schemaVersion: SCHEMA_VERSION,
     enabled: false,
+    clientProcessing: true,
     presetName: 'Flat',
     preampDb: 0,
     bands: createDefaultBands(),
@@ -170,6 +171,7 @@ export function validateSettings(raw) {
 
   out.schemaVersion = SCHEMA_VERSION;
   out.enabled = typeof raw.enabled === 'boolean' ? raw.enabled : false;
+  out.clientProcessing = typeof raw.clientProcessing === 'boolean' ? raw.clientProcessing : true;
   out.presetName = typeof raw.presetName === 'string' ? raw.presetName : 'Flat';
   out.preampDb = clampGain(typeof raw.preampDb === 'number' ? raw.preampDb : 0);
 
@@ -243,6 +245,7 @@ export function toServerPayload(settings) {
   return {
     schemaVersion: settings.schemaVersion,
     enabled: settings.enabled,
+    clientProcessing: settings.clientProcessing !== false,
     presetName: settings.presetName,
     preampDb: settings.preampDb,
     bands: settings.bands.map(b => ({ frequency: b.frequency, gain: b.gain, q: b.q })),

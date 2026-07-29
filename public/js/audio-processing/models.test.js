@@ -104,6 +104,7 @@ describe('createDefaultSettings', () => {
     const s = createDefaultSettings();
     assert.equal(s.schemaVersion, SCHEMA_VERSION);
     assert.equal(s.enabled, false);
+    assert.equal(s.clientProcessing, true);
     assert.equal(s.presetName, 'Flat');
     assert.equal(s.preampDb, 0);
     assert.equal(s.bands.length, 10);
@@ -274,6 +275,13 @@ describe('toServerPayload', () => {
     assert.equal(payload.bands.length, 10);
     assert.ok('frequency' in payload.bands[0]);
     assert.ok('gain' in payload.bands[0]);
+  });
+
+  it('includes the client/server processing preference', () => {
+    const settings = createDefaultSettings();
+    assert.equal(toServerPayload(settings).clientProcessing, true);
+    settings.clientProcessing = false;
+    assert.equal(toServerPayload(settings).clientProcessing, false);
   });
 });
 

@@ -961,6 +961,17 @@ html, body {
   margin-top: 12px;
 }
 
+.eq-server-note {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(120, 200, 255, 0.95);
+  background: rgba(120, 200, 255, 0.1);
+  border: 1px solid rgba(120, 200, 255, 0.3);
+  border-radius: 6px;
+}
+
 .eq-night-header {
   font-size: 14px;
   font-weight: 600;
