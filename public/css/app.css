@@ -741,6 +741,11 @@ html, body {
   background: rgba(220, 140, 0, 0.45);
 }
 
+.icon-flip-v {
+  display: inline-block;
+  transform: scaleY(-1);
+}
+
 .nav-drawer-btn:active {
   background: rgba(240, 160, 20, 0.55);
   transform: scale(0.95);
