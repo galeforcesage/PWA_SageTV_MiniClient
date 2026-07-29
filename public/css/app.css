@@ -649,7 +649,7 @@ html, body {
   top: 0;
   left: 0;
   bottom: 0;
-  width: 340px;
+  width: 220px;
   max-width: 85vw;
   background: transparent;
   backdrop-filter: none;
@@ -671,9 +671,9 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 8px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.03);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: rgba(255, 160, 40, 0.9);
 }
@@ -692,40 +692,40 @@ html, body {
 }
 
 .nav-drawer-section {
-  padding: 8px 12px;
+  padding: 5px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 
 .nav-drawer-section-bottom {
-  padding: 8px 12px;
+  padding: 5px 10px;
   margin-top: auto;
   border-top: 1px solid rgba(255,255,255,0.05);
 }
 
 .nav-drawer-label {
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
   color: rgba(255, 160, 40, 0.8);
   letter-spacing: 1px;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
   text-align: center;
 }
 
 .nav-drawer-row {
   display: flex;
   justify-content: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .nav-drawer-btn {
   background: rgba(200, 120, 0, 0.3);
   border: 1px solid rgba(255, 160, 40, 0.4);
   color: #fff;
-  border-radius: 8px;
-  width: 72px;
-  height: 66px;
-  font-size: 26px;
+  border-radius: 6px;
+  width: 44px;
+  height: 40px;
+  font-size: 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
