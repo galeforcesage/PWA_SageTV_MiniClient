@@ -25,6 +25,7 @@ import { StreamInflater, initCompression } from './compression.js';
 import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
+import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -232,6 +233,10 @@ export class MiniClientConnection extends EventTarget {
 
     // NG Playback Context manager (receives metadata from server SET_PROPERTY)
     this.playbackContextManager = new NgPlaybackContextManager();
+
+    // Audio Processing delegate (set by app.js when EQ subsystem is initialised).
+    // Provides: capabilities(), settings(), dspActive() for GET_PROPERTY responses.
+    this._audioProcessing = null;
 
     // Bandwidth tracking for status bar
     this._bytesReceivedGfx = 0;
@@ -951,58 +956,121 @@ export class MiniClientConnection extends EventTarget {
     const canNative = (mime) => {
       try { return v.canPlayType(mime) === 'probably'; } catch { return false; }
     };
+    const isTizen = !!(this.platformDetector && this.platformDetector.isTizen && this.platformDetector.isTizen());
+    const canNativeMaybe = (mime) => {
+      if (isTizen) return false;
+      try { return !!v.canPlayType(mime); } catch { return false; }
+    };
     const canMse = (mime) => {
       try { return !!(MS && MS.isTypeSupported && MS.isTypeSupported(mime)); } catch { return false; }
     };
 
-    // ── pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer ──
-    const mse = { video: [], audio: [], containers: [] };
-    if (canMse('video/mp4; codecs="avc1.42E01E"')) mse.video.push('H264');
-    if (canMse('video/mp4; codecs="hvc1.1.6.L120.90"') ||
-        canMse('video/mp4; codecs="hev1.1.6.L120.90"')) mse.video.push('HEVC');
-    if (canMse('video/mp4; codecs="vp09.00.10.08"')) mse.video.push('VP9');
-    if (canMse('video/mp4; codecs="av01.0.08M.08"')) mse.video.push('AV1');
-    if (canMse('audio/mp4; codecs="mp4a.40.2"')) mse.audio.push('AAC');
-    if (canMse('audio/mp4; codecs="mp4a.40.5"')) mse.audio.push('HE-AAC');
-    if (canMse('audio/mpeg')) mse.audio.push('MP3');
-    if (canMse('audio/mp4; codecs="ac-3"')) mse.audio.push('AC3');
-    if (canMse('audio/mp4; codecs="ec-3"')) mse.audio.push('EAC3');
-    if (canMse('audio/mp4; codecs="opus"')) mse.audio.push('OPUS');
-    // MSE ingestion is fMP4 only. Only advertise MP4 when the surface can
-    // decode anything at all.
-    if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+    // ── Fast path: use pre-computed codec probe results ───────────────
+    // The codec probe (codec-probe.js) ran during app init while the
+    // connect screen was visible. If complete, its results are more
+    // thorough (includes decodingInfo hardware validation) than the
+    // inline canPlayType checks below.
+    const probeResults = getProbeResults();
+    let mse, native;
 
-    // ── pwa_native: what <video src=...> can decode via native decoder ──
-    const native = { video: [], audio: [], containers: [] };
-    if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
-    if (canNative('video/mp4; codecs="hvc1"') || canNative('video/mp4; codecs="hev1"') ||
-        canNative('video/mp4; codecs="hvc1.1.6.L120.90"')) native.video.push('HEVC');
-    if (canNative('video/mp4; codecs="mp4v.20.8"') ||
-        canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
-    if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
-    if (canNative('video/webm; codecs="vp9"') ||
-        canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
-    if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
-    if (canNative('audio/mp4; codecs="mp4a.40.2"') || canNative('audio/mp4')) native.audio.push('AAC');
-    if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
-    if (canNative('audio/mpeg')) native.audio.push('MP3');
-    if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
-    if (canNative('audio/eac3') || canNative('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
-    if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
-        canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
-    if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
-    if (canNative('video/mp4')) native.containers.push('MP4');
-    if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
-    if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
-    if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
-    // HLS is a container-like delivery mode. Reported here as a container so
-    // the server can match .m3u8 sources; also declared as a delivery mode on
-    // the surface itself.
-    if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
-      // HLS carries MPEG2-TS segments; the mp2t container check above already
-      // covers native TS decode, but declare HLS explicitly so a Sage HLS URL
-      // resolves as a valid pull target.
-      if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
+    if (probeResults && probeResults.complete) {
+      console.log('[PlaybackSurfaces] Using pre-computed codec probe results');
+      // Build MSE codec list from probe
+      mse = { video: [], audio: [], containers: [] };
+      for (const r of probeResults.video) {
+        if (r.mse) {
+          const name = r.name.startsWith('HEVC') ? 'HEVC' : (r.name.startsWith('H264') ? 'H264' : r.name);
+          if (!mse.video.includes(name)) mse.video.push(name);
+        }
+      }
+      for (const r of probeResults.audio) {
+        if (r.mse) {
+          if (!mse.audio.includes(r.name)) mse.audio.push(r.name);
+        }
+      }
+      if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+
+      // Build native codec list from probe
+      native = { video: [], audio: [], containers: [] };
+      for (const r of probeResults.video) {
+        if (r.native) {
+          const name = r.name.startsWith('HEVC') ? 'HEVC' : (r.name.startsWith('H264') ? 'H264' : r.name);
+          if (!native.video.includes(name)) {
+            native.video.push(name);
+            if (name === 'HEVC') this._hevcPendingValidation = true;
+          }
+        }
+      }
+      for (const r of probeResults.audio) {
+        if (r.native && !native.audio.includes(r.name)) native.audio.push(r.name);
+      }
+      for (const r of probeResults.containers) {
+        if (r.native && !native.containers.includes(r.name)) native.containers.push(r.name);
+      }
+      // MP4 container inference (same as inline path below)
+      if (!native.containers.includes('MP4') && (native.video.length || native.audio.length)) {
+        native.containers.push('MP4');
+      }
+
+      // Log suspicious codecs (canPlayType yes but decodingInfo no)
+      for (const r of [...probeResults.video, ...probeResults.audio]) {
+        if (r.confidence === 'suspicious') {
+          console.warn(`[PlaybackSurfaces] ${r.name}: canPlayType=${r.nativeVal} but decodingInfo.supported=false — SUSPICIOUS`);
+        }
+      }
+    } else {
+      // ── Inline fallback: probe hasn't completed yet ──────────────
+      if (probeResults) {
+        console.log('[PlaybackSurfaces] Codec probe not yet complete — using inline canPlayType');
+      }
+
+      // pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer
+      mse = { video: [], audio: [], containers: [] };
+      if (canMse('video/mp4; codecs="avc1.42E01E"')) mse.video.push('H264');
+      if (canMse('video/mp4; codecs="hvc1.1.6.L120.90"') ||
+          canMse('video/mp4; codecs="hev1.1.6.L120.90"')) mse.video.push('HEVC');
+      if (canMse('video/mp4; codecs="vp09.00.10.08"')) mse.video.push('VP9');
+      if (canMse('video/mp4; codecs="av01.0.08M.08"')) mse.video.push('AV1');
+      if (canMse('audio/mp4; codecs="mp4a.40.2"')) mse.audio.push('AAC');
+      if (canMse('audio/mp4; codecs="mp4a.40.5"')) mse.audio.push('HE-AAC');
+      if (canMse('audio/mpeg')) mse.audio.push('MP3');
+      if (canMse('audio/mp4; codecs="ac-3"')) mse.audio.push('AC3');
+      if (canMse('audio/mp4; codecs="ec-3"')) mse.audio.push('EAC3');
+      if (canMse('audio/mp4; codecs="opus"')) mse.audio.push('OPUS');
+      if (mse.video.length || mse.audio.length) mse.containers.push('MP4');
+
+      // pwa_native: what <video src=...> can decode via native decoder
+      native = { video: [], audio: [], containers: [] };
+      if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
+      if (canNativeMaybe('video/mp4; codecs="hvc1"') || canNativeMaybe('video/mp4; codecs="hev1"') ||
+          canNativeMaybe('video/mp4; codecs="hvc1.1.6.L120.90"')) {
+        native.video.push('HEVC');
+        this._hevcPendingValidation = true;
+      }
+      if (canNative('video/mp4; codecs="mp4v.20.8"') ||
+          canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
+      if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
+      if (canNative('video/webm; codecs="vp9"') ||
+          canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
+      if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
+      if (canNative('audio/mp4; codecs="mp4a.40.2"') || canNative('audio/mp4')) native.audio.push('AAC');
+      if (canNative('audio/mp4; codecs="mp4a.40.5"')) native.audio.push('HE-AAC');
+      if (canNative('audio/mpeg')) native.audio.push('MP3');
+      if (canNative('audio/ac3') || canNative('audio/mp4; codecs="ac-3"')) native.audio.push('AC3');
+      if (canNativeMaybe('audio/eac3') || canNativeMaybe('audio/mp4; codecs="ec-3"')) native.audio.push('EAC3');
+      if (canNative('audio/mp4; codecs="opus"') || canNative('audio/ogg; codecs="opus"') ||
+          canNative('audio/webm; codecs="opus"')) native.audio.push('OPUS');
+      if (canNative('audio/flac') || canNative('audio/mp4; codecs="flac"')) native.audio.push('FLAC');
+      if (canNative('video/mp4') || canNativeMaybe('video/mp4') ||
+          native.video.length || native.audio.length) {
+        native.containers.push('MP4');
+      }
+      if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
+      if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
+      if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
+      if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
+        if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
+      }
     }
 
     // Native surface capability pipeline:  (query ∪ whitelist) − blacklist
@@ -1055,11 +1123,15 @@ export class MiniClientConnection extends EventTarget {
       pwa_native: {
         route: 'native',
         priority: 100,
-        // Pull only. We deliberately do NOT advertise 'hls': the server's HLS
-        // path routes through the legacy iOS HTTPLS subsystem (480x272 stale
-        // tiers). Non-natively-decodable content goes to pwa_mse (bridge
-        // transcode) instead, which produces proper HD fMP4.
-        deliveryModes: 'pull',
+        // pull: direct-play (no transcode). The native <video> element decodes
+        //       the raw bitstream.
+        // pull-xcode: audio-transcode / remux. The server conditions the stream
+        //       (e.g. HEVC video copy + AC-4→AAC audio transcode) into fMP4 via
+        //       MediaServer, and the native <video> element decodes it. This
+        //       avoids MSE HEVC limitations — native <video src=url> handles
+        //       HEVC when the browser has platform decoder support (HEVC Video
+        //       Extensions on Windows Edge/Chrome).
+        deliveryModes: 'pull,pull-xcode',
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
@@ -1138,8 +1210,56 @@ export class MiniClientConnection extends EventTarget {
 
     console.log('[PlaybackSurfaces] pwa_native:', JSON.stringify(this._playbackSurfaces.pwa_native));
     console.log('[PlaybackSurfaces] pwa_mse:   ', JSON.stringify(this._playbackSurfaces.pwa_mse));
+
+    // GPU validation via mediaCapabilities.decodingInfo() is advisory only.
+    // On Edge/Windows it often returns supported=false for HEVC even though
+    // canPlayType returns 'maybe' and native <video> playback works fine.
+    // canPlayType is authoritative for native pull — don't let decodingInfo veto it.
+    if (this._hevcPendingValidation) {
+      if (MiniClientConnection._hevcHwValidated === false) {
+        console.warn('[PlaybackSurfaces] HEVC GPU pre-validate FAIL — keeping HEVC anyway (canPlayType authoritative for native pull)');
+      }
+      this._hevcPendingValidation = false;
+    }
+
     return this._playbackSurfaces;
   }
+
+  /**
+   * Validate HEVC hardware decode via MediaCapabilities API.
+   * Returns true if the GPU can decode HEVC; false otherwise.
+   */
+  async _validateHevcHwDecode() {
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
+      // API not available — trust the 'maybe' (fallback exists at runtime)
+      console.log('[PlaybackSurfaces] mediaCapabilities unavailable — trusting HEVC maybe');
+      return true;
+    }
+    try {
+      const result = await navigator.mediaCapabilities.decodingInfo({
+        type: 'file',
+        video: {
+          contentType: 'video/mp4; codecs="hvc1.1.6.L120.90"',
+          width: 1920,
+          height: 1080,
+          framerate: 30,
+          bitrate: 10000000,
+        },
+      });
+      const ok = result.supported && result.powerEfficient;
+      console.log(`[PlaybackSurfaces] HEVC GPU validate: supported=${result.supported} smooth=${result.smooth} powerEfficient=${result.powerEfficient} → ${ok ? 'PASS' : 'FAIL'}`);
+      return ok;
+    } catch (e) {
+      console.warn('[PlaybackSurfaces] HEVC GPU validate error:', e.message);
+      return true;  // err on side of trying — runtime fallback exists
+    }
+  }
+
+  /**
+   * Run GPU validation at class load time so result is available synchronously
+   * when _probePlaybackSurfaces() runs during connection setup.
+   */
+  static _hevcHwValidated = null; // null = pending, true = hw ok, false = no hw
 
   /**
    * Resolve the client's preferred audio language as an ISO 639-2 3-letter
@@ -1391,6 +1511,26 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
+  // ── Audio Processing delegate registration ──
+
+  /**
+   * Register audio processing delegate for GET_PROPERTY responses.
+   * Called by app.js after EQ subsystem initialisation.
+   * @param {{ capabilities: Function, settings: Function, dspActive: Function }} delegate
+   */
+  setAudioProcessingDelegate(delegate) {
+    this._audioProcessing = delegate;
+  }
+
+  /**
+   * Push audio processing state to the server via client feedback channel.
+   * @param {'capabilities'|'settings'|'dsp_active'} type
+   * @param {Object} payload
+   */
+  async pushAudioProcessingUpdate(type, payload) {
+    await this._postCapabilityFeedback(`AUDIO_PROCESSING_${type.toUpperCase()}`, payload);
+  }
+
   /**
    * Resolve a property value for GET_PROPERTY.
    */
@@ -1561,6 +1701,20 @@ export class MiniClientConnection extends EventTarget {
       case 'NG_PLAYBACK_CONTEXT_SUPPORTED':
         this._markNgNegotiated(name);
         return 'TRUE';
+
+      // ── Audio Processing / Equalizer ──
+      case 'AUDIO_PROCESSING_CAPABILITIES':
+        return this._audioProcessing?.capabilities
+          ? JSON.stringify(this._audioProcessing.capabilities())
+          : '';
+      case 'AUDIO_PROCESSING_SETTINGS':
+        return this._audioProcessing?.settings
+          ? JSON.stringify(this._audioProcessing.settings())
+          : '';
+      case 'AUDIO_PROCESSING_DSP_ACTIVE':
+        return this._audioProcessing?.dspActive
+          ? JSON.stringify(this._audioProcessing.dspActive())
+          : '';
 
       case 'GFX_TEXTMODE':
         return ClientProperty.GFX_TEXTMODE;
@@ -2723,8 +2877,9 @@ export class MiniClientConnection extends EventTarget {
           const hdr = Array.from(payload.subarray(0, Math.min(24, payload.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ');
           console.log(`[Media] PUSHBUFFER #${this._pushCount} len=${len} bufSize=${bufSize} flags=0x${(flags>>>0).toString(16)} raw=[${hdr}]`);
         }
-      } else if (cmd !== 24 && cmd !== 0) {
-        console.log(`[Media] cmd=${cmd} len=${len}`);
+      } else if (cmd !== 24) {
+        // Log ALL non-PUSHBUFFER, non-GETVIDEORECT commands (including INIT=0)
+        console.log(`[Media] cmd=${cmd} len=${len} mediaPlayer=${!!this.mediaPlayer} mediaOpened=${!!this._mediaOpened}`);
       }
       this._handleMediaCommand(cmd, len, payload);
     }
@@ -2764,6 +2919,7 @@ export class MiniClientConnection extends EventTarget {
         this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
+        this.dispatchEvent(new CustomEvent('mediaclose'));
         this._sendMediaReturn(1);
         break;
 
@@ -2784,6 +2940,17 @@ export class MiniClientConnection extends EventTarget {
             const hostPort = `${this.serverHost}:${this.serverPort}`;
             urlString = urlString.split('HOSTNAME').join(hostPort);
           }
+          // ── NG Format Hint (ng_fmt) ──────────────────────────────────────
+          // NG servers append ?ng_fmt=containerMime,videoMime,audioMime to the
+          // OPENURL so the client can configure its decoder pipeline immediately
+          // without probing/sniffing the stream. Strip it before passing the URL
+          // to the player (it's metadata, not part of the media path).
+          const ngFmt = this._parseNgFmt(urlString);
+          if (ngFmt.hint) {
+            urlString = ngFmt.cleanUrl;
+            console.log(`[Media] ng_fmt: container=${ngFmt.hint.container || '?'} video=${ngFmt.hint.video || '?'} audio=${ngFmt.hint.audio || '?'}`);
+          }
+
           const isPush = urlString.startsWith('push:');
           const isStv = urlString.startsWith('stv://');
           const isAbsPath = urlString.startsWith('/');
@@ -2791,6 +2958,10 @@ export class MiniClientConnection extends EventTarget {
 
           // Notify NG playback context manager of the media open
           this.playbackContextManager.onMediaOpen(urlString);
+          this.dispatchEvent(new CustomEvent('mediaopen', { detail: { url: urlString } }));
+
+          // Pass format hint to the media player for fast-path decoder setup.
+          this.mediaPlayer.setFormatHint(ngFmt.hint);
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
@@ -2799,8 +2970,10 @@ export class MiniClientConnection extends EventTarget {
           // stv://); push is retired and iosstream is a legacy-only construct.
           const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
           if (msRoute) {
-            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
-            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0);
+            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
+            this._effectiveSurface = '';
+            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
             this._sendMediaReturn(1);
             break;
           }
@@ -2840,6 +3013,11 @@ export class MiniClientConnection extends EventTarget {
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
             }
           }
+          // Consumed the server's per-stream routing decision for this OPENURL;
+          // clear so a back-to-back item arriving without a fresh CAP_* doesn't
+          // inherit stale delivery/surface routing.
+          this._effectiveDelivery = '';
+          this._effectiveSurface = '';
         }
         this._sendMediaReturn(1);
         break;
@@ -2870,6 +3048,7 @@ export class MiniClientConnection extends EventTarget {
         this._mediaOpened = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
+        this.dispatchEvent(new CustomEvent('mediaclose'));
         this._sendMediaReturn(1);
         break;
 
@@ -3055,6 +3234,17 @@ export class MiniClientConnection extends EventTarget {
     token = token.trim();
     if (!token) return null;
 
+    // Bare transport word with NO conditioning token. An NG server emits a plain
+    // "pull" (or "pull-xcode") CAP_EFFECTIVE_DELIVERY for a DIRECT_PLAY decision —
+    // there is no MediaServer /msproxy mode to request. Return null so OPENURL
+    // falls through to the native /rawmedia direct-pull path, preserving the
+    // original bitstream. WITHOUT this guard, bare "pull" (which has no ":") skips
+    // the prefix-strip above and lands in the `else` mode-mapping below, producing
+    // a bogus "xcode:pull" key that MediaServer rejects — AVPlay then never opens,
+    // the server's openURL0 times out after 30s -> PlaybackException + infinite
+    // client spinner (broke ALL DIRECT_PLAY sources on Tizen: MPEG-PS, HEVC, ...).
+    if (token === 'pull' || token === 'pull-xcode') return null;
+
     // Split off any ";k=v" parameter suffix (Option B). The BASE token selects
     // the /msproxy mode; the suffix is relayed VERBATIM so the server's
     // XCODE_SETUP parser can apply the override (e.g. acodec=eac3). Lowercase is
@@ -3073,6 +3263,43 @@ export class MiniClientConnection extends EventTarget {
     else if (token === 'mpeg2psremux' || token === 'remux:ps') mode = 'remux:ps';
     else mode = 'xcode:' + token; // browserhd, browserhd_copyv, or any quality key
     return { path, mode: mode + params };
+  }
+
+  /**
+   * Parse the NG format hint (ng_fmt) from a URL string.
+   * Returns { hint: {container, video, audio} | null, cleanUrl: string }.
+   * If ng_fmt is absent, hint is null and cleanUrl === input.
+   */
+  _parseNgFmt(url) {
+    // Match ?ng_fmt=... or &ng_fmt=... (value is up to next & or end)
+    const re = /([?&])ng_fmt=([^&]*)/;
+    const m = url.match(re);
+    if (!m) return { hint: null, cleanUrl: url };
+
+    const raw = decodeURIComponent(m[2]);
+    const parts = raw.split(',');
+    const hint = {
+      container: (parts[0] || '').trim() || null,
+      video: (parts[1] || '').trim() || null,
+      audio: (parts[2] || '').trim() || null,
+    };
+
+    // Strip ng_fmt param from URL
+    let clean = url;
+    if (m[1] === '?') {
+      // ng_fmt was the first (or only) query param
+      const after = url.substring(m.index + m[0].length);
+      if (after.startsWith('&')) {
+        clean = url.substring(0, m.index) + '?' + after.substring(1);
+      } else {
+        clean = url.substring(0, m.index) + after;
+      }
+    } else {
+      // ng_fmt was a subsequent &param
+      clean = url.substring(0, m.index) + url.substring(m.index + m[0].length);
+    }
+
+    return { hint, cleanUrl: clean };
   }
 
   _sendMediaReturnLong(value) {
@@ -3710,6 +3937,32 @@ export class MiniClientConnection extends EventTarget {
     this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'user' } }));
   }
 }
+
+// ── Static HEVC GPU validation (runs once at module load) ──────────────
+// Probes the MediaCapabilities API to confirm hardware HEVC decode.
+// Result is available synchronously when _probePlaybackSurfaces() runs.
+(async () => {
+  if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
+    MiniClientConnection._hevcHwValidated = true; // trust 'maybe' when API unavailable
+    return;
+  }
+  try {
+    const result = await navigator.mediaCapabilities.decodingInfo({
+      type: 'file',
+      video: {
+        contentType: 'video/mp4; codecs="hvc1.1.6.L120.90"',
+        width: 1920,
+        height: 1080,
+        framerate: 30,
+        bitrate: 10000000,
+      },
+    });
+    MiniClientConnection._hevcHwValidated = !!(result.supported && result.powerEfficient);
+    console.log(`[PlaybackSurfaces] HEVC GPU pre-validate: supported=${result.supported} powerEfficient=${result.powerEfficient} → ${MiniClientConnection._hevcHwValidated ? 'PASS' : 'FAIL'}`);
+  } catch (e) {
+    MiniClientConnection._hevcHwValidated = true; // err on trying
+  }
+})();
 
 // ── Utility ──────────────────────────────────────────────
 

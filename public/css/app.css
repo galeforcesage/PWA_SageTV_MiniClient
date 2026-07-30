@@ -649,7 +649,7 @@ html, body {
   top: 0;
   left: 0;
   bottom: 0;
-  width: 340px;
+  width: 220px;
   max-width: 85vw;
   background: transparent;
   backdrop-filter: none;
@@ -671,9 +671,9 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 8px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.03);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: rgba(255, 160, 40, 0.9);
 }
@@ -692,40 +692,40 @@ html, body {
 }
 
 .nav-drawer-section {
-  padding: 8px 12px;
+  padding: 5px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 
 .nav-drawer-section-bottom {
-  padding: 8px 12px;
+  padding: 5px 10px;
   margin-top: auto;
   border-top: 1px solid rgba(255,255,255,0.05);
 }
 
 .nav-drawer-label {
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
   color: rgba(255, 160, 40, 0.8);
   letter-spacing: 1px;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
   text-align: center;
 }
 
 .nav-drawer-row {
   display: flex;
   justify-content: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .nav-drawer-btn {
   background: rgba(200, 120, 0, 0.3);
   border: 1px solid rgba(255, 160, 40, 0.4);
   color: #fff;
-  border-radius: 8px;
-  width: 72px;
-  height: 66px;
-  font-size: 26px;
+  border-radius: 6px;
+  width: 44px;
+  height: 40px;
+  font-size: 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -739,6 +739,11 @@ html, body {
 
 .nav-drawer-btn:hover {
   background: rgba(220, 140, 0, 0.45);
+}
+
+.icon-flip-v {
+  display: inline-block;
+  transform: scaleY(-1);
 }
 
 .nav-drawer-btn:active {
@@ -779,6 +784,301 @@ html, body {
 .nav-drawer-edge.visible {
   opacity: 1;
 }
+
+/* ── Equalizer Panel ─────────────────────────────────── */
+
+.eq-panel {
+  max-width: 640px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.eq-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.eq-header h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.eq-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.eq-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: rgba(255,255,255,0.9);
+}
+
+.eq-toggle input[type="checkbox"] {
+  accent-color: rgba(255, 160, 40, 0.9);
+  width: 16px;
+  height: 16px;
+}
+
+.eq-sliders {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: flex-end;
+  padding: 8px 0;
+  min-height: 200px;
+}
+
+.eq-slider-caption {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 4px 0 2px;
+}
+
+.eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.eq-separator {
+  width: 1px;
+  background: rgba(255, 160, 40, 0.3);
+  align-self: stretch;
+  margin: 0 4px;
+}
+
+.eq-band-value {
+  font-size: 10px;
+  color: rgba(255, 160, 40, 0.8);
+  min-height: 14px;
+  text-align: center;
+}
+
+/* Vertical range sliders.
+ *
+ * Uses the standardized `writing-mode: vertical-rl` mechanism (Chrome 121+,
+ * Firefox 129+, Safari 17.4+, iPad Safari 17.4+) rather than the removed
+ * `-webkit-appearance: slider-vertical`. The `orient="vertical"` HTML
+ * attribute in the markup keeps older Firefox vertical as a fallback. Top of
+ * the track = max gain. */
+.eq-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 8px;
+  height: 160px;
+  background: rgba(255, 160, 40, 0.22);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* WebKit/Blink track + thumb */
+.eq-slider::-webkit-slider-runnable-track {
+  width: 8px;
+  background: transparent;
+  border-radius: 4px;
+}
+.eq-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 160, 40, 0.95);
+  border: 2px solid rgba(255, 200, 100, 0.9);
+  cursor: pointer;
+}
+
+/* Firefox track + thumb */
+.eq-slider::-moz-range-track {
+  width: 8px;
+  background: transparent;
+  border-radius: 4px;
+}
+.eq-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 160, 40, 0.95);
+  border: 2px solid rgba(255, 200, 100, 0.9);
+  cursor: pointer;
+}
+
+.eq-slider:focus,
+.eq-slider:focus-visible {
+  outline: 3px solid rgba(120, 200, 255, 0.95);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.eq-band-label {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.7);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.eq-preamp-band .eq-band-label {
+  color: rgba(120, 200, 255, 0.95);
+  font-weight: 600;
+}
+
+/* Preamp = volume boost: light-blue track + a horizontal-line "fader" thumb
+ * to visually distinguish it from the orange EQ band sliders. */
+.eq-preamp-band .eq-slider {
+  background: rgba(120, 200, 255, 0.22);
+}
+.eq-preamp-band .eq-slider::-webkit-slider-thumb {
+  width: 22px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(120, 200, 255, 0.98);
+  border: 1px solid rgba(180, 220, 255, 0.95);
+}
+.eq-preamp-band .eq-slider::-moz-range-thumb {
+  width: 22px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(120, 200, 255, 0.98);
+  border: 1px solid rgba(180, 220, 255, 0.95);
+}
+.eq-preamp-band .eq-band-value {
+  color: rgba(120, 200, 255, 0.95);
+}
+
+.eq-night-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.eq-server-note {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(120, 200, 255, 0.95);
+  background: rgba(120, 200, 255, 0.1);
+  border: 1px solid rgba(120, 200, 255, 0.3);
+  border-radius: 6px;
+}
+
+.eq-server-mode-note {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: rgba(120, 200, 255, 0.95);
+  background: rgba(120, 200, 255, 0.1);
+  border: 1px solid rgba(120, 200, 255, 0.3);
+  border-radius: 6px;
+}
+
+.eq-night-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 160, 40, 0.9);
+  margin-bottom: 8px;
+}
+
+.eq-night-caption {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 10px;
+}
+
+.eq-night-controls select:disabled,
+.eq-night-controls option:disabled {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.eq-night-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.eq-night-schedule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.eq-night-to {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.eq-status {
+  margin-top: 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+  text-align: center;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+}
+
+/* ── Equalizer: Tizen TV remote focus + larger layout ─── */
+
+/* Strong, engine-independent highlight for whichever control the remote is on.
+ * Applied via JS (.eq-focused) so it shows reliably on Tizen regardless of the
+ * platform's native focus rendering. */
+.eq-focused {
+  outline: 3px solid rgba(120, 200, 255, 0.98) !important;
+  outline-offset: 3px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 4px rgba(120, 200, 255, 0.35);
+}
+select.eq-focused,
+button.eq-focused,
+input[type="checkbox"].eq-focused,
+input[type="time"].eq-focused {
+  background: rgba(120, 200, 255, 0.18);
+}
+
+/* On a TV the panel is scaled up a little and controls/text are larger so they
+ * are legible and comfortably targetable from the couch with a remote. */
+.eq-panel.eq-tizen {
+  max-width: 880px;
+  max-height: 92vh;
+}
+.eq-tizen .eq-header h2 { font-size: 24px; }
+.eq-tizen .eq-toggle,
+.eq-tizen .form-select,
+.eq-tizen .action-btn,
+.eq-tizen .eq-slider-caption,
+.eq-tizen .eq-night-caption,
+.eq-tizen .eq-status { font-size: 16px; }
+.eq-tizen .eq-night-header { font-size: 18px; }
+.eq-tizen .eq-sliders { min-height: 260px; gap: 10px; }
+.eq-tizen .eq-slider { height: 210px; width: 10px; }
+.eq-tizen .eq-slider::-webkit-slider-thumb { width: 26px; height: 26px; }
+.eq-tizen .eq-slider::-moz-range-thumb { width: 26px; height: 26px; }
+.eq-tizen .eq-preamp-band .eq-slider::-webkit-slider-thumb { width: 28px; height: 8px; }
+.eq-tizen .eq-preamp-band .eq-slider::-moz-range-thumb { width: 28px; height: 8px; }
+.eq-tizen .eq-band-value { font-size: 14px; min-height: 18px; }
+.eq-tizen .eq-band-label { font-size: 14px; }
+.eq-tizen .eq-toggle input[type="checkbox"] { width: 22px; height: 22px; }
 
 /* ── Client Screen ───────────────────────────────────── */
 

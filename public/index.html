@@ -80,7 +80,7 @@
         <div class="settings-scroll">
 
           <!-- General -->
-          <details class="settings-group" open>
+          <details class="settings-group">
             <summary>General</summary>
             <div class="settings-item">
               <div class="settings-item-text"><strong>Auto Connect to Last Server</strong><br><small>Automatically connect on startup</small></div>
@@ -389,7 +389,7 @@
         <div class="nav-drawer-label">Navigation</div>
         <div class="nav-drawer-row">
           <button data-cmd="28" class="nav-drawer-btn" title="Home">🏠</button>
-          <button data-cmd="75" class="nav-drawer-btn" title="Back">↩</button>
+          <button data-cmd="75" class="nav-drawer-btn" title="Back"><span class="icon-flip-v">↩</span></button>
           <button data-cmd="29" class="nav-drawer-btn" title="Options">☰</button>
           <button data-cmd="24" class="nav-drawer-btn" title="Info">ℹ</button>
         </div>
@@ -425,6 +425,7 @@
           <button data-cmd="14" class="nav-drawer-btn" title="Vol Down">🔉</button>
           <button data-cmd="26" class="nav-drawer-btn" title="Mute">🔇</button>
           <button data-cmd="13" class="nav-drawer-btn" title="Vol Up">🔊</button>
+          <button id="btn-eq" class="nav-drawer-btn" title="Equalizer">🎛️</button>
         </div>
       </div>
       <div class="nav-drawer-section">
@@ -432,6 +433,141 @@
         <div class="nav-drawer-row">
           <button id="nav-drawer-disconnect" class="nav-drawer-btn" title="Disconnect (back to server list)">⏻</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Equalizer Panel Overlay -->
+    <div id="eq-overlay" class="modal-overlay" hidden>
+      <div class="modal-card modal-card-wide eq-panel">
+        <div class="eq-header">
+          <h2>🎛️ Equalizer</h2>
+          <button id="eq-close" class="nav-drawer-close" aria-label="Close">✕</button>
+        </div>
+        <div class="eq-controls">
+          <label class="eq-toggle">
+            <input type="checkbox" id="eq-enabled" checked>
+            <span>Enabled</span>
+          </label>
+          <label class="eq-toggle" id="eq-client-toggle" title="On: this device processes audio (Web Audio). Off: hand off to the SageTV server.">
+            <input type="checkbox" id="eq-client-processing" checked>
+            <span>Client EQ</span>
+          </label>
+          <span class="eq-server-mode-note" id="eq-server-mode-note" hidden>🖥️ All equalizer processing is done on the SageTV server.</span>
+          <select id="eq-preset" class="form-select"></select>
+          <button id="eq-reset" class="action-btn">Reset</button>
+        </div>
+        <div class="eq-server-note" id="eq-server-note" hidden>⚠️ Server EQ isn't available yet — your settings are saved and sent, but the server doesn't apply them. Turn <strong>Client EQ</strong> back on to hear changes.</div>
+        <div class="eq-slider-caption"><strong style="color:#7ec8ff">Pre</strong> (light blue) is a volume boost — raise it to make SageTV audio louder than normal, up to +12 dB. Each orange band boosts or cuts that frequency ±12 dB. Drag up to boost, down to cut.</div>
+        <div class="eq-sliders">
+          <div class="eq-band eq-preamp-band">
+            <span class="eq-band-value" data-value-for="preamp">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="preamp" tabindex="0">
+            <label class="eq-band-label">Pre</label>
+          </div>
+          <div class="eq-separator"></div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="0">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="0" tabindex="0">
+            <label class="eq-band-label">31</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="1">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="1" tabindex="0">
+            <label class="eq-band-label">63</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="2">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="2" tabindex="0">
+            <label class="eq-band-label">125</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="3">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="3" tabindex="0">
+            <label class="eq-band-label">250</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="4">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="4" tabindex="0">
+            <label class="eq-band-label">500</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="5">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="5" tabindex="0">
+            <label class="eq-band-label">1K</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="6">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="6" tabindex="0">
+            <label class="eq-band-label">2K</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="7">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="7" tabindex="0">
+            <label class="eq-band-label">4K</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="8">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="8" tabindex="0">
+            <label class="eq-band-label">8K</label>
+          </div>
+          <div class="eq-band">
+            <span class="eq-band-value" data-value-for="9">0</span>
+            <input type="range" class="eq-slider" orient="vertical"
+                   min="-12" max="12" step="0.5" value="0"
+                   data-band="9" tabindex="0">
+            <label class="eq-band-label">16K</label>
+          </div>
+        </div>
+        <div class="eq-night-section">
+          <div class="eq-night-header">🌙 Night Mode</div>
+          <div class="eq-night-caption">Evens out loud and quiet parts so dialog stays clear at low volume without loud peaks waking the house.</div>
+          <div class="eq-night-controls">
+            <label class="eq-toggle">
+              <input type="checkbox" id="eq-night-enabled">
+              <span>On</span>
+            </label>
+            <select id="eq-night-mode" class="form-select">
+              <option value="DYNAMIC_RANGE_COMPRESSION">Compress peaks (DRC)</option>
+              <option value="LOUDNESS_LEVELING">Loudness leveling (soon)</option>
+              <option value="PLATFORM_NIGHT_MODE">TV night mode (soon)</option>
+            </select>
+            <select id="eq-night-intensity" class="form-select">
+              <option value="LOW">Low</option>
+              <option value="MEDIUM" selected>Medium</option>
+              <option value="HIGH">High</option>
+            </select>
+          </div>
+          <div class="eq-night-schedule">
+            <label class="eq-toggle">
+              <input type="checkbox" id="eq-night-scheduled">
+              <span>Scheduled</span>
+            </label>
+            <input type="time" id="eq-night-start" class="form-input" value="22:00">
+            <span class="eq-night-to">→</span>
+            <input type="time" id="eq-night-end" class="form-input" value="06:00">
+          </div>
+        </div>
+        <div class="eq-status" id="eq-status">⚪ EQ Off</div>
       </div>
     </div>
 
