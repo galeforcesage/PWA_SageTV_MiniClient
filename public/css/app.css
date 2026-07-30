@@ -977,6 +977,18 @@ html, body {
   border-radius: 6px;
 }
 
+.eq-server-mode-note {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: rgba(120, 200, 255, 0.95);
+  background: rgba(120, 200, 255, 0.1);
+  border: 1px solid rgba(120, 200, 255, 0.3);
+  border-radius: 6px;
+}
+
 .eq-night-header {
   font-size: 14px;
   font-weight: 600;
