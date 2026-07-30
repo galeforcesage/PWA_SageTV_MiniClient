@@ -34,6 +34,12 @@ export class EqualizerPanel extends EventTarget {
     this._enabledCheckbox = null;
     this._visible = false;
 
+    // TV remote focus model (Tizen): a flat, ordered list of every focusable
+    // control plus the index of the one currently highlighted.
+    this._focusables = [];
+    this._focusIndex = 0;
+    this._lastSlider = null;
+
     // Bind handlers for cleanup
     this._onKeyDown = this._handleKeyDown.bind(this);
   }
@@ -150,6 +156,12 @@ export class EqualizerPanel extends EventTarget {
       } catch { /* ignore on non-Tizen */ }
     }
 
+    // On a TV, scale the panel up and enable the remote focus model.
+    if (this._isTizen) {
+      const card = this._overlay.querySelector('.modal-card');
+      if (card) card.classList.add('eq-tizen');
+    }
+
     // Load initial state (also applies the client/server processing-mode UI).
     this._syncFromSettings();
   }
@@ -207,11 +219,16 @@ export class EqualizerPanel extends EventTarget {
     this._syncFromSettings();
     this._overlay.hidden = false;
     this._visible = true;
-    document.addEventListener('keydown', this._onKeyDown);
+    // Capture on window so the modal intercepts remote keys before the SageTV
+    // spatial-nav (document capture) and input-manager (document bubble) can
+    // forward them to the server.
+    window.addEventListener('keydown', this._onKeyDown, true);
 
-    // Focus first slider for Tizen remote
-    if (this._isTizen && this._sliders.length > 0) {
-      this._sliders[0].focus();
+    // Tizen remote: take over volume keys, build the focus ring, focus the top.
+    if (this._isTizen) {
+      this._registerTvKeys();
+      this._buildFocusList();
+      this._setFocus(0);
     }
 
     this.dispatchEvent(new CustomEvent('visibilitychange', { detail: { visible: true } }));
@@ -224,7 +241,11 @@ export class EqualizerPanel extends EventTarget {
     if (!this._overlay) return;
     this._overlay.hidden = true;
     this._visible = false;
-    document.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keydown', this._onKeyDown, true);
+    if (this._isTizen) {
+      this._unregisterTvKeys();
+      this._clearFocusHighlight();
+    }
     this.dispatchEvent(new CustomEvent('visibilitychange', { detail: { visible: false } }));
   }
 
@@ -465,47 +486,154 @@ export class EqualizerPanel extends EventTarget {
   _handleKeyDown(e) {
     if (!this._visible) return;
 
+    const code = e.keyCode;
+
+    // Close: Esc, Tizen Back (10009), or the remote Back/Return keys.
+    if (e.key === 'Escape' || e.key === 'Back' || e.key === 'XF86Back' || code === 10009) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.hide();
+      return;
+    }
+
+    // Desktop/browser keeps native Tab/focus behaviour; only Esc is intercepted.
+    if (!this._isTizen) return;
+
+    // Volume keys are temporarily taken over while the panel is open: they nudge
+    // the focused slider (or the last one used). keyCodes: VolumeUp 447, Down 448.
+    if (e.key === 'VolumeUp' || e.key === 'AudioVolumeUp' || code === 447) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      this._nudgeSlider(this._activeSlider(), GAIN_STEP);
+      return;
+    }
+    if (e.key === 'VolumeDown' || e.key === 'AudioVolumeDown' || code === 448) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      this._nudgeSlider(this._activeSlider(), -GAIN_STEP);
+      return;
+    }
+
+    const el = this._focusables[this._focusIndex];
+    const isSlider = !!el && el.type === 'range';
+    const isSelect = !!el && el.tagName === 'SELECT';
+
     switch (e.key) {
-      case 'Escape':
-      case 'Back':       // Tizen remote
-      case 'XF86Back':   // Tizen remote alt
-        e.preventDefault();
-        e.stopPropagation();
-        this.hide();
-        break;
-
       case 'ArrowLeft':
-      case 'ArrowRight':
-        if (this._isTizen) {
-          e.preventDefault();
-          this._moveFocus(e.key === 'ArrowRight' ? 1 : -1);
-        }
+        e.preventDefault(); e.stopImmediatePropagation();
+        this._setFocus(this._focusIndex - 1);
         break;
-
+      case 'ArrowRight':
+        e.preventDefault(); e.stopImmediatePropagation();
+        this._setFocus(this._focusIndex + 1);
+        break;
       case 'ArrowUp':
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (isSlider) this._nudgeSlider(el, GAIN_STEP);
+        else if (isSelect) this._cycleSelect(el, -1);
+        else this._setFocus(this._focusIndex - 1);
+        break;
       case 'ArrowDown':
-        if (this._isTizen && document.activeElement?.type === 'range') {
-          e.preventDefault();
-          const slider = document.activeElement;
-          const delta = e.key === 'ArrowUp' ? GAIN_STEP : -GAIN_STEP;
-          slider.value = String(clampGain(parseFloat(slider.value) + delta));
-          slider.dispatchEvent(new Event('input'));
-        }
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (isSlider) this._nudgeSlider(el, -GAIN_STEP);
+        else if (isSelect) this._cycleSelect(el, 1);
+        else this._setFocus(this._focusIndex + 1);
+        break;
+      case 'Enter':
+        e.preventDefault(); e.stopImmediatePropagation();
+        this._activate(el);
         break;
     }
   }
 
-  /** Move focus between sliders (for Tizen remote). */
-  _moveFocus(direction) {
-    const allFocusable = [this._preampSlider, ...this._sliders].filter(Boolean);
-    const current = allFocusable.indexOf(document.activeElement);
-    if (current < 0) {
-      allFocusable[0]?.focus();
-      return;
+  /** Build the ordered list of focusable controls (visible + enabled only). */
+  _buildFocusList() {
+    const top = ['eq-enabled', 'eq-client-processing', 'eq-preset', 'eq-reset', 'eq-close']
+      .map((id) => document.getElementById(id));
+    const sliders = [this._preampSlider, ...this._sliders];
+    const night = [
+      'eq-night-enabled', 'eq-night-mode', 'eq-night-intensity',
+      'eq-night-scheduled', 'eq-night-start', 'eq-night-end',
+    ].map((id) => document.getElementById(id));
+
+    // offsetParent === null filters out anything hidden (e.g. the client-EQ
+    // toggle, which is hidden on Tizen).
+    this._focusables = [...top, ...sliders, ...night].filter(
+      (el) => el && !el.disabled && el.offsetParent !== null,
+    );
+    this._focusIndex = 0;
+  }
+
+  /** Focus the control at index i (clamped) and give it a visible highlight. */
+  _setFocus(i) {
+    if (!this._focusables.length) return;
+    this._focusIndex = Math.max(0, Math.min(this._focusables.length - 1, i));
+    this._clearFocusHighlight();
+    const el = this._focusables[this._focusIndex];
+    if (!el) return;
+    el.classList.add('eq-focused');
+    try { el.focus({ preventScroll: true }); } catch { /* ignore */ }
+    if (el.type === 'range') this._lastSlider = el;
+    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
+  }
+
+  /** Remove the highlight class from every focusable. */
+  _clearFocusHighlight() {
+    for (const el of this._focusables) el.classList.remove('eq-focused');
+  }
+
+  /** The slider volume keys should drive: current focus if a slider, else last used. */
+  _activeSlider() {
+    const el = this._focusables[this._focusIndex];
+    if (el && el.type === 'range') return el;
+    return this._lastSlider || this._preampSlider || this._sliders[0] || null;
+  }
+
+  /** Nudge a range slider by delta dB and fire its input handler. */
+  _nudgeSlider(slider, delta) {
+    if (!slider) return;
+    slider.value = String(clampGain(parseFloat(slider.value) + delta));
+    slider.dispatchEvent(new Event('input'));
+    this._lastSlider = slider;
+  }
+
+  /** Move a <select> to the next non-disabled option and fire change. */
+  _cycleSelect(select, dir) {
+    if (!select) return;
+    let i = select.selectedIndex;
+    for (let step = 0; step < select.options.length; step++) {
+      i += dir;
+      if (i < 0 || i >= select.options.length) return;
+      if (!select.options[i].disabled) {
+        select.selectedIndex = i;
+        select.dispatchEvent(new Event('change'));
+        return;
+      }
     }
-    const next = current + direction;
-    if (next >= 0 && next < allFocusable.length) {
-      allFocusable[next].focus();
+  }
+
+  /** Activate the focused control (Enter/OK). Sliders/selects use Up/Down. */
+  _activate(el) {
+    if (!el) return;
+    if (el.type === 'checkbox') {
+      el.checked = !el.checked;
+      el.dispatchEvent(new Event('change'));
+    } else if (el.tagName === 'BUTTON') {
+      el.click();
+    }
+  }
+
+  /** Temporarily take over the TV keys we drive while the panel is open. */
+  _registerTvKeys() {
+    if (typeof tizen === 'undefined' || !tizen.tvinputdevice) return;
+    for (const k of ['VolumeUp', 'VolumeDown']) {
+      try { tizen.tvinputdevice.registerKey(k); } catch { /* ignore */ }
+    }
+  }
+
+  /** Give the TV keys back when the panel closes. */
+  _unregisterTvKeys() {
+    if (typeof tizen === 'undefined' || !tizen.tvinputdevice) return;
+    for (const k of ['VolumeUp', 'VolumeDown']) {
+      try { tizen.tvinputdevice.unregisterKey(k); } catch { /* ignore */ }
     }
   }
 }

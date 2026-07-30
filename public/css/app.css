@@ -1026,6 +1026,48 @@ html, body {
   border-radius: 6px;
 }
 
+/* ── Equalizer: Tizen TV remote focus + larger layout ─── */
+
+/* Strong, engine-independent highlight for whichever control the remote is on.
+ * Applied via JS (.eq-focused) so it shows reliably on Tizen regardless of the
+ * platform's native focus rendering. */
+.eq-focused {
+  outline: 3px solid rgba(120, 200, 255, 0.98) !important;
+  outline-offset: 3px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 4px rgba(120, 200, 255, 0.35);
+}
+select.eq-focused,
+button.eq-focused,
+input[type="checkbox"].eq-focused,
+input[type="time"].eq-focused {
+  background: rgba(120, 200, 255, 0.18);
+}
+
+/* On a TV the panel is scaled up a little and controls/text are larger so they
+ * are legible and comfortably targetable from the couch with a remote. */
+.eq-panel.eq-tizen {
+  max-width: 880px;
+  max-height: 92vh;
+}
+.eq-tizen .eq-header h2 { font-size: 24px; }
+.eq-tizen .eq-toggle,
+.eq-tizen .form-select,
+.eq-tizen .action-btn,
+.eq-tizen .eq-slider-caption,
+.eq-tizen .eq-night-caption,
+.eq-tizen .eq-status { font-size: 16px; }
+.eq-tizen .eq-night-header { font-size: 18px; }
+.eq-tizen .eq-sliders { min-height: 260px; gap: 10px; }
+.eq-tizen .eq-slider { height: 210px; width: 10px; }
+.eq-tizen .eq-slider::-webkit-slider-thumb { width: 26px; height: 26px; }
+.eq-tizen .eq-slider::-moz-range-thumb { width: 26px; height: 26px; }
+.eq-tizen .eq-preamp-band .eq-slider::-webkit-slider-thumb { width: 28px; height: 8px; }
+.eq-tizen .eq-preamp-band .eq-slider::-moz-range-thumb { width: 28px; height: 8px; }
+.eq-tizen .eq-band-value { font-size: 14px; min-height: 18px; }
+.eq-tizen .eq-band-label { font-size: 14px; }
+.eq-tizen .eq-toggle input[type="checkbox"] { width: 22px; height: 22px; }
+
 /* ── Client Screen ───────────────────────────────────── */
 
 #client-screen {
