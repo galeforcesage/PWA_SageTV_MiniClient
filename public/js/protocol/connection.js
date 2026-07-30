@@ -2971,6 +2971,8 @@ export class MiniClientConnection extends EventTarget {
           const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
           if (msRoute) {
             console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
+            this._effectiveSurface = '';
             this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
             this._sendMediaReturn(1);
             break;
@@ -3011,6 +3013,11 @@ export class MiniClientConnection extends EventTarget {
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
             }
           }
+          // Consumed the server's per-stream routing decision for this OPENURL;
+          // clear so a back-to-back item arriving without a fresh CAP_* doesn't
+          // inherit stale delivery/surface routing.
+          this._effectiveDelivery = '';
+          this._effectiveSurface = '';
         }
         this._sendMediaReturn(1);
         break;

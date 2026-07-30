@@ -1000,6 +1000,11 @@ export class MediaPlayer extends EventTarget {
     const absPath = this._msproxyAbsPath;
     const host = this._pullHostname;
     if (this._bridgeAbortController) { try { this._bridgeAbortController.abort(); } catch { /* ignore */ } }
+    // Abort any in-flight SourceBuffer append first: loadMsProxy() closes the
+    // MediaSource, and closing it mid-update throws InvalidStateError on Chromium.
+    if (this.sourceBuffer && this.sourceBuffer.updating) {
+      try { this.sourceBuffer.abort(); } catch { /* ignore */ }
+    }
     this.loadMsProxy(absPath, 'xcode:browserhd', host, 0);
     return true;
   }
