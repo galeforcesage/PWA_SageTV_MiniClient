@@ -3227,6 +3227,17 @@ export class MiniClientConnection extends EventTarget {
     token = token.trim();
     if (!token) return null;
 
+    // Bare transport word with NO conditioning token. An NG server emits a plain
+    // "pull" (or "pull-xcode") CAP_EFFECTIVE_DELIVERY for a DIRECT_PLAY decision —
+    // there is no MediaServer /msproxy mode to request. Return null so OPENURL
+    // falls through to the native /rawmedia direct-pull path, preserving the
+    // original bitstream. WITHOUT this guard, bare "pull" (which has no ":") skips
+    // the prefix-strip above and lands in the `else` mode-mapping below, producing
+    // a bogus "xcode:pull" key that MediaServer rejects — AVPlay then never opens,
+    // the server's openURL0 times out after 30s -> PlaybackException + infinite
+    // client spinner (broke ALL DIRECT_PLAY sources on Tizen: MPEG-PS, HEVC, ...).
+    if (token === 'pull' || token === 'pull-xcode') return null;
+
     // Split off any ";k=v" parameter suffix (Option B). The BASE token selects
     // the /msproxy mode; the suffix is relayed VERBATIM so the server's
     // XCODE_SETUP parser can apply the override (e.g. acodec=eac3). Lowercase is
