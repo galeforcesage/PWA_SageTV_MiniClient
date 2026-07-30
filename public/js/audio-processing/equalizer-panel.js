@@ -509,22 +509,22 @@ export class EqualizerPanel extends EventTarget {
     // Desktop/browser keeps native Tab/focus behaviour; only Esc is intercepted.
     if (!this._isTizen) return;
 
-    // Volume keys are temporarily taken over while the panel is open: they change
-    // the focused slider's value (freeing D-pad Up/Down to move between rows).
-    // keyCodes: VolumeUp 447, VolumeDown 448.
-    if (e.key === 'VolumeUp' || e.key === 'AudioVolumeUp' || code === 447) {
+    // Channel keys are temporarily taken over while the panel is open: they
+    // adjust the focused control's VALUE (slider dB or dropdown option), leaving
+    // the Volume keys free so the user can still set TV volume while tuning.
+    // keyCodes: ChannelUp 427, ChannelDown 428.
+    if (e.key === 'ChannelUp' || code === 427) {
       e.preventDefault(); e.stopImmediatePropagation();
-      this._nudgeSlider(this._activeSlider(), GAIN_STEP);
+      this._adjustFocused(1);
       return;
     }
-    if (e.key === 'VolumeDown' || e.key === 'AudioVolumeDown' || code === 448) {
+    if (e.key === 'ChannelDown' || code === 428) {
       e.preventDefault(); e.stopImmediatePropagation();
-      this._nudgeSlider(this._activeSlider(), -GAIN_STEP);
+      this._adjustFocused(-1);
       return;
     }
 
     const el = this._currentEl();
-    const isSelect = !!el && el.tagName === 'SELECT';
 
     switch (e.key) {
       case 'ArrowLeft':
@@ -536,27 +536,57 @@ export class EqualizerPanel extends EventTarget {
         this._setFocusRC(this._row, this._col + 1);
         break;
       case 'ArrowUp':
+        // Up/Down always move between rows, landing on the first item. Slider
+        // and dropdown values are changed with the Channel keys instead.
         e.preventDefault(); e.stopImmediatePropagation();
-        // Dropdowns cycle their options with Up/Down; everything else moves rows.
-        if (isSelect) this._cycleSelect(el, -1);
-        else this._setFocusRC(this._row - 1, this._col);
+        this._setFocusRC(this._row - 1, 0);
         break;
       case 'ArrowDown':
         e.preventDefault(); e.stopImmediatePropagation();
-        if (isSelect) this._cycleSelect(el, 1);
-        else this._setFocusRC(this._row + 1, this._col);
+        this._setFocusRC(this._row + 1, 0);
         break;
       case 'Enter':
         e.preventDefault(); e.stopImmediatePropagation();
         this._activate(el);
         break;
       default:
-        // Some Samsung remotes deliver OK/Select as keyCode 13 with no e.key.
-        if (code === 13) {
+        // OK/Select varies by remote: keyCode 13 (Enter) on some, 32 (Space)
+        // on this Samsung model.
+        if (code === 13 || code === 32) {
           e.preventDefault(); e.stopImmediatePropagation();
           this._activate(el);
         }
     }
+  }
+
+  /** Channel keys: adjust the focused control's value. */
+  _adjustFocused(dir) {
+    const el = this._currentEl();
+    if (!el) return;
+    if (el.type === 'range') {
+      this._nudgeSlider(el, dir * GAIN_STEP);
+    } else if (el.tagName === 'SELECT') {
+      this._cycleSelect(el, dir);
+    } else if (el.type === 'checkbox') {
+      // Guaranteed toggle path for TV remotes: Channel Up = on, Down = off.
+      const next = dir > 0;
+      if (el.checked !== next) {
+        el.checked = next;
+        el.dispatchEvent(new Event('change'));
+      }
+    } else if (el.type === 'time') {
+      this._nudgeTime(el, dir * 15);
+    }
+  }
+
+  /** Nudge an <input type="time"> by deltaMin minutes, wrapping across midnight. */
+  _nudgeTime(input, deltaMin) {
+    const [h, m] = (input.value || '00:00').split(':').map((n) => parseInt(n, 10) || 0);
+    const total = (((h * 60 + m + deltaMin) % 1440) + 1440) % 1440;
+    const hh = String(Math.floor(total / 60)).padStart(2, '0');
+    const mm = String(total % 60).padStart(2, '0');
+    input.value = `${hh}:${mm}`;
+    input.dispatchEvent(new Event('change'));
   }
 
   /** Build the row/column grid of focusable controls (visible + enabled only). */
@@ -564,15 +594,21 @@ export class EqualizerPanel extends EventTarget {
     const byId = (id) => document.getElementById(id);
     const vis = (el) => el && !el.disabled && el.offsetParent !== null;
 
-    const row1 = ['eq-enabled', 'eq-client-processing', 'eq-preset', 'eq-reset', 'eq-close']
-      .map(byId).filter(vis);
+    // Rows from an up/down perspective:
+    //   0: close (X)
+    //   1: enabled, preset dropdown, reset
+    //   2: preamp + band sliders
+    //   3: night on, night mode, night intensity
+    //   4: scheduled, start time, end time
+    const row0 = ['eq-close'].map(byId).filter(vis);
+    const row1 = ['eq-enabled', 'eq-preset', 'eq-reset'].map(byId).filter(vis);
     const row2 = [this._preampSlider, ...this._sliders].filter(vis);
     const row3 = ['eq-night-enabled', 'eq-night-mode', 'eq-night-intensity']
       .map(byId).filter(vis);
     const row4 = ['eq-night-scheduled', 'eq-night-start', 'eq-night-end']
       .map(byId).filter(vis);
 
-    this._rows = [row1, row2, row3, row4].filter((r) => r.length);
+    this._rows = [row0, row1, row2, row3, row4].filter((r) => r.length);
     this._row = 0;
     this._col = 0;
   }
@@ -604,13 +640,6 @@ export class EqualizerPanel extends EventTarget {
     for (const row of this._rows) for (const el of row) el.classList.remove('eq-focused');
   }
 
-  /** The slider volume keys should drive: current focus if a slider, else last used. */
-  _activeSlider() {
-    const el = this._currentEl();
-    if (el && el.type === 'range') return el;
-    return this._lastSlider || this._preampSlider || this._sliders[0] || null;
-  }
-
   /** Nudge a range slider by delta dB and fire its input handler. */
   _nudgeSlider(slider, delta) {
     if (!slider) return;
@@ -634,7 +663,7 @@ export class EqualizerPanel extends EventTarget {
     }
   }
 
-  /** Activate the focused control (Enter/OK). Sliders use Volume; selects Up/Down. */
+  /** Activate the focused control (Enter/OK). Sliders/selects use Channel keys. */
   _activate(el) {
     if (!el) return;
     if (el.type === 'checkbox') {
@@ -648,7 +677,7 @@ export class EqualizerPanel extends EventTarget {
   /** Temporarily take over the TV keys we drive while the panel is open. */
   _registerTvKeys() {
     if (typeof tizen === 'undefined' || !tizen.tvinputdevice) return;
-    for (const k of ['VolumeUp', 'VolumeDown']) {
+    for (const k of ['ChannelUp', 'ChannelDown']) {
       try { tizen.tvinputdevice.registerKey(k); } catch { /* ignore */ }
     }
   }
@@ -656,7 +685,7 @@ export class EqualizerPanel extends EventTarget {
   /** Give the TV keys back when the panel closes. */
   _unregisterTvKeys() {
     if (typeof tizen === 'undefined' || !tizen.tvinputdevice) return;
-    for (const k of ['VolumeUp', 'VolumeDown']) {
+    for (const k of ['ChannelUp', 'ChannelDown']) {
       try { tizen.tvinputdevice.unregisterKey(k); } catch { /* ignore */ }
     }
   }
