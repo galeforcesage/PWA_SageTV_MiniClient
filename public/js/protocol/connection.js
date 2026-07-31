@@ -340,10 +340,12 @@ export class MiniClientConnection extends EventTarget {
     this.alive = true;
     this.reconnectAllowed = true;
 
-    // Media socket messages
-    this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-    this.mediaSocket.onclose = (ev) => this._onMediaSocketClosed(ev);
-    this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
+    // Media socket messages. Bind this exact socket so reply ints always go
+    // back on the connection a command arrived on (see _openMediaChannel).
+    const mediaSock = this.mediaSocket;
+    mediaSock.onmessage = (event) => this._onMediaData(event.data, mediaSock);
+    mediaSock.onclose = (ev) => this._onMediaSocketClosed(ev);
+    mediaSock.onerror = () => console.warn('[Connection] Media socket error');
 
     this.dispatchEvent(new CustomEvent('connected'));
     console.log('[Connection] Connected to SageTV server');
@@ -2789,6 +2791,17 @@ export class MiniClientConnection extends EventTarget {
         // Batch hint - no action needed
         break;
 
+      case 131: // GFXCMD_MEDIA_RECONNECT (SETVIDEOPROP=130 + 1)
+        // SageTV treats the player channel as single-use: one /media connection
+        // per playback attempt, not per session. When the server needs a player
+        // channel and none is present, it sends this nudge on the /gfx channel.
+        // Open a brand-new /media immediately (repeating the channelType=1
+        // handshake), even if a prior /media already closed. No /gfx reply is
+        // expected — the server is satisfied once the new player channel appears.
+        console.log('[Connection] Server sent GFXCMD_MEDIA_RECONNECT — opening a fresh player channel');
+        this._openMediaChannel('GFXCMD_MEDIA_RECONNECT');
+        break;
+
       default:
         console.warn(`[Connection] Unknown GFX command: ${cmd} (${GFXCMD_NAMES[cmd] || '?'}) len=${len} rawBytes=[${Array.from(cmddata.subarray(0, Math.min(20, cmddata.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ')}]`);
         return -1;
@@ -2844,17 +2857,21 @@ export class MiniClientConnection extends EventTarget {
 
   // ── Media Stream Processing ──────────────────────────────
 
-  _onMediaData(data) {
+  _onMediaData(data, sock) {
     const bytes = new Uint8Array(data);
     const rawLen = bytes.byteLength;
     this._bytesReceivedMedia += rawLen;
     this._bytesReceivedWindow += rawLen;
 
     this.mediaBuffer.append(bytes);
-    this._processMediaBuffer();
+    this._processMediaBuffer(sock);
   }
 
-  _processMediaBuffer() {
+  _processMediaBuffer(sock) {
+    // Reply ints must be written on the SAME connection a command arrived on
+    // (SageTV contract). Track the receiving socket so _sendMedia targets it,
+    // rather than the mutable this.mediaSocket which a reconnect may reassign.
+    this._currentMediaSocket = sock || this.mediaSocket;
     while (this.mediaBuffer.length >= 4) {
       const header = this.mediaBuffer.peek(4);
       if (!header) break;
@@ -3311,8 +3328,11 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _sendMedia(data) {
-    if (this.mediaSocket && this.mediaSocket.readyState === WebSocket.OPEN) {
-      this.mediaSocket.send(data.buffer || data);
+    // Prefer the connection the current command arrived on so reply ints land
+    // on the same /media socket the server is reading (see _processMediaBuffer).
+    const sock = this._currentMediaSocket || this.mediaSocket;
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(data.buffer || data);
     } else {
       console.warn(`[Media] Cannot send ${data.length}B — media socket not open`);
     }
@@ -3350,25 +3370,74 @@ export class MiniClientConnection extends EventTarget {
       return;
     }
 
-    this._mediaReconnectTimer = setTimeout(async () => {
+    this._mediaReconnectTimer = setTimeout(() => {
       this._mediaReconnectTimer = null;
-      this._mediaReconnectInProgress = true;
-      try {
-        const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
-        this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
-        this.mediaSocket.binaryType = 'arraybuffer';
-        await this._waitForOpen(this.mediaSocket, 'Media-Auto-Reconnect');
-        await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
-        this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-        this.mediaSocket.onclose = (event) => this._onMediaSocketClosed(event);
-        this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
-        console.log('[Connection] Media socket auto-reconnected');
-      } catch (err) {
-        console.error('[Connection] Media auto-reconnect failed:', err);
-      } finally {
-        this._mediaReconnectInProgress = false;
-      }
+      this._openMediaChannel(`reactive close (code=${closeCode})`);
     }, 500);
+  }
+
+  /**
+   * Open a fresh player (/media) channel and make it the active media socket.
+   *
+   * SageTV treats the player channel as single-use: one /media connection per
+   * playback attempt, not per session. The server asks for a new one by sending
+   * GFXCMD_MEDIA_RECONNECT (opcode 131) on the /gfx channel whenever it needs a
+   * player channel and none is present. This is also the funnel used by the
+   * reactive close handler, so at most one open is ever in flight.
+   *
+   * The previous media socket (if any) is detached and closed first so we hold
+   * exactly one player channel at a time and its onclose can't schedule a second
+   * reconnect. This is a PUBLIC reconnect helper only — it performs no binary or
+   * protocol parsing itself; the existing handshake path is reused unchanged.
+   *
+   * @param {string} reason - diagnostic label for logging
+   */
+  async _openMediaChannel(reason) {
+    // A nudge/opener supersedes any pending reactive reconnect.
+    if (this._mediaReconnectTimer) {
+      clearTimeout(this._mediaReconnectTimer);
+      this._mediaReconnectTimer = null;
+    }
+    if (this._mediaReconnectInProgress) {
+      console.log(`[Connection] Media channel open already in progress; ignoring (${reason})`);
+      return;
+    }
+    if (!this.reconnectAllowed || this._exitRequested) {
+      console.log(`[Connection] Session ending; not opening media channel (${reason})`);
+      return;
+    }
+    if (!this.alive || !this.gfxSocket || this.gfxSocket.readyState !== WebSocket.OPEN) {
+      console.warn(`[Connection] GFX not alive; cannot open media channel (${reason})`);
+      return;
+    }
+    this._mediaReconnectInProgress = true;
+    try {
+      // Detach + close any prior player channel so its onclose doesn't schedule
+      // another reconnect and so exactly one /media is live at a time.
+      const previous = this.mediaSocket;
+      if (previous) {
+        previous.onmessage = null;
+        previous.onclose = null;
+        previous.onerror = null;
+        try { previous.close(); } catch (e) { /* ignore */ }
+      }
+      const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
+      const sock = new WebSocket(`${this.bridgeUrl}/media${params}`);
+      sock.binaryType = 'arraybuffer';
+      await this._waitForOpen(sock, 'Media-Channel');
+      await this._handshake(sock, ConnectionType.MEDIA, this.mediaBuffer);
+      // Bind this exact socket into the receive path so reply ints go back on
+      // the connection a command arrived on, not the mutable this.mediaSocket.
+      sock.onmessage = (event) => this._onMediaData(event.data, sock);
+      sock.onclose = (event) => this._onMediaSocketClosed(event);
+      sock.onerror = () => console.warn('[Connection] Media socket error');
+      this.mediaSocket = sock;
+      console.log(`[Connection] Player channel opened (${reason})`);
+    } catch (err) {
+      console.error(`[Connection] Failed to open media channel (${reason}):`, err);
+    } finally {
+      this._mediaReconnectInProgress = false;
+    }
   }
 
   // ── Event Sending (Client → Server) ──────────────────────
