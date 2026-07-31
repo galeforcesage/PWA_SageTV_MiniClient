@@ -45,11 +45,14 @@ const PROFILE_4 = {
   // MP2 included alongside MP3 for DVB/broadcast audio (Samsung lists MPEG
   // audio support); PCM = Samsung "LPCM".
   audio: ['AAC', 'HE-AAC', 'AC3', 'EAC3', 'MP3', 'MP2', 'PCM', 'OPUS'],
-  // MPEG2-PS included: the Tizen NATIVE surface is webapis.avplay (hardware),
-  // which demuxes program streams directly (verified on-device). This is NOT
-  // true of the HTML5 <video> element — so these caps are only valid because
-  // Tizen playback routes through AVPlay, not <video>.
-  containers: ['MP4', 'MPEG2-TS', 'MPEG2-PS', 'MATROSKA', 'WEBM'],
+  // MPEG2-PS deliberately EXCLUDED: although AVPlay can hardware-demux program
+  // streams, the PWA's pull transports don't deliver raw PS reliably — a
+  // progressive /rawmedia pull hangs AVPlay's prepareAsync (no first frame, no
+  // error), and advertising PS makes the NG server choose raw DIRECT_PLAY instead
+  // of remuxing. Per the header contract, advertise MPEG2-TS only and let the NG
+  // server REMUX PS -> TS (stream copy, -c copy) and deliver TS via /msproxy —
+  // no re-encode. (Re-add PS only if a verified raw-PS pull transport exists.)
+  containers: ['MP4', 'MPEG2-TS', 'MATROSKA', 'WEBM'],
 };
 
 /**
@@ -99,9 +102,15 @@ export function getTizenNativeCapabilities() {
 export const NATIVE_BLACKLIST = {
   video: [],
   audio: ['DTS', 'DTS-HD', 'DTS-HD-MA', 'WMA-LOSSLESS', 'AMR', 'QCELP'],
-  // MPEG2-PS is now advertised (AVPlay demuxes it natively), so it is NOT
-  // blacklisted. It would only belong here for a <video>/MSE-only client.
-  containers: [],
+  // MPEG2-PS: hardware AVPlay can demux it, but the PWA's pull transports don't
+  // deliver raw program streams reliably (a /rawmedia progressive pull hangs
+  // AVPlay's prepare — no first frame, no error). Blacklisting here is the FINAL
+  // guarantee that PS never reaches the pwa_native surface, even if the
+  // canPlayType('video/mpeg') probe (connection.js) or a future whitelist adds
+  // it. The NG server then remuxes PS -> TS (stream copy) and delivers TS via
+  // /msproxy — no re-encode. (Desktop <video> can't demux PS either, so this is
+  // net-correct on every platform, not just Tizen.)
+  containers: ['MPEG2-PS'],
 };
 
 /** Return a copy of `list` with blacklisted entries of `kind` removed. */
