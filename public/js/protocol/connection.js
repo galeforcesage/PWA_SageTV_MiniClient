@@ -2898,7 +2898,14 @@ export class MiniClientConnection extends EventTarget {
         // Log ALL non-PUSHBUFFER, non-GETVIDEORECT commands (including INIT=0)
         console.log(`[Media] cmd=${cmd} len=${len} mediaPlayer=${!!this.mediaPlayer} mediaOpened=${!!this._mediaOpened}`);
       }
-      this._handleMediaCommand(cmd, len, payload);
+      // Guard the loop: a synchronous throw in one command's handler must not
+      // abort processing of the commands queued behind it in the same buffer
+      // (and, before the OPENURL early-ack above, could also skip a reply int).
+      try {
+        this._handleMediaCommand(cmd, len, payload);
+      } catch (err) {
+        console.error(`[Media] handler for cmd=${cmd} len=${len} threw: ${err?.message}`, err);
+      }
     }
   }
 
@@ -2943,6 +2950,14 @@ export class MiniClientConnection extends EventTarget {
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
         this._mediaOpened = true;
+        // Ack the OPENURL up-front, on the SAME connection it arrived on, BEFORE
+        // any device-path dispatch (onMediaOpen/setFormatHint/load). The server
+        // enforces a hard 30s read on this reply int (nonzero = OK). Deferring the
+        // ack until after the dispatch made it vulnerable to a synchronous throw
+        // in that dispatch aborting the handler and skipping the write — the server
+        // then saw "zero bytes for 30s" → PlaybackException while INIT (which does
+        // no device work) always replied fine. Mirror INIT: ack immediately.
+        this._sendMediaReturn(1);
         if (len >= 4) {
           const strLen = readInt(0);
           let urlString = '';
@@ -2991,7 +3006,6 @@ export class MiniClientConnection extends EventTarget {
             this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
             this._effectiveSurface = '';
             this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
-            this._sendMediaReturn(1);
             break;
           }
 
@@ -3036,7 +3050,6 @@ export class MiniClientConnection extends EventTarget {
           this._effectiveDelivery = '';
           this._effectiveSurface = '';
         }
-        this._sendMediaReturn(1);
         break;
       }
 
