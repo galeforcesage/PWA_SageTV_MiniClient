@@ -3324,11 +3324,19 @@ export class MiniClientConnection extends EventTarget {
    */
   async _onMediaSocketClosed(ev) {
     const closeCode = ev?.code ?? 0;
-    const recentlyActive = (Date.now() - this._lastMediaCommandAt) < 5000;
 
-    // Clean close while idle is expected in some flows; do not churn reconnects.
-    if ((closeCode === 1000 || closeCode === 1001) && !recentlyActive) {
-      console.log(`[Connection] Media socket closed cleanly (code=${closeCode}) while idle; not reconnecting`);
+    // Only skip reconnect when the session is intentionally being torn down.
+    // A real Exit sets reconnectAllowed=false via GFXCMD_DEINIT (which also sets
+    // _exitRequested), and disconnect() clears reconnectAllowed. Under the NG
+    // pull model, however, a clean idle close is NOT an exit: the server still
+    // expects the player socket. Keying the old skip off idleness stranded the
+    // socket on clients that go idle after a stalled OPENURL (Tizen), so the
+    // server looped "Did not find a player socket connection" and playback never
+    // started. Browsers survived only by happening to be active at close time.
+    // Gate on intent, not idleness, so the player socket is restored like the
+    // browser does while a genuine Exit still skips (no reconnect churn).
+    if (!this.reconnectAllowed || this._exitRequested) {
+      console.log(`[Connection] Media socket closed (code=${closeCode}); session ending (reconnectAllowed=${this.reconnectAllowed}, exitRequested=${this._exitRequested}) — not reconnecting`);
       return;
     }
 
