@@ -1043,18 +1043,6 @@ export class MiniClientConnection extends EventTarget {
 
       // pwa_native: what <video src=...> can decode via native decoder
       native = { video: [], audio: [], containers: [] };
-      // Whether this surface is a Tizen TV (AVPlay). MPEG2 (Video/TS) is only
-      // TRULY native-decodable on Tizen's hardware demuxer — a desktop/mobile
-      // <video> can't demux raw MPEG2-TS/PS regardless of what canPlayType()
-      // optimistically reports (WebKit answers 'maybe' for video/mp2t and native
-      // HLS, but that's HLS-packaged TS, not raw DIRECT_PLAY). Advertising MPEG2
-      // on a browser makes the NG decision engine pick an unplayable DIRECT_PLAY
-      // over the correct REMUX-to-fMP4 (browserhd_remux) path. So the raw MPEG2
-      // probe additions below are gated to Tizen; on Tizen the Profile 4 whitelist
-      // (getTizenNativeCapabilities) re-adds MPEG2-VIDEO + MPEG2-TS anyway, so no
-      // Tizen capability is lost. On Blink/Gecko these probes already return ''
-      // (never fired) → this gate is a strict no-op there; only WebKit changes.
-      const isTizenNative = this.platformDetector?.isTizen?.() === true;
       if (canNative('video/mp4; codecs="avc1.42E01E"')) native.video.push('H264');
       if (canNativeMaybe('video/mp4; codecs="hvc1"') || canNativeMaybe('video/mp4; codecs="hev1"') ||
           canNativeMaybe('video/mp4; codecs="hvc1.1.6.L120.90"')) {
@@ -1063,7 +1051,7 @@ export class MiniClientConnection extends EventTarget {
       }
       if (canNative('video/mp4; codecs="mp4v.20.8"') ||
           canNative('video/mp4; codecs="mp4v.20.240"')) native.video.push('MPEG4-VIDEO');
-      if (isTizenNative && (canNative('video/mpeg') || canNative('video/mp2t'))) native.video.push('MPEG2-VIDEO');
+      if (canNative('video/mpeg') || canNative('video/mp2t')) native.video.push('MPEG2-VIDEO');
       if (canNative('video/webm; codecs="vp9"') ||
           canNative('video/mp4; codecs="vp09.00.10.08"')) native.video.push('VP9');
       if (canNative('video/mp4; codecs="av01.0.08M.08"')) native.video.push('AV1');
@@ -1079,10 +1067,10 @@ export class MiniClientConnection extends EventTarget {
           native.video.length || native.audio.length) {
         native.containers.push('MP4');
       }
-      if (isTizenNative && canNative('video/mp2t')) native.containers.push('MPEG2-TS');
-      if (isTizenNative && canNative('video/mpeg')) native.containers.push('MPEG2-PS');
+      if (canNative('video/mp2t')) native.containers.push('MPEG2-TS');
+      if (canNative('video/mpeg')) native.containers.push('MPEG2-PS');
       if (canNative('video/x-matroska') || canNative('video/x-matroska; codecs="avc1"')) native.containers.push('MATROSKA');
-      if (isTizenNative && (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL'))) {
+      if (canNative('application/vnd.apple.mpegurl') || canNative('application/x-mpegURL')) {
         if (!native.containers.includes('MPEG2-TS')) native.containers.push('MPEG2-TS');
       }
     }

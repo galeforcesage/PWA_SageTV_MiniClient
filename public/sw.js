@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.45.20-browser-mpeg2-honest';
+const CACHE_NAME = 'sagetv-miniclient-8.45.21-revert-browser-caps';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
