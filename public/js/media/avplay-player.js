@@ -48,6 +48,7 @@ export class AVPlayPlayer extends EventTarget {
     this._durationMs = 0;
     this._videoDimensions = { width: 0, height: 0 };
     this._firstFrameEmitted = false;
+    this._formatHint = null;
     this._userMuted = false;
     this._volume = 1;
     this._telemetrySequence = 0;
@@ -69,6 +70,17 @@ export class AVPlayPlayer extends EventTarget {
   setBridgeBase(base) {
     if (typeof base !== 'string') { this._bridgeBase = ''; return; }
     this._bridgeBase = base.replace(/\/$/, '');
+  }
+
+  /**
+   * Store the NG format hint (ng_fmt: {container, video, audio} MIME strings)
+   * for the next load. MediaPlayer parity — connection.js calls this on every
+   * OPENURL. AVPlay demuxes/decodes natively so it doesn't need the hint to set
+   * up a pipeline, but capability learning uses it to attribute a native
+   * DIRECT_PLAY outcome to the codec that was attempted.
+   */
+  setFormatHint(hint) {
+    this._formatHint = hint || null;
   }
 
   _ensureObject() {

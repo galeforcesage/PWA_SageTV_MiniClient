@@ -26,6 +26,7 @@ import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capab
 import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
 import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
+import { getAvplayCapabilityMemory, isCodecFailureReason } from '../media/avplay-capability-memory.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -147,6 +148,30 @@ export class MiniClientConnection extends EventTarget {
     this._uiResizeAsserts = 0;
     this.settings = options.settings || null;
     this.platformDetector = options.platformDetector || null;
+
+    // Passive on-device capability learning (Tizen AVPlay only). Watches native
+    // DIRECT_PLAY outcomes and downgrades the pwa_native surface for any video
+    // codec THIS panel proves it cannot decode, so the server transcodes it
+    // instead of pushing an undecodable DIRECT_PLAY. See avplay-capability-
+    // memory.js. `_pendingNativeProbe` holds the ng_fmt hint of an in-flight
+    // native (server-unconditioned) attempt so its firstframe/failure can be
+    // attributed to the codec that was tried. Non-Tizen surfaces are untouched.
+    this._pendingNativeProbe = null;
+    this._avcapMemory = null;
+    if (this.platformDetector?.isTizen?.() && this.mediaPlayer?.addEventListener) {
+      this._avcapMemory = getAvplayCapabilityMemory();
+      this.mediaPlayer.addEventListener('firstframe', () => {
+        if (!this._pendingNativeProbe) return;
+        this._avcapMemory.recordSuccess(this._pendingNativeProbe.hint);
+        this._pendingNativeProbe = null;
+      });
+      this.mediaPlayer.addEventListener('playbackfailure', (e) => {
+        const reason = e && e.detail && e.detail.reason;
+        if (!this._pendingNativeProbe || !isCodecFailureReason(reason)) return;
+        this._avcapMemory.recordFailure(this._pendingNativeProbe.hint, reason);
+        this._pendingNativeProbe = null;
+      });
+    }
 
     // Load cached auth from settings if available (survives fresh connections)
     this._cachedAuthBlock = (this.settings
@@ -1100,6 +1125,25 @@ export class MiniClientConnection extends EventTarget {
     native.video = filterNativeBlacklist('video', native.video);
     native.audio = filterNativeBlacklist('audio', native.audio);
     native.containers = filterNativeBlacklist('containers', native.containers);
+
+    // On-device learned downgrade (Tizen AVPlay only): remove video codecs this
+    // specific panel has PROVEN it cannot decode via failed native DIRECT_PLAY
+    // attempts (avplay-capability-memory.js). Turns the curated Profile-4
+    // whitelist above into per-panel proof: if the TV genuinely can't decode a
+    // codec, stop advertising it natively so the server transcodes instead of
+    // pushing an undecodable DIRECT_PLAY. Video-only + success-immunised, so it
+    // can never strip a codec the panel actually plays. No-op on non-Tizen.
+    if (this.platformDetector?.isTizen?.()) {
+      const bad = (this._avcapMemory || getAvplayCapabilityMemory()).getProvenBadNativeCaps();
+      if (bad.video.length) {
+        const before = native.video.slice();
+        native.video = native.video.filter((c) => !bad.video.includes(c));
+        if (before.length !== native.video.length) {
+          console.warn('[PlaybackSurfaces] on-device learned downgrade — removed native video ['
+            + before.filter((c) => !native.video.includes(c)).join(',') + ']');
+        }
+      }
+    }
 
     // pwa_mse HONEST end-to-end capability. With a DYNAMIC MSE SourceBuffer
     // (the player sniffs the fMP4 init segment and creates a matching
@@ -3001,6 +3045,11 @@ export class MiniClientConnection extends EventTarget {
           // sniffing/heuristics below. Only applies to pull sources (abs path or
           // stv://); push is retired and iosstream is a legacy-only construct.
           const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
+          // Capability learning: assume this OPENURL is NOT a native-unconditioned
+          // attempt until we reach the native pull branch below. Any conditioned
+          // route (msproxy remux/xcode, bridge transcode, iosstream) leaves this
+          // null so its outcome never feeds native-codec learning.
+          if (this._avcapMemory) this._pendingNativeProbe = null;
           if (msRoute) {
             console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
             this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
@@ -3041,6 +3090,10 @@ export class MiniClientConnection extends EventTarget {
               // stv:// pull data source (browser-safe HTTP equivalent). Don't route
               // through the transcoder: DIRECT_PLAY should preserve original bitstream.
               if (surface) console.log(`[Media] CAP_EFFECTIVE_SURFACE=${surface} — native pull path`);
+              // Native, server-unconditioned DIRECT_PLAY (Tizen AVPlay): remember
+              // the codec being attempted so the firstframe/failure listeners can
+              // record on-device proof (see constructor + avplay-capability-memory).
+              if (this._avcapMemory) this._pendingNativeProbe = { hint: ngFmt.hint };
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
             }
           }
