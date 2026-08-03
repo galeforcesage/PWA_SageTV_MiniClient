@@ -3287,6 +3287,20 @@ export class MiniClientConnection extends EventTarget {
     }
     if (!token) return null;
 
+    // DIRECT_PLAY (pull:direct) on the native AVPlay surface (Tizen): serve the
+    // ORIGINAL bytes via the proven /rawmedia byte-range endpoint — the Jul-11
+    // "Tizen AVPlay native playback" path (79f47bd) that reliably played HEVC /
+    // EAC3 / MPEG2 natively, BEFORE /msproxy existed. Once the server began
+    // emitting `pull:direct` (server 8e6a958f) instead of bare `pull`, this token
+    // slipped past the bare-`pull` guard above into the mode='direct' mapping and
+    // rerouted every DIRECT_PLAY title through /msproxy?mode=direct, where AVPlay
+    // never prepares a first frame → infinite "Loading" (server-side openURL0
+    // read then times out with AsynchronousCloseException). Return null so OPENURL
+    // falls through to this.mediaPlayer.load() → AVPlay /rawmedia. Browser/MSE
+    // surfaces keep /msproxy?mode=direct (seekable MP4) — this guard is Tizen-only,
+    // so no non-Tizen path changes.
+    if (token === 'direct' && this.platformDetector?.isTizen?.() === true) return null;
+
     let mode;
     if (token === 'direct') mode = 'direct';
     else if (token === 'mpeg2tsremux' || token === 'remux:ts' || token === 'remux') mode = 'remux:ts';

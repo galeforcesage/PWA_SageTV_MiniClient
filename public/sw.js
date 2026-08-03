@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.45.21-revert-browser-caps';
+const CACHE_NAME = 'sagetv-miniclient-8.46.0-tizen-direct-rawmedia';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
