@@ -37,6 +37,12 @@ public class RawMediaServlet extends HttpServlet {
     };
 
     private static final int COPY_BUF = 64 * 1024;
+    /** Poll interval while following a growing recording's EOF. */
+    private static final long LIVE_POLL_MS = 100L;
+    /** Stop following after this long with no growth (recording ended / client gone). */
+    private static final long LIVE_IDLE_TIMEOUT_MS = 30_000L;
+    /** How long to sample the file length to decide static-vs-growing. */
+    private static final long GROWTH_PROBE_MS = 400L;
 
     @Override
     protected void doHead(HttpServletRequest req, HttpServletResponse resp) throws IOException {
@@ -84,9 +90,16 @@ public class RawMediaServlet extends HttpServlet {
         long start = 0;
         long end = total > 0 ? total - 1 : 0;
         boolean partial = false;
+        // An "open-ended" request (no Range, or "bytes=N-" with no explicit end)
+        // is a play-to-end / live-edge read — the only kind that can turn into a
+        // live-follow for an in-progress recording. Explicit ranges (real seeks)
+        // never do, so VOD byte-range seeking stays byte-for-byte unchanged.
+        boolean openEnded = false;
 
         String range = req.getHeader("Range");
-        if (range != null && range.toLowerCase(Locale.ROOT).startsWith("bytes=")) {
+        if (range == null) {
+            openEnded = true;
+        } else if (range.toLowerCase(Locale.ROOT).startsWith("bytes=")) {
             String spec = range.substring(6).trim();
             int comma = spec.indexOf(',');
             if (comma > 0) spec = spec.substring(0, comma).trim();
@@ -106,6 +119,7 @@ public class RawMediaServlet extends HttpServlet {
                 } else {
                     start = Long.parseLong(s);
                     end = e.isEmpty() ? total - 1 : Long.parseLong(e);
+                    openEnded = e.isEmpty();
                 }
             } catch (NumberFormatException nfe) {
                 sendRangeNotSatisfiable(resp, total);
@@ -117,6 +131,24 @@ public class RawMediaServlet extends HttpServlet {
             }
             if (end >= total) end = total - 1;
             partial = true;
+        }
+
+        // Live-follow: an in-progress recording (growing file) served open-ended
+        // must NOT advertise a finite Content-Length, or AVPlay/<video> reads to
+        // the current EOF, gets a clean stream end, and STOPS (the freeze-after-a-
+        // few-seconds bug on live DIRECT_PLAY). Stream it without a fixed length
+        // and follow EOF until the file stops growing. The client may assert
+        // liveness with ?live=1 (from the NG isLive context); otherwise we infer
+        // it with a short growth probe. HEAD and explicit-range seeks are never
+        // followed — they use the static path below (VOD unchanged).
+        if (!headOnly && openEnded) {
+            String liveParam = req.getParameter("live");
+            boolean liveHint = liveParam != null
+                && (liveParam.equals("1") || liveParam.equalsIgnoreCase("true"));
+            if (liveHint || isGrowing(file, total)) {
+                serveGrowing(resp, file, start, contentType);
+                return;
+            }
         }
 
         long length = (end >= start) ? (end - start + 1) : 0;
@@ -152,6 +184,91 @@ public class RawMediaServlet extends HttpServlet {
         } catch (IOException ioe) {
             // Client-side aborts (seek / close) are normal — log at debug.
             log.debug("[RawMedia] transfer aborted for {}: {}", canonical, ioe.toString());
+        }
+    }
+
+    /**
+     * Probe whether a file is an in-progress (growing) recording by sampling its
+     * length across a short window. Only called for open-ended requests, so it
+     * never delays VOD seeks.
+     */
+    private static boolean isGrowing(File file, long len0) {
+        try {
+            Thread.sleep(GROWTH_PROBE_MS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return file.length() > len0;
+    }
+
+    /**
+     * Stream a growing (in-progress recording) file from {@code start} WITHOUT a
+     * finite Content-Length, following EOF as the recording grows. This is the
+     * raw-file analogue of {@link MediaServerProxyServlet}'s growing-source
+     * stream: AVPlay/&lt;video&gt; then treats the response as a live stream and
+     * keeps reading instead of stopping at the current EOF. Bounded: we stop
+     * after {@link #LIVE_IDLE_TIMEOUT_MS} with no growth (recording ended), or
+     * when the client disconnects.
+     */
+    private void serveGrowing(HttpServletResponse resp, File file, long start,
+                              String contentType) throws IOException {
+        resp.setStatus(200);
+        resp.setHeader("Cache-Control", "no-store");
+        // No byte-range semantics for a live stream, and deliberately NO
+        // Content-Length: the final size is unknown while recording.
+        resp.setHeader("Accept-Ranges", "none");
+        resp.setContentType(contentType);
+
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            if (start > 0) raf.seek(start);
+            OutputStream out = resp.getOutputStream();
+            byte[] buf = new byte[COPY_BUF];
+            long offset = start;
+            long frontier = file.length();
+            long lastGrowthAt = System.currentTimeMillis();
+
+            while (true) {
+                if (offset >= frontier) {
+                    long nf = file.length();
+                    if (nf > frontier) {
+                        frontier = nf;
+                        lastGrowthAt = System.currentTimeMillis();
+                        continue;
+                    }
+                    if (System.currentTimeMillis() - lastGrowthAt > LIVE_IDLE_TIMEOUT_MS) {
+                        log.info("[RawMedia] live stream idle {}ms after {} bytes, ending",
+                            LIVE_IDLE_TIMEOUT_MS, offset);
+                        break;
+                    }
+                    try {
+                        Thread.sleep(LIVE_POLL_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                }
+                int want = (int) Math.min(frontier - offset, buf.length);
+                int n = raf.read(buf, 0, want);
+                if (n < 0) {
+                    // frontier said bytes exist but the write isn't flushed yet —
+                    // re-poll rather than treat as EOF.
+                    try {
+                        Thread.sleep(LIVE_POLL_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                }
+                out.write(buf, 0, n);
+                offset += n;
+            }
+            out.flush();
+        } catch (IOException ioe) {
+            // Client aborts (channel change / close) are normal.
+            log.debug("[RawMedia] live transfer aborted: {}", ioe.toString());
         }
     }
 
