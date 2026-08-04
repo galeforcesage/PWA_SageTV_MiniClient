@@ -420,12 +420,18 @@ export class InputManager {
     return cmd.id;
   }
 
-  /** True when a media file is actively loaded/playing/paused (video context). */
+  /** True when a media file is actively loaded/playing/paused in FULLSCREEN
+   * (video context). A "play during menus" PIP (small video rect while a menu
+   * is up) is NOT playback context — input must drive the menu there. */
   _inPlayback() {
     const mp = this.connection && this.connection.mediaPlayer;
     if (!mp) return false;
     const s = mp.state;
-    return s === PlayerState.LOADED || s === PlayerState.PLAY || s === PlayerState.PAUSE;
+    const playing = s === PlayerState.LOADED || s === PlayerState.PLAY || s === PlayerState.PAUSE;
+    if (!playing) return false;
+    // isVideoFullscreen may be absent on an older player build → default to the
+    // prior behavior (treat any playing state as playback context).
+    return typeof mp.isVideoFullscreen === 'function' ? mp.isVideoFullscreen() : true;
   }
 
   /**

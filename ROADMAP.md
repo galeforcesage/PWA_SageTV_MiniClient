@@ -71,7 +71,7 @@ any change** — several "obvious" fixes are either already done or unsafe.
   Both require touching the server GFX protocol handler (`MiniClientSageRenderer`).
   Pair with the PWA0 metrics to confirm the accounting-leak fix isn't already
   sufficient before investing. **Blocked where Sage.jar is frozen** (e.g. the
-  live `sagetv-mine` image, which only accepts plugin updates): the server-side
+  live production server image, which only accepts plugin updates): the server-side
   change can't be deployed there, so only the client-side accounting-leak fix
   applies on those hosts. This is the highest-value *future* item once a
   server-writable target is available.

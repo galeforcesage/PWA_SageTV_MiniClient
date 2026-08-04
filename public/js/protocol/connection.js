@@ -26,6 +26,7 @@ import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capab
 import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
 import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
+import { getAvplayCapabilityMemory, isCodecFailureReason } from '../media/avplay-capability-memory.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -147,6 +148,36 @@ export class MiniClientConnection extends EventTarget {
     this._uiResizeAsserts = 0;
     this.settings = options.settings || null;
     this.platformDetector = options.platformDetector || null;
+
+    // Passive on-device capability learning (Tizen AVPlay only). Watches native
+    // DIRECT_PLAY outcomes and downgrades the pwa_native surface for any video
+    // codec THIS panel proves it cannot decode, so the server transcodes it
+    // instead of pushing an undecodable DIRECT_PLAY. See avplay-capability-
+    // memory.js. `_pendingNativeProbe` holds the ng_fmt hint of an in-flight
+    // native (server-unconditioned) attempt so its firstframe/failure can be
+    // attributed to the codec that was tried. Non-Tizen surfaces are untouched.
+    this._pendingNativeProbe = null;
+    this._avcapMemory = null;
+    if (this.platformDetector?.isTizen?.() && this.mediaPlayer?.addEventListener) {
+      this._avcapMemory = getAvplayCapabilityMemory();
+      this.mediaPlayer.addEventListener('firstframe', () => {
+        if (!this._pendingNativeProbe) return;
+        this._avcapMemory.recordSuccess(this._pendingNativeProbe.hint);
+        this._pendingNativeProbe = null;
+      });
+      this.mediaPlayer.addEventListener('playbackfailure', (e) => {
+        const reason = e && e.detail && e.detail.reason;
+        if (!this._pendingNativeProbe || !isCodecFailureReason(reason)) return;
+        this._avcapMemory.recordFailure(this._pendingNativeProbe.hint, reason);
+        this._pendingNativeProbe = null;
+      });
+      // A native attempt that degraded to the server /transcode fallback: the
+      // upcoming firstframe belongs to the transcode, NOT the original native
+      // codec, so clear the probe to avoid mis-crediting the native surface.
+      this.mediaPlayer.addEventListener('nativefallback', () => {
+        this._pendingNativeProbe = null;
+      });
+    }
 
     // Load cached auth from settings if available (survives fresh connections)
     this._cachedAuthBlock = (this.settings
@@ -340,10 +371,12 @@ export class MiniClientConnection extends EventTarget {
     this.alive = true;
     this.reconnectAllowed = true;
 
-    // Media socket messages
-    this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-    this.mediaSocket.onclose = (ev) => this._onMediaSocketClosed(ev);
-    this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
+    // Media socket messages. Bind this exact socket so reply ints always go
+    // back on the connection a command arrived on (see _openMediaChannel).
+    const mediaSock = this.mediaSocket;
+    mediaSock.onmessage = (event) => this._onMediaData(event.data, mediaSock);
+    mediaSock.onclose = (ev) => this._onMediaSocketClosed(ev);
+    mediaSock.onerror = () => console.warn('[Connection] Media socket error');
 
     this.dispatchEvent(new CustomEvent('connected'));
     console.log('[Connection] Connected to SageTV server');
@@ -1099,6 +1132,28 @@ export class MiniClientConnection extends EventTarget {
     native.audio = filterNativeBlacklist('audio', native.audio);
     native.containers = filterNativeBlacklist('containers', native.containers);
 
+    // On-device learned downgrade (Tizen AVPlay only): remove video codecs this
+    // specific panel has PROVEN it cannot decode via failed native DIRECT_PLAY
+    // attempts (avplay-capability-memory.js). Turns the curated Profile-4
+    // whitelist above into per-panel proof: if the TV genuinely can't decode a
+    // codec, stop advertising it natively so the server transcodes instead of
+    // pushing an undecodable DIRECT_PLAY. Learns video/audio/container with
+    // unambiguous attribution + success-immunisation, so it can never strip a
+    // codec the panel actually plays. No-op on non-Tizen.
+    if (this.platformDetector?.isTizen?.()) {
+      const bad = (this._avcapMemory || getAvplayCapabilityMemory()).getProvenBadNativeCaps();
+      for (const dim of ['video', 'audio', 'containers']) {
+        const badList = bad[dim] || [];
+        if (!badList.length || !Array.isArray(native[dim])) continue;
+        const before = native[dim].slice();
+        native[dim] = native[dim].filter((c) => !badList.includes(c));
+        if (before.length !== native[dim].length) {
+          console.warn(`[PlaybackSurfaces] on-device learned downgrade — removed native ${dim} [`
+            + before.filter((c) => !native[dim].includes(c)).join(',') + ']');
+        }
+      }
+    }
+
     // pwa_mse HONEST end-to-end capability. With a DYNAMIC MSE SourceBuffer
     // (the player sniffs the fMP4 init segment and creates a matching
     // SourceBuffer), the deliverable set is exactly what MediaSource.
@@ -1311,8 +1366,8 @@ export class MiniClientConnection extends EventTarget {
    * NOT the union of surfaces. Correctness over max direct-play.
    *
    * Also normalizes canonical Protocol 2.1 names to the spellings upstream
-   * google/SageTV expects (H264 -> H.264, HE-AAC -> AAC-HE). SageTV-mine
-   * aliases both spellings so either works there; upstream is stricter.
+   * google/SageTV expects (H264 -> H.264, HE-AAC -> AAC-HE). The deployed NG
+   * server aliases both spellings so either works there; upstream is stricter.
    */
   _legacyCompat(list) {
     const map = { 'H264': 'H.264', 'HE-AAC': 'AAC-HE' };
@@ -1861,7 +1916,7 @@ export class MiniClientConnection extends EventTarget {
       case 'FIXED_PUSH_REMUX_FORMAT':
         // Upstream google/SageTV miniclient never advertises this property.
         // The hardcoded 'container=mpegts;videocodec=COPY;audiocodec=COPY;'
-        // was a lie SageTV-mine had to add code to ignore. Empty = 'no
+        // was a lie the NG server had to add code to ignore. Empty = 'no
         // override, server decides.'
         return '';
       case 'PUSH_BUFFER_SEEKING':
@@ -2789,6 +2844,17 @@ export class MiniClientConnection extends EventTarget {
         // Batch hint - no action needed
         break;
 
+      case 131: // GFXCMD_MEDIA_RECONNECT (SETVIDEOPROP=130 + 1)
+        // SageTV treats the player channel as single-use: one /media connection
+        // per playback attempt, not per session. When the server needs a player
+        // channel and none is present, it sends this nudge on the /gfx channel.
+        // Open a brand-new /media immediately (repeating the channelType=1
+        // handshake), even if a prior /media already closed. No /gfx reply is
+        // expected — the server is satisfied once the new player channel appears.
+        console.log('[Connection] Server sent GFXCMD_MEDIA_RECONNECT — opening a fresh player channel');
+        this._openMediaChannel('GFXCMD_MEDIA_RECONNECT');
+        break;
+
       default:
         console.warn(`[Connection] Unknown GFX command: ${cmd} (${GFXCMD_NAMES[cmd] || '?'}) len=${len} rawBytes=[${Array.from(cmddata.subarray(0, Math.min(20, cmddata.length))).map(b=>b.toString(16).padStart(2,'0')).join(' ')}]`);
         return -1;
@@ -2844,17 +2910,21 @@ export class MiniClientConnection extends EventTarget {
 
   // ── Media Stream Processing ──────────────────────────────
 
-  _onMediaData(data) {
+  _onMediaData(data, sock) {
     const bytes = new Uint8Array(data);
     const rawLen = bytes.byteLength;
     this._bytesReceivedMedia += rawLen;
     this._bytesReceivedWindow += rawLen;
 
     this.mediaBuffer.append(bytes);
-    this._processMediaBuffer();
+    this._processMediaBuffer(sock);
   }
 
-  _processMediaBuffer() {
+  _processMediaBuffer(sock) {
+    // Reply ints must be written on the SAME connection a command arrived on
+    // (SageTV contract). Track the receiving socket so _sendMedia targets it,
+    // rather than the mutable this.mediaSocket which a reconnect may reassign.
+    this._currentMediaSocket = sock || this.mediaSocket;
     while (this.mediaBuffer.length >= 4) {
       const header = this.mediaBuffer.peek(4);
       if (!header) break;
@@ -2881,7 +2951,14 @@ export class MiniClientConnection extends EventTarget {
         // Log ALL non-PUSHBUFFER, non-GETVIDEORECT commands (including INIT=0)
         console.log(`[Media] cmd=${cmd} len=${len} mediaPlayer=${!!this.mediaPlayer} mediaOpened=${!!this._mediaOpened}`);
       }
-      this._handleMediaCommand(cmd, len, payload);
+      // Guard the loop: a synchronous throw in one command's handler must not
+      // abort processing of the commands queued behind it in the same buffer
+      // (and, before the OPENURL early-ack above, could also skip a reply int).
+      try {
+        this._handleMediaCommand(cmd, len, payload);
+      } catch (err) {
+        console.error(`[Media] handler for cmd=${cmd} len=${len} threw: ${err?.message}`, err);
+      }
     }
   }
 
@@ -2926,6 +3003,14 @@ export class MiniClientConnection extends EventTarget {
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
         this._mediaOpened = true;
+        // Ack the OPENURL up-front, on the SAME connection it arrived on, BEFORE
+        // any device-path dispatch (onMediaOpen/setFormatHint/load). The server
+        // enforces a hard 30s read on this reply int (nonzero = OK). Deferring the
+        // ack until after the dispatch made it vulnerable to a synchronous throw
+        // in that dispatch aborting the handler and skipping the write — the server
+        // then saw "zero bytes for 30s" → PlaybackException while INIT (which does
+        // no device work) always replied fine. Mirror INIT: ack immediately.
+        this._sendMediaReturn(1);
         if (len >= 4) {
           const strLen = readInt(0);
           let urlString = '';
@@ -2969,12 +3054,16 @@ export class MiniClientConnection extends EventTarget {
           // sniffing/heuristics below. Only applies to pull sources (abs path or
           // stv://); push is retired and iosstream is a legacy-only construct.
           const msRoute = (!isPush) ? this._deliveryToMsproxy(this._effectiveDelivery, urlString, isStv, isAbsPath) : null;
+          // Capability learning: assume this OPENURL is NOT a native-unconditioned
+          // attempt until we reach the native pull branch below. Any conditioned
+          // route (msproxy remux/xcode, bridge transcode, iosstream) leaves this
+          // null so its outcome never feeds native-codec learning.
+          if (this._avcapMemory) this._pendingNativeProbe = null;
           if (msRoute) {
             console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
             this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
             this._effectiveSurface = '';
             this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
-            this._sendMediaReturn(1);
             break;
           }
 
@@ -3010,6 +3099,10 @@ export class MiniClientConnection extends EventTarget {
               // stv:// pull data source (browser-safe HTTP equivalent). Don't route
               // through the transcoder: DIRECT_PLAY should preserve original bitstream.
               if (surface) console.log(`[Media] CAP_EFFECTIVE_SURFACE=${surface} — native pull path`);
+              // Native, server-unconditioned DIRECT_PLAY (Tizen AVPlay): remember
+              // the codec being attempted so the firstframe/failure listeners can
+              // record on-device proof (see constructor + avplay-capability-memory).
+              if (this._avcapMemory) this._pendingNativeProbe = { hint: ngFmt.hint };
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
             }
           }
@@ -3019,7 +3112,6 @@ export class MiniClientConnection extends EventTarget {
           this._effectiveDelivery = '';
           this._effectiveSurface = '';
         }
-        this._sendMediaReturn(1);
         break;
       }
 
@@ -3257,6 +3349,20 @@ export class MiniClientConnection extends EventTarget {
     }
     if (!token) return null;
 
+    // DIRECT_PLAY (pull:direct) on the native AVPlay surface (Tizen): serve the
+    // ORIGINAL bytes via the proven /rawmedia byte-range endpoint — the Jul-11
+    // "Tizen AVPlay native playback" path (79f47bd) that reliably played HEVC /
+    // EAC3 / MPEG2 natively, BEFORE /msproxy existed. Once the server began
+    // emitting `pull:direct` (server 8e6a958f) instead of bare `pull`, this token
+    // slipped past the bare-`pull` guard above into the mode='direct' mapping and
+    // rerouted every DIRECT_PLAY title through /msproxy?mode=direct, where AVPlay
+    // never prepares a first frame → infinite "Loading" (server-side openURL0
+    // read then times out with AsynchronousCloseException). Return null so OPENURL
+    // falls through to this.mediaPlayer.load() → AVPlay /rawmedia. Browser/MSE
+    // surfaces keep /msproxy?mode=direct (seekable MP4) — this guard is Tizen-only,
+    // so no non-Tizen path changes.
+    if (token === 'direct' && this.platformDetector?.isTizen?.() === true) return null;
+
     let mode;
     if (token === 'direct') mode = 'direct';
     else if (token === 'mpeg2tsremux' || token === 'remux:ts' || token === 'remux') mode = 'remux:ts';
@@ -3311,8 +3417,11 @@ export class MiniClientConnection extends EventTarget {
   }
 
   _sendMedia(data) {
-    if (this.mediaSocket && this.mediaSocket.readyState === WebSocket.OPEN) {
-      this.mediaSocket.send(data.buffer || data);
+    // Prefer the connection the current command arrived on so reply ints land
+    // on the same /media socket the server is reading (see _processMediaBuffer).
+    const sock = this._currentMediaSocket || this.mediaSocket;
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(data.buffer || data);
     } else {
       console.warn(`[Media] Cannot send ${data.length}B — media socket not open`);
     }
@@ -3324,11 +3433,19 @@ export class MiniClientConnection extends EventTarget {
    */
   async _onMediaSocketClosed(ev) {
     const closeCode = ev?.code ?? 0;
-    const recentlyActive = (Date.now() - this._lastMediaCommandAt) < 5000;
 
-    // Clean close while idle is expected in some flows; do not churn reconnects.
-    if ((closeCode === 1000 || closeCode === 1001) && !recentlyActive) {
-      console.log(`[Connection] Media socket closed cleanly (code=${closeCode}) while idle; not reconnecting`);
+    // Only skip reconnect when the session is intentionally being torn down.
+    // A real Exit sets reconnectAllowed=false via GFXCMD_DEINIT (which also sets
+    // _exitRequested), and disconnect() clears reconnectAllowed. Under the NG
+    // pull model, however, a clean idle close is NOT an exit: the server still
+    // expects the player socket. Keying the old skip off idleness stranded the
+    // socket on clients that go idle after a stalled OPENURL (Tizen), so the
+    // server looped "Did not find a player socket connection" and playback never
+    // started. Browsers survived only by happening to be active at close time.
+    // Gate on intent, not idleness, so the player socket is restored like the
+    // browser does while a genuine Exit still skips (no reconnect churn).
+    if (!this.reconnectAllowed || this._exitRequested) {
+      console.log(`[Connection] Media socket closed (code=${closeCode}); session ending (reconnectAllowed=${this.reconnectAllowed}, exitRequested=${this._exitRequested}) — not reconnecting`);
       return;
     }
 
@@ -3342,25 +3459,74 @@ export class MiniClientConnection extends EventTarget {
       return;
     }
 
-    this._mediaReconnectTimer = setTimeout(async () => {
+    this._mediaReconnectTimer = setTimeout(() => {
       this._mediaReconnectTimer = null;
-      this._mediaReconnectInProgress = true;
-      try {
-        const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
-        this.mediaSocket = new WebSocket(`${this.bridgeUrl}/media${params}`);
-        this.mediaSocket.binaryType = 'arraybuffer';
-        await this._waitForOpen(this.mediaSocket, 'Media-Auto-Reconnect');
-        await this._handshake(this.mediaSocket, ConnectionType.MEDIA, this.mediaBuffer);
-        this.mediaSocket.onmessage = (event) => this._onMediaData(event.data);
-        this.mediaSocket.onclose = (event) => this._onMediaSocketClosed(event);
-        this.mediaSocket.onerror = () => console.warn('[Connection] Media socket error');
-        console.log('[Connection] Media socket auto-reconnected');
-      } catch (err) {
-        console.error('[Connection] Media auto-reconnect failed:', err);
-      } finally {
-        this._mediaReconnectInProgress = false;
-      }
+      this._openMediaChannel(`reactive close (code=${closeCode})`);
     }, 500);
+  }
+
+  /**
+   * Open a fresh player (/media) channel and make it the active media socket.
+   *
+   * SageTV treats the player channel as single-use: one /media connection per
+   * playback attempt, not per session. The server asks for a new one by sending
+   * GFXCMD_MEDIA_RECONNECT (opcode 131) on the /gfx channel whenever it needs a
+   * player channel and none is present. This is also the funnel used by the
+   * reactive close handler, so at most one open is ever in flight.
+   *
+   * The previous media socket (if any) is detached and closed first so we hold
+   * exactly one player channel at a time and its onclose can't schedule a second
+   * reconnect. This is a PUBLIC reconnect helper only — it performs no binary or
+   * protocol parsing itself; the existing handshake path is reused unchanged.
+   *
+   * @param {string} reason - diagnostic label for logging
+   */
+  async _openMediaChannel(reason) {
+    // A nudge/opener supersedes any pending reactive reconnect.
+    if (this._mediaReconnectTimer) {
+      clearTimeout(this._mediaReconnectTimer);
+      this._mediaReconnectTimer = null;
+    }
+    if (this._mediaReconnectInProgress) {
+      console.log(`[Connection] Media channel open already in progress; ignoring (${reason})`);
+      return;
+    }
+    if (!this.reconnectAllowed || this._exitRequested) {
+      console.log(`[Connection] Session ending; not opening media channel (${reason})`);
+      return;
+    }
+    if (!this.alive || !this.gfxSocket || this.gfxSocket.readyState !== WebSocket.OPEN) {
+      console.warn(`[Connection] GFX not alive; cannot open media channel (${reason})`);
+      return;
+    }
+    this._mediaReconnectInProgress = true;
+    try {
+      // Detach + close any prior player channel so its onclose doesn't schedule
+      // another reconnect and so exactly one /media is live at a time.
+      const previous = this.mediaSocket;
+      if (previous) {
+        previous.onmessage = null;
+        previous.onclose = null;
+        previous.onerror = null;
+        try { previous.close(); } catch (e) { /* ignore */ }
+      }
+      const params = `?host=${encodeURIComponent(this.serverHost)}&port=${this.serverPort}`;
+      const sock = new WebSocket(`${this.bridgeUrl}/media${params}`);
+      sock.binaryType = 'arraybuffer';
+      await this._waitForOpen(sock, 'Media-Channel');
+      await this._handshake(sock, ConnectionType.MEDIA, this.mediaBuffer);
+      // Bind this exact socket into the receive path so reply ints go back on
+      // the connection a command arrived on, not the mutable this.mediaSocket.
+      sock.onmessage = (event) => this._onMediaData(event.data, sock);
+      sock.onclose = (event) => this._onMediaSocketClosed(event);
+      sock.onerror = () => console.warn('[Connection] Media socket error');
+      this.mediaSocket = sock;
+      console.log(`[Connection] Player channel opened (${reason})`);
+    } catch (err) {
+      console.error(`[Connection] Failed to open media channel (${reason}):`, err);
+    } finally {
+      this._mediaReconnectInProgress = false;
+    }
   }
 
   // ── Event Sending (Client → Server) ──────────────────────

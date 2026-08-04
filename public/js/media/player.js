@@ -1480,6 +1480,7 @@ export class MediaPlayer extends EventTarget {
 
   stop() {
     this.video.pause();
+    this._lastDestRect = null;
     this._stopBandwidthTracking();
     this._stopGapMonitor();
 
@@ -2166,6 +2167,23 @@ export class MediaPlayer extends EventTarget {
     this._lastSrcRect = srcRect;
     this._lastDestRect = destRect;
     this._applyVideoRectangles();
+  }
+
+  /**
+   * True when the current video destination rect fills (most of) the UI — i.e.
+   * real fullscreen playback, not a small "play during menus" PIP rect. Input
+   * routing uses this to keep transport keys (FF/REW, pause) for fullscreen
+   * video while letting menu navigation work when the video is only a PIP.
+   * No rect yet ⇒ treated as fullscreen (a freshly started video is fullscreen
+   * until the server sends a smaller SETVIDEORECT).
+   */
+  isVideoFullscreen() {
+    const dest = this._lastDestRect;
+    if (!dest) return true;
+    const canvas = this.container.querySelector('canvas');
+    const uiW = (canvas && canvas.width) || window.innerWidth || 1920;
+    const uiH = (canvas && canvas.height) || window.innerHeight || 1080;
+    return dest.width >= uiW * 0.7 && dest.height >= uiH * 0.7;
   }
 
   _applyVideoRectangles() {
