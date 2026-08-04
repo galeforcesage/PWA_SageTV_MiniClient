@@ -32,7 +32,7 @@ The `:7818` pull protocol *can* serve transformed bytes (`XCODE_SETUP` before
 > and routes to `/msproxy?mode=` — no client change is needed when NG ships this.
 > Until then the PWA uses its existing surface-sniff routing unchanged.
 
-## What NG already has (verified in `SageTV-mine`, no change needed)
+## What NG already has (verified on the deployed NG server, no change needed)
 
 | Capability | Where | Status |
 |---|---|---|

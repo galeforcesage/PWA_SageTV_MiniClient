@@ -1363,8 +1363,8 @@ export class MiniClientConnection extends EventTarget {
    * NOT the union of surfaces. Correctness over max direct-play.
    *
    * Also normalizes canonical Protocol 2.1 names to the spellings upstream
-   * google/SageTV expects (H264 -> H.264, HE-AAC -> AAC-HE). SageTV-mine
-   * aliases both spellings so either works there; upstream is stricter.
+   * google/SageTV expects (H264 -> H.264, HE-AAC -> AAC-HE). The deployed NG
+   * server aliases both spellings so either works there; upstream is stricter.
    */
   _legacyCompat(list) {
     const map = { 'H264': 'H.264', 'HE-AAC': 'AAC-HE' };
@@ -1913,7 +1913,7 @@ export class MiniClientConnection extends EventTarget {
       case 'FIXED_PUSH_REMUX_FORMAT':
         // Upstream google/SageTV miniclient never advertises this property.
         // The hardcoded 'container=mpegts;videocodec=COPY;audiocodec=COPY;'
-        // was a lie SageTV-mine had to add code to ignore. Empty = 'no
+        // was a lie the NG server had to add code to ignore. Empty = 'no
         // override, server decides.'
         return '';
       case 'PUSH_BUFFER_SEEKING':
