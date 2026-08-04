@@ -171,6 +171,12 @@ export class MiniClientConnection extends EventTarget {
         this._avcapMemory.recordFailure(this._pendingNativeProbe.hint, reason);
         this._pendingNativeProbe = null;
       });
+      // A native attempt that degraded to the server /transcode fallback: the
+      // upcoming firstframe belongs to the transcode, NOT the original native
+      // codec, so clear the probe to avoid mis-crediting the native surface.
+      this.mediaPlayer.addEventListener('nativefallback', () => {
+        this._pendingNativeProbe = null;
+      });
     }
 
     // Load cached auth from settings if available (survives fresh connections)

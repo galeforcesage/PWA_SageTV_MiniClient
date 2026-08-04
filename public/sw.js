@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.47.0-tizen-avplay-cap-learning';
+const CACHE_NAME = 'sagetv-miniclient-8.48.0-tizen-avplay-watchdog';
 
 // During development, use network-first strategy
 const DEV_MODE = true;

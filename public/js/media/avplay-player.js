@@ -26,6 +26,17 @@
 
 import { PlayerState } from '../protocol/constants.js';
 
+/**
+ * If AVPlay produces no first frame within this window after a load(), treat the
+ * attempt as hung — the classic raw-MPEG2-PS / transport-stall symptom where
+ * neither the prepareAsync success NOR error callback ever fires — and fall back
+ * to the server /transcode path (or fail if no fallback exists). Chosen well
+ * under the SageTV server's ~30s player-socket read timeout so the fallback
+ * still starts in time, yet long enough not to trip on normal LAN buffering
+ * (first frame is typically <3s).
+ */
+const PREPARE_WATCHDOG_MS = 15000;
+
 export class AVPlayPlayer extends EventTarget {
   /**
    * @param {HTMLElement} videoElement - unused (AVPlay owns its own surface); kept
@@ -49,6 +60,8 @@ export class AVPlayPlayer extends EventTarget {
     this._videoDimensions = { width: 0, height: 0 };
     this._firstFrameEmitted = false;
     this._formatHint = null;
+    this._prepareWatchdog = null;
+    this._fallbackUrl = null;
     this._userMuted = false;
     this._volume = 1;
     this._telemetrySequence = 0;
@@ -153,10 +166,6 @@ export class AVPlayPlayer extends EventTarget {
     // (otherwise a late "prepared" would set state=PLAY and strand the menu
     // input in playback context — Right→FF, OK→pause instead of nav/select).
     const seq = (this._loadSeq = (this._loadSeq || 0) + 1);
-    // /msproxy resilience: when set, a prepare/open failure retries once via the
-    // bridge /transcode fallback (makes the client deploy-order-independent of
-    // the bridge jar that carries the /msproxy servlet).
-    this._msproxyFallbackUrl = msproxyFallbackUrl;
     this._pullHostname = hostname;
     this.serverEOS = false;
     this._firstFrameEmitted = false;
@@ -170,6 +179,15 @@ export class AVPlayPlayer extends EventTarget {
 
     const mediaUrl = this._resolveMediaUrl(url, bridgeFilePath);
     console.log(`[AVPlay] load: ${mediaUrl}`);
+
+    // Resilience fallback: a prepare/open error OR a no-first-frame hang retries
+    // once via the server /transcode path. An explicit msproxyFallbackUrl (from
+    // loadMsProxy) wins; otherwise, for a native /rawmedia direct pull, auto-derive
+    // a /transcode fallback from the source path so a DIRECT_PLAY that AVPlay can't
+    // demux/decode — or that stalls with no callback (the raw-MPEG2-PS hang) —
+    // degrades to a server transcode instead of a dead-end spinner. Never derived
+    // when this load IS already the /transcode fallback (prevents an infinite loop).
+    this._fallbackUrl = msproxyFallbackUrl || this._deriveNativeTranscodeFallback(url, bridgeFilePath, mediaUrl);
 
     const obj = this._ensureObject();
     obj.style.display = 'block';
@@ -199,29 +217,83 @@ export class AVPlayPlayer extends EventTarget {
         (e) => {
           if (seq !== this._loadSeq) return;
           console.error('[AVPlay] prepareAsync failed:', e);
-          if (this._msproxyFallbackUrl) {
-            const fb = this._msproxyFallbackUrl;
-            this._msproxyFallbackUrl = null;
-            console.warn('[AVPlay] /msproxy prepare failed; falling back to /transcode');
-            this.load(0, 0, '', fb, this._pullHostname || '', false, 0, null);
-            return;
-          }
-          this._emitPlaybackFailure('AVPLAY_PREPARE_ERROR', { mode: 'avplay', message: JSON.stringify(e) });
-          this.state = PlayerState.STOPPED;
+          this._fallbackOrFail('AVPLAY_PREPARE_ERROR', { mode: 'avplay', message: JSON.stringify(e) });
         }
       );
+      // Guard against an infinite prepare/first-frame hang (no callback ever
+      // fires) — the exact failure mode that stalls the server for ~30s.
+      this._armPrepareWatchdog(seq);
     } catch (e) {
       console.error('[AVPlay] open/prepare threw:', e);
-      if (this._msproxyFallbackUrl) {
-        const fb = this._msproxyFallbackUrl;
-        this._msproxyFallbackUrl = null;
-        console.warn('[AVPlay] /msproxy open threw; falling back to /transcode');
-        this.load(0, 0, '', fb, this._pullHostname || '', false, 0, null);
-        return;
-      }
-      this._emitPlaybackFailure('AVPLAY_OPEN_ERROR', { mode: 'avplay', message: e && e.message });
-      this.state = PlayerState.STOPPED;
+      this._fallbackOrFail('AVPLAY_OPEN_ERROR', { mode: 'avplay', message: e && e.message });
     }
+  }
+
+  /**
+   * Derive a server /transcode fallback URL for a native (/rawmedia) direct pull.
+   * Returns null for bridge/transcode loads (which are themselves the fallback)
+   * and for URLs that are not a resolvable server-file pull.
+   */
+  _deriveNativeTranscodeFallback(url, bridgeFilePath, mediaUrl) {
+    if (bridgeFilePath) return null;                       // already a bridge/transcode load
+    if (!mediaUrl || mediaUrl.includes('/transcode?')) return null; // don't loop on the fallback itself
+    const abs = this._toAbsPath(url);
+    if (!abs) return null;
+    const base = (this._bridgeBase || '').replace(/\/$/, '');
+    return `${base}/transcode?file=${encodeURIComponent(abs)}`;
+  }
+
+  /** Extract an absolute server path from a stv:// / file:// / bare-abs URL, else null. */
+  _toAbsPath(url) {
+    if (!url || typeof url !== 'string') return null;
+    if (url.startsWith('stv://')) {
+      const rest = url.substring(6);
+      const slash = rest.indexOf('/');
+      return slash >= 0 ? rest.substring(slash) : null;
+    }
+    if (url.startsWith('file://')) {
+      const p = url.substring(7);
+      return p.startsWith('/') ? p : '/' + p;
+    }
+    if (url.startsWith('/')) return url;
+    return null;
+  }
+
+  _armPrepareWatchdog(seq) {
+    this._clearPrepareWatchdog();
+    this._prepareWatchdog = setTimeout(() => {
+      this._prepareWatchdog = null;
+      if (seq !== this._loadSeq) return;    // superseded by stop()/newer load()
+      if (this._firstFrameEmitted) return;  // already playing — not a hang
+      console.warn(`[AVPlay] no first frame within ${PREPARE_WATCHDOG_MS}ms — treating as hung`);
+      this._fallbackOrFail('AVPLAY_PREPARE_TIMEOUT', { mode: 'avplay', timeoutMs: PREPARE_WATCHDOG_MS });
+    }, PREPARE_WATCHDOG_MS);
+  }
+
+  _clearPrepareWatchdog() {
+    if (this._prepareWatchdog) { clearTimeout(this._prepareWatchdog); this._prepareWatchdog = null; }
+  }
+
+  /**
+   * Retry via the server /transcode fallback if one is available, else emit a
+   * terminal playback failure. Used by the prepare/open error callbacks and the
+   * no-first-frame watchdog. A fallback is a RECOVERABLE transition, not a
+   * failure: it dispatches 'nativefallback' (so capability learning does not
+   * mis-attribute the transcoded playback's first frame to the original native
+   * codec) instead of 'playbackfailure' (which drives the error UI).
+   */
+  _fallbackOrFail(reason, details = {}) {
+    this._clearPrepareWatchdog();
+    if (this._fallbackUrl) {
+      const fb = this._fallbackUrl;
+      this._fallbackUrl = null;
+      console.warn(`[AVPlay] ${reason}; falling back to server /transcode`);
+      this.dispatchEvent(new CustomEvent('nativefallback', { detail: { reason } }));
+      this.load(0, 0, '', fb, this._pullHostname || '', false, 0, null);
+      return;
+    }
+    this._emitPlaybackFailure(reason, details);
+    this.state = PlayerState.STOPPED;
   }
 
   // Option B parity: bridge transcodes a MediaFile id to fMP4/TS AVPlay can open.
@@ -281,6 +353,7 @@ export class AVPlayPlayer extends EventTarget {
   _emitFirstFrameOnce() {
     if (this._firstFrameEmitted) return;
     this._firstFrameEmitted = true;
+    this._clearPrepareWatchdog();
     this.dispatchEvent(new CustomEvent('firstframe'));
   }
 
@@ -317,6 +390,8 @@ export class AVPlayPlayer extends EventTarget {
     // Invalidate any in-flight prepareAsync callback from a prior load() so a
     // late "prepared" success can't flip state back to PLAY after we've stopped.
     this._loadSeq = (this._loadSeq || 0) + 1;
+    this._clearPrepareWatchdog();
+    this._fallbackUrl = null;
     if (this._avplay) {
       try { this._avplay.stop(); } catch { /* ignore */ }
       try { this._avplay.close(); } catch { /* ignore */ }
@@ -455,6 +530,7 @@ export class AVPlayPlayer extends EventTarget {
   // ── Telemetry (parity with MediaPlayer) ──────────────────
 
   _emitPlaybackFailure(reason, details = {}) {
+    this._clearPrepareWatchdog();
     const key = `${reason}|${details.mode || ''}|${details.code || ''}`;
     if (this._reportedFailureKeys.has(key)) return;
     this._reportedFailureKeys.add(key);
