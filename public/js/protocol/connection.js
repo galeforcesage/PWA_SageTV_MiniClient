@@ -1137,16 +1137,19 @@ export class MiniClientConnection extends EventTarget {
     // attempts (avplay-capability-memory.js). Turns the curated Profile-4
     // whitelist above into per-panel proof: if the TV genuinely can't decode a
     // codec, stop advertising it natively so the server transcodes instead of
-    // pushing an undecodable DIRECT_PLAY. Video-only + success-immunised, so it
-    // can never strip a codec the panel actually plays. No-op on non-Tizen.
+    // pushing an undecodable DIRECT_PLAY. Learns video/audio/container with
+    // unambiguous attribution + success-immunisation, so it can never strip a
+    // codec the panel actually plays. No-op on non-Tizen.
     if (this.platformDetector?.isTizen?.()) {
       const bad = (this._avcapMemory || getAvplayCapabilityMemory()).getProvenBadNativeCaps();
-      if (bad.video.length) {
-        const before = native.video.slice();
-        native.video = native.video.filter((c) => !bad.video.includes(c));
-        if (before.length !== native.video.length) {
-          console.warn('[PlaybackSurfaces] on-device learned downgrade — removed native video ['
-            + before.filter((c) => !native.video.includes(c)).join(',') + ']');
+      for (const dim of ['video', 'audio', 'containers']) {
+        const badList = bad[dim] || [];
+        if (!badList.length || !Array.isArray(native[dim])) continue;
+        const before = native[dim].slice();
+        native[dim] = native[dim].filter((c) => !badList.includes(c));
+        if (before.length !== native[dim].length) {
+          console.warn(`[PlaybackSurfaces] on-device learned downgrade — removed native ${dim} [`
+            + before.filter((c) => !native[dim].includes(c)).join(',') + ']');
         }
       }
     }

@@ -17,19 +17,25 @@
  *     advertising it, so the server transcodes/remuxes it instead.
  *
  * SCOPE — deliberately conservative to be safe:
- *   1. VIDEO codec dimension only. A single failed combo (container+video+audio)
- *      cannot be attributed to one dimension, and wrongly blacklisting a
- *      container (MP4) or audio codec (AAC) would break ALL playback. The video
- *      codec is both the most likely real capability gap AND the exact thing the
- *      server's decision engine over-advertises (HEVC / MPEG2-VIDEO / AV1), so
- *      learning just the video dimension targets the real risk with zero chance
- *      of killing MP4/AAC. Audio/container learning is a future step.
+ *   1. Learns all three surface dimensions (video codec, audio codec, container)
+ *      but attributes a failure to at most ONE of them, and only when that
+ *      attribution is UNAMBIGUOUS:
+ *        - VIDEO is the primary suspect (the most likely real capability gap and
+ *          the exact thing the server's decision engine over-advertises). While
+ *          the video codec is not yet proven-good on this device, a failure is
+ *          blamed on video.
+ *        - Once the video codec IS proven-good, the failure must be the audio
+ *          codec or the container. It is attributed ONLY when exactly one of
+ *          those two is still unproven (the other being proven-good), so we never
+ *          guess between two unknowns and never risk blacklisting MP4/AAC while
+ *          the real fault is elsewhere.
+ *      A success immunises every mappable dimension of the played combo at once.
  *   2. Only DIRECT_PLAY (native, server-unconditioned) attempts feed learning.
  *      Server-conditioned remux/xcode outcomes describe the transcode pipeline,
  *      not the native decoder, so they are excluded by the caller.
- *   3. A codec is blacklisted only after FAIL_THRESHOLD (default 2) confirmed
- *      decode/demux errors with ZERO successes. Any success clears the fail
- *      counter and permanently immunises the codec. This prevents a one-off
+ *   3. A dimension value is blacklisted only after FAIL_THRESHOLD (default 2)
+ *      confirmed decode/demux errors with ZERO successes. Any success clears the
+ *      fail counter and permanently immunises the value. This prevents a one-off
  *      transient (a bad file, a transport hiccup) from poisoning the caps.
  *
  * A pure logic module: storage and the device signature are injectable so it is
@@ -37,7 +43,7 @@
  * binds window.localStorage + webapis.productinfo.
  */
 
-const STORAGE_KEY = 'avplay_cap_memory_v1';
+const STORAGE_KEY = 'avplay_cap_memory_v2';
 const DEFAULT_FAIL_THRESHOLD = 2;
 
 /**
@@ -61,6 +67,42 @@ const VIDEO_MIME_TO_CAP = {
   'video/av1': 'AV1',
 };
 
+/**
+ * ng_fmt audio MIME -> Protocol 2.1 canonical native audio capability name
+ * (see tizen-capabilities.js Profile-4 audio list + player.js _ngFmtToMseCodecs
+ * audioMap, which is the authoritative set of tokens the server emits). Only
+ * confidently-named codecs are listed; anything else returns null and is never
+ * learned (fail-safe: we never blacklist an audio dimension we can't name).
+ */
+const AUDIO_MIME_TO_CAP = {
+  'audio/mp4a-latm': 'AAC',
+  'audio/aac': 'AAC',
+  'audio/ac3': 'AC3',
+  'audio/eac3': 'EAC3',
+  'audio/ac4': 'AC4',
+  'audio/mpeg': 'MP3',
+  'audio/mpeg-l2': 'MP2',
+  'audio/flac': 'FLAC',
+  'audio/opus': 'OPUS',
+  'audio/vorbis': 'VORBIS',
+  'audio/alac': 'ALAC',
+};
+
+/**
+ * ng_fmt container MIME -> Protocol 2.1 canonical container capability name.
+ * Deliberately conservative: ambiguous tokens (e.g. bare "video/mpeg", which
+ * could be program- or transport-stream) are intentionally omitted so they map
+ * to null and are never learned — mis-blacklisting a container would break every
+ * title in it.
+ */
+const CONTAINER_MIME_TO_CAP = {
+  'video/mp4': 'MP4',
+  'video/mp2t': 'MPEG2-TS',
+  'video/x-matroska': 'MATROSKA',
+  'video/quicktime': 'MOV',
+  'video/x-msvideo': 'AVI',
+};
+
 /** Reasons that constitute a real native decode/demux rejection (not a hang). */
 const CODEC_FAILURE_REASONS = new Set([
   'AVPLAY_PREPARE_ERROR',
@@ -78,18 +120,50 @@ export function videoMimeToCapName(mime) {
   return VIDEO_MIME_TO_CAP[key] || null;
 }
 
+/**
+ * Map an ng_fmt audio MIME string to a canonical capability name.
+ * @param {string|null|undefined} mime
+ * @returns {string|null}
+ */
+export function audioMimeToCapName(mime) {
+  if (!mime) return null;
+  const key = String(mime).trim().toLowerCase();
+  return AUDIO_MIME_TO_CAP[key] || null;
+}
+
+/**
+ * Map an ng_fmt container MIME string to a canonical capability name.
+ * @param {string|null|undefined} mime
+ * @returns {string|null}
+ */
+export function containerMimeToCapName(mime) {
+  if (!mime) return null;
+  const key = String(mime).trim().toLowerCase();
+  return CONTAINER_MIME_TO_CAP[key] || null;
+}
+
 /** @returns {boolean} whether `reason` is a real codec-level failure. */
 export function isCodecFailureReason(reason) {
   return CODEC_FAILURE_REASONS.has(String(reason || ''));
 }
 
 /**
+ * @typedef {object} DimState
+ * @property {Object<string, number>} fails  capName -> consecutive fails
+ * @property {string[]} good  capNames proven good (immunised)
+ * @property {string[]} bad   capNames proven bad (blacklisted)
+ */
+
+/**
  * @typedef {object} MemoryState
  * @property {string} sig     device signature this state was learned on
- * @property {Object<string, number>} fails  video capName -> consecutive fails
- * @property {string[]} good  video capNames proven good (immunised)
- * @property {string[]} bad   video capNames proven bad (blacklisted)
+ * @property {DimState} video
+ * @property {DimState} audio
+ * @property {DimState} containers
  */
+
+/** Surface dimensions learned, in attribution-priority order. */
+const DIMS = ['video', 'audio', 'containers'];
 
 export class AvplayCapabilityMemory {
   /**
@@ -106,8 +180,22 @@ export class AvplayCapabilityMemory {
     this._state = this._load();
   }
 
+  _blankDim() {
+    return { fails: {}, good: [], bad: [] };
+  }
+
   _blankState() {
-    return { sig: this._sig, fails: {}, good: [], bad: [] };
+    return { sig: this._sig, video: this._blankDim(), audio: this._blankDim(), containers: this._blankDim() };
+  }
+
+  _sanitizeDim(d) {
+    const blank = this._blankDim();
+    if (!d || typeof d !== 'object') return blank;
+    return {
+      fails: (d.fails && typeof d.fails === 'object') ? d.fails : {},
+      good: Array.isArray(d.good) ? d.good.slice() : [],
+      bad: Array.isArray(d.bad) ? d.bad.slice() : [],
+    };
   }
 
   _load() {
@@ -121,9 +209,9 @@ export class AvplayCapabilityMemory {
       if (!parsed || parsed.sig !== this._sig) return blank;
       return {
         sig: this._sig,
-        fails: (parsed.fails && typeof parsed.fails === 'object') ? parsed.fails : {},
-        good: Array.isArray(parsed.good) ? parsed.good.slice() : [],
-        bad: Array.isArray(parsed.bad) ? parsed.bad.slice() : [],
+        video: this._sanitizeDim(parsed.video),
+        audio: this._sanitizeDim(parsed.audio),
+        containers: this._sanitizeDim(parsed.containers),
       };
     } catch {
       return blank;
@@ -139,59 +227,104 @@ export class AvplayCapabilityMemory {
     }
   }
 
+  /** @returns {{video: string|null, audio: string|null, containers: string|null}} */
+  _capsForHint(hint) {
+    return {
+      video: videoMimeToCapName(hint && hint.video),
+      audio: audioMimeToCapName(hint && hint.audio),
+      containers: containerMimeToCapName(hint && hint.container),
+    };
+  }
+
+  _isGood(dim, cap) {
+    return !!cap && this._state[dim].good.includes(cap);
+  }
+
+  /** Immunise one dimension value: clear fails, drop blacklist, mark good. */
+  _immunise(dim, cap) {
+    if (!cap) return false;
+    const d = this._state[dim];
+    let changed = false;
+    if (d.fails[cap]) { delete d.fails[cap]; changed = true; }
+    if (d.bad.includes(cap)) { d.bad = d.bad.filter((c) => c !== cap); changed = true; }
+    if (!d.good.includes(cap)) { d.good.push(cap); changed = true; }
+    return changed;
+  }
+
+  /**
+   * Increment a dimension value's fail counter and blacklist it at threshold.
+   * Assumes the caller already decided this dim is the unambiguous culprit.
+   * @returns {boolean} true if newly blacklisted
+   */
+  _failDim(dim, cap, reason) {
+    const d = this._state[dim];
+    if (d.good.includes(cap) || d.bad.includes(cap)) return false;
+    d.fails[cap] = (d.fails[cap] || 0) + 1;
+    if (d.fails[cap] >= this._failThreshold) {
+      d.bad.push(cap);
+      console.warn(`[AVCapMemory] ${dim} ${cap} failed ${d.fails[cap]}x (reason=${reason})`
+        + ` — removing from native surface (device ${this._sig})`);
+      return true;
+    }
+    console.warn(`[AVCapMemory] ${dim} ${cap} native failure ${d.fails[cap]}/${this._failThreshold} (reason=${reason})`);
+    return false;
+  }
+
   /**
    * Record that a native DIRECT_PLAY attempt reached first frame. Proves the
-   * device decodes this video codec: immunise it (clear fails, drop any prior
-   * blacklist entry, mark proven-good).
-   * @param {{video?: string|null}|null} hint  ng_fmt hint (MIME strings)
+   * device handled every mappable dimension of this combo — immunise them all
+   * (clear fails, drop any prior blacklist entry, mark proven-good).
+   * @param {{video?: string|null, audio?: string|null, container?: string|null}|null} hint
    * @returns {boolean} true if state changed
    */
   recordSuccess(hint) {
-    const cap = videoMimeToCapName(hint && hint.video);
-    if (!cap) return false;
+    const caps = this._capsForHint(hint);
     let changed = false;
-    if (this._state.fails[cap]) { delete this._state.fails[cap]; changed = true; }
-    if (this._state.bad.includes(cap)) {
-      this._state.bad = this._state.bad.filter((c) => c !== cap);
-      changed = true;
+    for (const dim of DIMS) {
+      if (this._immunise(dim, caps[dim])) {
+        console.log(`[AVCapMemory] proven-good ${dim}: ${caps[dim]} (device ${this._sig})`);
+        changed = true;
+      }
     }
-    if (!this._state.good.includes(cap)) { this._state.good.push(cap); changed = true; }
-    if (changed) {
-      console.log(`[AVCapMemory] proven-good video codec: ${cap} (device ${this._sig})`);
-      this._persist();
-    }
+    if (changed) this._persist();
     return changed;
   }
 
   /**
    * Record a native DIRECT_PLAY decode/demux failure. Ignored unless the reason
-   * is a real codec rejection and the codec has never succeeded. Blacklists the
-   * codec once it reaches the fail threshold.
-   * @param {{video?: string|null}|null} hint
+   * is a real codec rejection. Attributes the failure to exactly one dimension:
+   * video while it is still unproven, else the single unproven audio/container
+   * dimension. Ambiguous cases (two unknowns, or an unmappable video) are left
+   * un-learned so MP4/AAC can never be wrongly blacklisted.
+   * @param {{video?: string|null, audio?: string|null, container?: string|null}|null} hint
    * @param {string} reason  AVPLAY_* failure reason
-   * @returns {boolean} true if the codec became newly blacklisted
+   * @returns {boolean} true if a dimension value became newly blacklisted
    */
   recordFailure(hint, reason) {
     if (!isCodecFailureReason(reason)) return false;
-    const cap = videoMimeToCapName(hint && hint.video);
-    if (!cap) return false;
-    // A codec proven good on this device is immune — never blacklist it.
-    if (this._state.good.includes(cap)) return false;
-    if (this._state.bad.includes(cap)) return false;
+    const caps = this._capsForHint(hint);
 
-    this._state.fails[cap] = (this._state.fails[cap] || 0) + 1;
-    let blacklisted = false;
-    if (this._state.fails[cap] >= this._failThreshold) {
-      this._state.bad.push(cap);
-      blacklisted = true;
-      console.warn(`[AVCapMemory] video codec ${cap} failed ${this._state.fails[cap]}x`
-        + ` (reason=${reason}) — removing from native surface (device ${this._sig})`);
-    } else {
-      console.warn(`[AVCapMemory] video codec ${cap} native failure ${this._state.fails[cap]}/`
-        + `${this._failThreshold} (reason=${reason})`);
+    // Video-first: while the video codec is mappable but not yet proven-good it
+    // is the prime suspect.
+    if (caps.video && !this._isGood('video', caps.video)) {
+      const bl = this._failDim('video', caps.video, reason);
+      this._persist();
+      return bl;
     }
+
+    // The failure is only attributable elsewhere once video is KNOWN good (an
+    // unmappable/absent video codec leaves the fault ambiguous — bail out).
+    if (!this._isGood('video', caps.video)) return false;
+
+    const suspects = [];
+    if (caps.audio && !this._isGood('audio', caps.audio)) suspects.push(['audio', caps.audio]);
+    if (caps.containers && !this._isGood('containers', caps.containers)) suspects.push(['containers', caps.containers]);
+    if (suspects.length !== 1) return false; // 0 or 2 unknowns — ambiguous
+
+    const [dim, cap] = suspects[0];
+    const bl = this._failDim(dim, cap, reason);
     this._persist();
-    return blacklisted;
+    return bl;
   }
 
   /**
@@ -200,17 +333,20 @@ export class AvplayCapabilityMemory {
    * @returns {string[]}
    */
   getProvenBadVideo() {
-    return this._state.bad.slice();
+    return this._state.video.bad.slice();
   }
 
   /**
-   * Proven-bad capabilities per surface dimension. Only `video` is learned in
-   * this MVP; audio/containers are always empty (reserved for a future step) so
-   * the caller's subtraction is uniform and forward-compatible.
+   * Proven-bad capabilities per surface dimension. The caller subtracts each
+   * list from the matching pwa_native array.
    * @returns {{video: string[], audio: string[], containers: string[]}}
    */
   getProvenBadNativeCaps() {
-    return { video: this._state.bad.slice(), audio: [], containers: [] };
+    return {
+      video: this._state.video.bad.slice(),
+      audio: this._state.audio.bad.slice(),
+      containers: this._state.containers.bad.slice(),
+    };
   }
 
   /** Wipe all learned state (manual reset / diagnostics). */
