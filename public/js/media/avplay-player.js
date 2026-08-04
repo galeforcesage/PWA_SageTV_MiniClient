@@ -57,6 +57,11 @@ export class AVPlayPlayer extends EventTarget {
     this._obj = null;               // <object type="application/avplayer">
     this._positionMs = 0;
     this._durationMs = 0;
+    // NG playback-context knobs (written by NgPlaybackContextConsumer; null for
+    // legacy servers and VOD). Only the live-edge seek clamp reads them.
+    this._ngLiveSafeSeekEndMs = null;
+    this._ngLivePlayableEndMs = null;
+    this._seekGranularityMs = undefined;
     this._videoDimensions = { width: 0, height: 0 };
     this._firstFrameEmitted = false;
     this._formatHint = null;
@@ -411,7 +416,26 @@ export class AVPlayPlayer extends EventTarget {
   /** @param {number} timeMS absolute position in milliseconds. */
   seek(timeMS) {
     if (!this._avplay) return;
-    const ms = Math.max(0, timeMS | 0);
+    let ms = Math.max(0, timeMS | 0);
+
+    // ── Live-edge guard (NG context) ──
+    // For a live recording the server advertises safeSeekEndMs (the furthest
+    // position that is safely buffered). Seeking past it drops AVPlay into an
+    // unbuffered region at the growing edge and stalls. Mirror the MSE player's
+    // guard: ignore the seek when already at the edge, else clamp to it. Knobs
+    // are written by NgPlaybackContextConsumer and are null/undefined for VOD,
+    // so this is a no-op for non-live playback (byte-for-byte unchanged).
+    if (this._ngLiveSafeSeekEndMs && ms > this._ngLiveSafeSeekEndMs) {
+      const curMs = this.getMediaTimeMillis();
+      const nearEdge = curMs >= (this._ngLiveSafeSeekEndMs - (this._seekGranularityMs || 5000));
+      if (nearEdge) {
+        console.debug(`[AVPlay] Live-edge ignore: at ${curMs}ms, target ${ms}ms > safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
+        return;
+      }
+      console.debug(`[AVPlay] Live-edge clamp: target ${ms}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
+      ms = this._ngLiveSafeSeekEndMs;
+    }
+
     this.dispatchEvent(new CustomEvent('buffering'));
     try {
       this._avplay.seekTo(

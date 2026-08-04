@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.49.0-pip-menu-input';
+const CACHE_NAME = 'sagetv-miniclient-8.50.0-avplay-live-edge';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
