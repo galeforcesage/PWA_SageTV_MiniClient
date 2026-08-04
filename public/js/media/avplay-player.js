@@ -392,6 +392,7 @@ export class AVPlayPlayer extends EventTarget {
     this._loadSeq = (this._loadSeq || 0) + 1;
     this._clearPrepareWatchdog();
     this._fallbackUrl = null;
+    this._lastDestRect = null;
     if (this._avplay) {
       try { this._avplay.stop(); } catch { /* ignore */ }
       try { this._avplay.close(); } catch { /* ignore */ }
@@ -499,6 +500,23 @@ export class AVPlayPlayer extends EventTarget {
   setVideoRectangles(srcRect, destRect) {
     this._lastDestRect = destRect;
     this._applyDisplayRect();
+  }
+
+  /**
+   * True when the current video destination rect fills (most of) the UI — i.e.
+   * real fullscreen playback, not a small "play during menus" PIP rect. Input
+   * routing uses this to keep transport keys (FF/REW, pause) for fullscreen
+   * video while letting menu navigation work when the video is only a PIP.
+   * No rect yet ⇒ treated as fullscreen (a freshly started video is fullscreen
+   * until the server sends a smaller SETVIDEORECT).
+   */
+  isVideoFullscreen() {
+    const dest = this._lastDestRect;
+    if (!dest) return true;
+    const canvas = this.container.querySelector && this.container.querySelector('canvas');
+    const uiW = (canvas && canvas.width) || window.innerWidth || 1920;
+    const uiH = (canvas && canvas.height) || window.innerHeight || 1080;
+    return dest.width >= uiW * 0.7 && dest.height >= uiH * 0.7;
   }
 
   _applyDisplayRect() {
