@@ -25,8 +25,8 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
   ]]></Description>
   <Author>galeforcesage</Author>
   <CreationDate>2026.04.01</CreationDate>
-  <ModificationDate>2026.07.07</ModificationDate>
-  <Version>1.0.0.2</Version>
+  <ModificationDate>2026.08.09</ModificationDate>
+  <Version>1.0.0.3</Version>
   <Desktop>false</Desktop>
   <ServerOnly>true</ServerOnly>
   <ResourcePath>pwa-miniclient</ResourcePath>
@@ -46,17 +46,31 @@ After install, open http://{SageTV-IP}:8099 in your browser to connect.
 
   <Package>
     <PackageType>JAR</PackageType>
-    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.2/pwa-miniclient-jar-1.0.0.2.zip</Location>
-    <MD5>768c333442055b9ec26d0f5dfb86255b</MD5>
+    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.3/pwa-miniclient-jar-1.0.0.3.zip</Location>
+    <MD5>22517577882d9a62f42f4343c50b3c5f</MD5>
   </Package>
 
   <Package>
     <PackageType>System</PackageType>
-    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.2/pwa-miniclient-web-1.0.0.2.zip</Location>
-    <MD5>eeffcc6ada667f447707c91f54f9444d</MD5>
+    <Location>https://github.com/galeforcesage/PWA_SageTV_MiniClient/releases/download/v1.0.0.3/pwa-miniclient-web-1.0.0.3.zip</Location>
+    <MD5>7b936afdff65ed4d1006b74992352035</MD5>
   </Package>
 
   <ReleaseNotes><![CDATA[
+Version 1.0.0.3
+  - Rolls up ~95 commits merged since the July 7 (1.0.0.2) build so fresh
+    installs get the current client + bridge
+  - Bridge: live-follow /rawmedia for in-progress recordings (live DIRECT_PLAY
+    no longer ends early)
+  - Media: NG Playback Context consumer wiring; live-edge seek clamp (MSE + AVPlay)
+  - Media: passive on-device burn-test capability learning (video/audio/container)
+  - Tizen: AVPlay native playback, prepare watchdog + /transcode fallback,
+    DIRECT_PLAY routed to native /rawmedia
+  - Audio Equalizer / AudioProcessing v1 (browser + Tizen remote nav)
+  - WebGL renderer + retained-mode frame cache (large blit speedups)
+  - Nav drawer polish (Back arrow flipped: arrow on top)
+  - Numerous NG surface-declaration, reconnect, and playback-stability fixes
+
 Version 1.0.0.2
   - Menu performance: instrumentation (?perf=1), image-cache accounting-leak fix
     (bounded surface budget), and platform-aware canvas smoothing (low on iPad/Tizen)
