@@ -25,6 +25,7 @@
  */
 
 import { PlayerState } from '../protocol/constants.js';
+import { streamInfoToFormatHint } from './ng-streaminfo.js';
 
 /**
  * If AVPlay produces no first frame within this window after a load(), treat the
@@ -65,6 +66,8 @@ export class AVPlayPlayer extends EventTarget {
     this._videoDimensions = { width: 0, height: 0 };
     this._firstFrameEmitted = false;
     this._formatHint = null;
+    // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
+    this._streamInfo = null;
     this._prepareWatchdog = null;
     this._fallbackUrl = null;
     this._userMuted = false;
@@ -99,6 +102,23 @@ export class AVPlayPlayer extends EventTarget {
    */
   setFormatHint(hint) {
     this._formatHint = hint || null;
+  }
+
+  /**
+   * Apply a parsed NG STREAMINFO (MEDIACMD 40) descriptor. MediaPlayer parity.
+   * AVPlay demuxes/decodes natively so it doesn't need a hint to build a
+   * pipeline, but priming the hint before OPENURL lets capability learning
+   * attribute the DIRECT_PLAY outcome to the right codec. Returns {video, audio}
+   * booleans for the STREAMINFO ACK. Never throws (synchronous server wait).
+   */
+  applyStreamInfo(info) {
+    this._streamInfo = info || null;
+    const hint = streamInfoToFormatHint(info);
+    if (hint) this.setFormatHint(hint);
+    return {
+      video: !!(hint && hint.video),
+      audio: !!(hint && hint.audio),
+    };
   }
 
   _ensureObject() {

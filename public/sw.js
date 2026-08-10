@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.51.0-burn-audio-container';
+const CACHE_NAME = 'sagetv-miniclient-8.52.0-ng-streaminfo';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
@@ -26,6 +26,7 @@ const STATIC_ASSETS = [
   '/js/protocol/compression.js',
   '/js/ui/renderer.js',
   '/js/media/player.js',
+  '/js/media/ng-streaminfo.js',
   '/js/lib/hls.min.js',
   '/js/lib/mux.min.js',
   '/js/input/input-manager.js',

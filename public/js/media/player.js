@@ -14,6 +14,7 @@
  */
 
 import { PlayerState, DESIRED_VIDEO_PREBUFFER } from '../protocol/constants.js';
+import { streamInfoToFormatHint } from './ng-streaminfo.js';
 
 export class MediaPlayer extends EventTarget {
   /**
@@ -101,7 +102,8 @@ export class MediaPlayer extends EventTarget {
 
     // NG format hint (ng_fmt) — set by connection.js before load
     this._formatHint = null;
-
+    // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
+    this._streamInfo = null;
     // Bind video events
     this._setupVideoEvents();
   }
@@ -116,6 +118,23 @@ export class MediaPlayer extends EventTarget {
    */
   setFormatHint(hint) {
     this._formatHint = hint || null;
+  }
+
+  /**
+   * Apply a parsed NG STREAMINFO (MEDIACMD 40) descriptor. Arrives BEFORE the
+   * OPENURL, so it primes the same format-hint fast-path that ng_fmt would,
+   * only earlier and with richer metadata. Returns {video, audio} booleans for
+   * the STREAMINFO ACK — true means we have a decoder decision for that track
+   * and need no probe. Never throws (server waits synchronously on the ACK).
+   */
+  applyStreamInfo(info) {
+    this._streamInfo = info || null;
+    const hint = streamInfoToFormatHint(info);
+    if (hint) this.setFormatHint(hint);
+    return {
+      video: !!(hint && hint.video),
+      audio: !!(hint && hint.audio),
+    };
   }
 
   /**
