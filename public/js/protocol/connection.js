@@ -27,6 +27,7 @@ import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
 import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
 import { getAvplayCapabilityMemory, isCodecFailureReason } from '../media/avplay-capability-memory.js';
+import { parseStreamInfo, STREAMINFO_ACK } from '../media/ng-streaminfo.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
@@ -248,6 +249,9 @@ export class MiniClientConnection extends EventTarget {
     // Media stats protocol
     this._detailedBufferStats = false;
     this._serverMuxTime = -1;
+    // Set true when a STREAMINFO (MEDIACMD 40) primed the player's format hint
+    // for the next item, so the following OPENURL keeps it instead of clearing.
+    this._streamInfoPending = false;
 
     // Server profile detection (populated via /api/server-info)
     this.serverProfile = null;   // { serverType, serverFfmpeg, bridgeFfmpeg }
@@ -1431,6 +1435,23 @@ export class MiniClientConnection extends EventTarget {
     return caps.join(',');
   }
 
+  /**
+  * NG capability set advertised via the SAGETV_NG_CAPABILITIES property. This
+  * is the download caps PLUS additive NG feature tokens. Kept separate from
+  * _buildDownloadCapabilities() (which the DOWNLOAD_CAPABILITIES property also
+  * uses) so feature tokens don't leak into the download-only report.
+  *   - STREAMINFO: client accepts MEDIACMD_STREAMINFO (40) pre-stream metadata,
+  *     letting the server pre-configure the decoder pipeline with no probing.
+  * Legacy servers never query this property, so they never see these tokens.
+  */
+  _buildNgCapabilities() {
+   const tokens = [];
+   const dl = this._buildDownloadCapabilities();
+   if (dl) tokens.push(dl);
+   tokens.push('STREAMINFO');
+   return tokens.join(',');
+  }
+
   _isDownloadSupported() {
     return !(this.platformDetector?.isTizen?.());
   }
@@ -1641,7 +1662,7 @@ export class MiniClientConnection extends EventTarget {
         return this._ngClientId;
       case 'SAGETV_NG_CAPABILITIES':
         this._markNgNegotiated(name);
-        return this._buildDownloadCapabilities();
+        return this._buildNgCapabilities();
       case 'CLIENT_CAPABILITIES':
         this._markNgNegotiated(name);
         return this._getClientCapabilitiesPayload();
@@ -2988,17 +3009,57 @@ export class MiniClientConnection extends EventTarget {
         this._serverMuxTime = -1;
         this._mediaOpened = false;
         this._pushDataCount = 0;
+        this._streamInfoPending = false;
         this._sendMediaReturn(1);
         break;
 
       case 1: // MEDIACMD_DEINIT
         console.log('[Media] DEINIT');
         this._mediaOpened = false;
+        this._streamInfoPending = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
         this.dispatchEvent(new CustomEvent('mediaclose'));
         this._sendMediaReturn(1);
         break;
+
+      case 40: { // MEDIACMD_STREAMINFO (NG only — legacy servers never send this)
+        // Pre-stream metadata announced BEFORE OPENURL. Framing mirrors OPENURL
+        // (4-byte length incl. null terminator) but the payload is UTF-8 JSON.
+        // Parse it, prime the player's format hint so the upcoming OPENURL takes
+        // the NG fast-path with zero probing, then reply an ACK bitmask. Server
+        // waits synchronously on this reply, so keep it fast and non-throwing.
+        let ack = 0;
+        try {
+          if (len >= 4) {
+            const strLen = readInt(0);
+            if (strLen > 1) {
+              const json = new TextDecoder('utf-8').decode(data.subarray(4, 4 + strLen - 1));
+              const info = parseStreamInfo(json);
+              if (info) {
+                ack |= STREAMINFO_ACK.PARSED;
+                console.log(`[Media] STREAMINFO: container=${info.container || '?'} live=${info.live} dur=${info.durationMs ?? '?'}ms v=${info.video.length} a=${info.audio.length}`);
+                // Optional: hand richer duration/live to the NG context manager.
+                try { this.playbackContextManager?.onStreamInfo?.(info); } catch { /* non-fatal */ }
+                // Pre-configure the active player's decoder pipeline. This sets
+                // the format hint BEFORE OPENURL so load() short-circuits to the
+                // NG path without any codec probe/sniff.
+                const dims = this.mediaPlayer?.applyStreamInfo?.(info);
+                if (dims && dims.video) ack |= STREAMINFO_ACK.VIDEO;
+                if (dims && dims.audio) ack |= STREAMINFO_ACK.AUDIO;
+                this._streamInfoPending = true;
+              } else {
+                console.warn('[Media] STREAMINFO: JSON parse failed — replying ACK=0');
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[Media] STREAMINFO: handler error — replying ACK=0', e);
+          ack = 0;
+        }
+        this._sendMediaReturn(ack);
+        break;
+      }
 
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
@@ -3046,7 +3107,16 @@ export class MiniClientConnection extends EventTarget {
           this.dispatchEvent(new CustomEvent('mediaopen', { detail: { url: urlString } }));
 
           // Pass format hint to the media player for fast-path decoder setup.
-          this.mediaPlayer.setFormatHint(ngFmt.hint);
+          // Precedence: an explicit ng_fmt on the URL wins. Otherwise, if a
+          // STREAMINFO (MEDIACMD 40) just primed the hint for this item, keep it.
+          // Only clear the hint for legacy/no-hint items so a stale hint from a
+          // previous item can't leak forward.
+          if (ngFmt.hint) {
+            this.mediaPlayer.setFormatHint(ngFmt.hint);
+          } else if (!this._streamInfoPending) {
+            this.mediaPlayer.setFormatHint(null);
+          }
+          this._streamInfoPending = false;
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
