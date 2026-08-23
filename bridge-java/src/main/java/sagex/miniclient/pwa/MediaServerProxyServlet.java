@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Thin byte proxy in front of SageTV's MediaServer {@code :7818} pull protocol.
@@ -55,13 +56,36 @@ public class MediaServerProxyServlet extends HttpServlet {
         "/media/", "/var/media/", "/opt/sagetv/", "/var/lib/sagetv/", "/mnt/", "/srv/"
     };
 
-    private static final int COPY_BUF = 64 * 1024;
+    private static final int COPY_BUF = 512 * 1024;
     /** Max idle (no new bytes appearing) before we give up on a live stream. */
     private static final long LIVE_IDLE_TIMEOUT_MS = 30_000L;
-    private static final long LIVE_POLL_MS = 100L;
+    private static final long LIVE_POLL_MS = 10L;
+    /** Collapse window: concurrent requests within this window for the same
+     *  session skip XCODE_SETUP (AVPlay range probes). */
+    private static final long SESSION_COLLAPSE_WINDOW_MS = 400L;
 
     private final String host;
     private final int port;
+
+    /** Per-session xcode gate: one active XCODE_SETUP per session ID. */
+    private static final ConcurrentHashMap<String, ActiveXcodeStream> sessionGate =
+        new ConcurrentHashMap<>();
+
+    /** Tracks an active xcode stream for session-scoped dedup. */
+    private static class ActiveXcodeStream {
+        final String sessionId;
+        final String xcodeMode;
+        final long seekMs;
+        final long startedAt;
+        volatile boolean closing;
+        ActiveXcodeStream(String sessionId, String xcodeMode, long seekMs) {
+            this.sessionId = sessionId;
+            this.xcodeMode = xcodeMode;
+            this.seekMs = seekMs;
+            this.startedAt = System.currentTimeMillis();
+            this.closing = false;
+        }
+    }
 
     public MediaServerProxyServlet() {
         this("127.0.0.1", resolveMediaServerPort());
@@ -155,6 +179,7 @@ public class MediaServerProxyServlet extends HttpServlet {
         // seek opens a fresh /msproxy request, so a start-seek on setup is all
         // that's needed (no mid-stream seek command).
         long seekMs = parseSeekMillis(req.getParameter("seek"));
+        String sessionId = req.getParameter("session");
 
         Socket socket = null;
         try {
@@ -164,15 +189,38 @@ public class MediaServerProxyServlet extends HttpServlet {
             InputStream in = socket.getInputStream();
             OutputStream sockOut = socket.getOutputStream();
 
+            // ── Session-scoped xcode gate ──────────────────────────────
+            // AVPlay sends multiple concurrent HTTP connections when probing a
+            // URL. Without gating, each connection sends its own XCODE_SETUP,
+            // creating competing xcode sessions on the server. The gate dedupes
+            // concurrent requests for the same session within a 400ms window.
+            boolean skipXcodeSetup = false;
+            if (xcodeMode != null && sessionId != null && !sessionId.isEmpty()) {
+                ActiveXcodeStream active = sessionGate.get(sessionId);
+                if (active != null && !active.closing
+                    && xcodeMode.equals(active.xcodeMode)
+                    && seekMs == active.seekMs
+                    && (System.currentTimeMillis() - active.startedAt) < SESSION_COLLAPSE_WINDOW_MS) {
+                    // Collapse: same session, same mode/seek, within window
+                    skipXcodeSetup = true;
+                    log.debug("[MsProxy] session-gate COLLAPSE for {} ({}ms old)",
+                        sessionId, System.currentTimeMillis() - active.startedAt);
+                } else {
+                    // Register as the active stream for this session
+                    sessionGate.put(sessionId, new ActiveXcodeStream(sessionId, xcodeMode, seekMs));
+                }
+            }
+
             // 1) Condition the stream (transcode / remux) BEFORE OPEN so the
             //    server starts the transcoder against the file.
-            if (xcodeMode != null) {
+            if (xcodeMode != null && !skipXcodeSetup) {
                 String setup = "XCODE_SETUP " + xcodeMode;
                 // Server-authoritative seek: start the transcode at the requested
                 // position. The server's XCODE_SETUP parser reads ";k=v" hints and
                 // ignores keys it doesn't recognize, so this is forward/backward
                 // safe (older servers simply start at 0).
                 if (seekMs > 0) setup += ";ss=" + seekMs;
+                log.info("[MsProxy] XCODE_SETUP: {} session={}", setup, sessionId);
                 sendLine(sockOut, setup);
                 String ack = readLine(in);
                 if (!"OK".equals(ack)) {
@@ -185,8 +233,9 @@ public class MediaServerProxyServlet extends HttpServlet {
             // 2) OPEN the file.
             sendLine(sockOut, "OPEN " + path);
             String openAck = readLine(in);
+            log.info("[MsProxy] OPEN mode={} session={}", mode, sessionId);
             if (!"OK".equals(openAck)) {
-                log.warn("[MsProxy] OPEN {} -> {}", canonical, openAck);
+                log.warn("[MsProxy] OPEN rejected: {} -> {}", canonical, openAck);
                 resp.sendError("NO_EXIST".equals(openAck) ? 404 : 502,
                     "MediaServer OPEN failed: " + openAck);
                 return;
@@ -211,11 +260,37 @@ public class MediaServerProxyServlet extends HttpServlet {
                 resp.sendError(502, "MediaServer proxy error");
             }
         } finally {
+            // Clean up session gate
+            if (sessionId != null && !sessionId.isEmpty()) {
+                ActiveXcodeStream active = sessionGate.get(sessionId);
+                if (active != null) active.closing = true;
+                sessionGate.remove(sessionId);
+            }
             if (socket != null) {
                 try { sendLine(socket.getOutputStream(), "CLOSE"); } catch (IOException ignore) {}
                 try { socket.close(); } catch (IOException ignore) {}
             }
         }
+    }
+
+    /** Phone-home diagnostic endpoint: AVPlay posts lifecycle events here. */
+    @Override
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        try {
+            byte[] body = new byte[Math.min(req.getContentLength(), 4096)];
+            int read = 0;
+            InputStream is = req.getInputStream();
+            while (read < body.length) {
+                int n = is.read(body, read, body.length - read);
+                if (n < 0) break;
+                read += n;
+            }
+            String json = new String(body, 0, read, StandardCharsets.UTF_8);
+            log.info("[AVPlay-Diag] {}", json);
+        } catch (Exception e) {
+            log.warn("[AVPlay-Diag] error reading body: {}", e.toString());
+        }
+        resp.setStatus(204);
     }
 
     /**
@@ -305,10 +380,18 @@ public class MediaServerProxyServlet extends HttpServlet {
         OutputStream out = resp.getOutputStream();
         byte[] buf = new byte[COPY_BUF];
         long lastGrowthAt = System.currentTimeMillis();
+        long streamStart = System.currentTimeMillis();
+        long lastReportAt = streamStart;
+        long lastReportBytes = 0;
+        int readCount = 0;
+        int sizeQueryCount = 0;
+
+        log.debug("[MsProxy] serveStream START: avail={} total={} liveXcode={}", avail, total, liveXcode);
 
         while (true) {
             if (offset >= avail) {
                 // Refresh the frontier.
+                sizeQueryCount++;
                 long[] sz = querySize(sockOut, in);
                 long newAvail = sz[0];
                 long newTotal = sz[1];
@@ -329,7 +412,8 @@ public class MediaServerProxyServlet extends HttpServlet {
                     lastGrowthAt = System.currentTimeMillis();
                     continue;
                 }
-                if (done) { log.info("[MsProxy] source fully served ({} bytes)", offset); break; } // transcode finished / file complete
+                if (done) { log.info("[MsProxy] stream complete ({} bytes, {}s)", offset,
+                    String.format("%.1f", (System.currentTimeMillis() - streamStart) / 1000.0)); break; }
                 if (System.currentTimeMillis() - lastGrowthAt > LIVE_IDLE_TIMEOUT_MS) {
                     log.info("[MsProxy] live stream idle {}ms after {} bytes, ending", LIVE_IDLE_TIMEOUT_MS, offset);
                     break;
@@ -344,14 +428,26 @@ public class MediaServerProxyServlet extends HttpServlet {
             int want = (int) Math.min(avail - offset, buf.length);
             sendLine(sockOut, "READ " + offset + " " + want);
             readFully(in, buf, want);
+            readCount++;
             try {
                 out.write(buf, 0, want);
-                out.flush();
             } catch (IOException clientGone) {
-                log.info("[MsProxy] client disconnected mid-stream after {} bytes", offset);
+                log.info("[MsProxy] client disconnected mid-stream after {} bytes ({}s)",
+                    offset, (System.currentTimeMillis() - streamStart) / 1000.0);
                 break;
             }
             offset += want;
+
+            // Periodic throughput report every 5 seconds
+            long now = System.currentTimeMillis();
+            if (now - lastReportAt >= 30_000) {
+                double sec = (now - lastReportAt) / 1000.0;
+                double mbps = ((offset - lastReportBytes) * 8.0) / (sec * 1_000_000);
+                log.debug("[MsProxy] THROUGHPUT: {} Mbps, {} bytes, gap={}",
+                    String.format("%.1f", mbps), offset, avail - offset);
+                lastReportAt = now;
+                lastReportBytes = offset;
+            }
         }
     }
 

@@ -292,6 +292,7 @@ export class MediaPlayer extends EventTarget {
       // when correcting audio drift). MSE decoders stall on these gaps
       // unlike native decoders which absorb them silently.
       if (this.bridgeMode && this._tryJumpGap()) return;
+      this.state = PlayerState.BUFFERING;
       this.dispatchEvent(new CustomEvent('buffering'));
     });
   }
@@ -1591,6 +1592,18 @@ export class MediaPlayer extends EventTarget {
     let timeSec = timeMS / 1000;
     if (!isFinite(timeSec) || timeSec < 0) return;
 
+    // ── DVR window clamping (DVR_WINDOW_V1) ──
+    if (this._ngSeekableStartMs !== undefined && timeMS < this._ngSeekableStartMs) {
+      console.debug(`[MediaPlayer] DVR clamp: target ${timeMS}ms → seekableStart ${this._ngSeekableStartMs}ms`);
+      timeMS = this._ngSeekableStartMs;
+      timeSec = timeMS / 1000;
+    }
+    if (this._ngSeekableEndMs !== undefined && timeMS > this._ngSeekableEndMs) {
+      console.debug(`[MediaPlayer] DVR clamp: target ${timeMS}ms → seekableEnd ${this._ngSeekableEndMs}ms`);
+      timeMS = this._ngSeekableEndMs;
+      timeSec = timeMS / 1000;
+    }
+
     // ── Live-edge guard (applies to bridge AND native xcode) ──
     if ((this.bridgeMode || this._nativeXcodeMode) && this._ngLiveSafeSeekEndMs && timeMS > this._ngLiveSafeSeekEndMs) {
       const currentPosMs = this.getMediaTimeMillis();
@@ -1864,13 +1877,27 @@ export class MediaPlayer extends EventTarget {
       return 0;
     }
     const rawMs = Math.floor((this.video.currentTime || 0) * 1000);
+    let posMs;
     // In bridge mode, ffmpeg outputs timestamps starting from 0 after each seek,
     // so we add the seek offset to report the correct file position.
-    if (this.bridgeMode) return this._bridgeTimeOffsetMs + rawMs;
-    // Native xcode mode: same — server transcode starts at seek point, fMP4
-    // timestamps begin at 0.
-    if (this._nativeXcodeMode) return (this._nativeXcodeOffsetMs || 0) + rawMs;
-    return rawMs;
+    if (this.bridgeMode) {
+      posMs = this._bridgeTimeOffsetMs + rawMs;
+    } else if (this._nativeXcodeMode) {
+      // Native xcode mode: same — server transcode starts at seek point, fMP4
+      // timestamps begin at 0.
+      posMs = (this._nativeXcodeOffsetMs || 0) + rawMs;
+    } else {
+      posMs = rawMs;
+    }
+    // Freeze position during buffering/pause — return last known good value
+    // (video.currentTime already freezes in MSE stalls, but guard explicitly)
+    if (this.state === PlayerState.BUFFERING || this.state === PlayerState.PAUSE) {
+      if (this._lastGoodPositionMs !== undefined && posMs < this._lastGoodPositionMs) {
+        return this._lastGoodPositionMs;
+      }
+    }
+    this._lastGoodPositionMs = posMs;
+    return posMs;
   }
 
   getState() {
@@ -2041,6 +2068,7 @@ export class MediaPlayer extends EventTarget {
    */
   flush() {
     this._pushQueue = [];
+    this._lastGoodPositionMs = undefined; // Reset position tracking for new epoch
 
     if (this.bridgeMode) {
       // Bridge mode: abort current stream, clear SourceBuffer
@@ -2074,9 +2102,13 @@ export class MediaPlayer extends EventTarget {
       });
     }
 
-    // Clear SourceBuffer so new data starts fresh
-    if (this.sourceBuffer && !this.sourceBuffer.updating) {
+    // Clear SourceBuffer so new data starts fresh — abort() first to cancel
+    // any in-progress appendBuffer, then remove all buffered ranges.
+    if (this.sourceBuffer) {
       try {
+        if (this.sourceBuffer.updating) {
+          this.sourceBuffer.abort();
+        }
         const buffered = this.sourceBuffer.buffered;
         if (buffered.length > 0) {
           this.sourceBuffer.remove(0, buffered.end(buffered.length - 1));

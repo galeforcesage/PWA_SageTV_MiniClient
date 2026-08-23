@@ -25,13 +25,13 @@ import { StreamInflater, initCompression } from './compression.js';
 import { getTizenNativeCapabilities, filterNativeBlacklist } from './tizen-capabilities.js';
 import { perf } from '../perf/perf-monitor.js';
 import { NgPlaybackContextManager } from '../media/ng-playback-context-manager.js';
-import { getProbeResults, isCodecSuspicious } from '../media/codec-probe.js';
+import { getProbeResults, isCodecSuspicious, getDecoderGeometry } from '../media/codec-probe.js';
 import { getAvplayCapabilityMemory, isCodecFailureReason } from '../media/avplay-capability-memory.js';
 import { parseStreamInfo, STREAMINFO_ACK } from '../media/ng-streaminfo.js';
 
 /** Accumulates WebSocket binary frames into a parseable buffer. */
 /**
- * Flat ring buffer — avoids chunk list overhead and O(n) shifts.
+ * Flat ring buffer ??? avoids chunk list overhead and O(n) shifts.
  * Grows by doubling when full. All operations are O(1) amortized.
  */
 class ReceiveBuffer {
@@ -214,14 +214,14 @@ export class MiniClientConnection extends EventTarget {
     // Image handle counter (matches Java's handleCount)
     this.handleCount = 1;
 
-    // Font handle → { name, style, size } map
+    // Font handle ??? { name, style, size } map
     this._fontMap = new Map();
 
     // Property negotiation state
     this._propertyResolve = null;
     this._pendingPropertyResponse = null;
     this._advancedImageCaching = false;
-    // Protocol 2.1 §7 return path: server's per-stream surface decision,
+    // Protocol 2.1 ??7 return path: server's per-stream surface decision,
     // set via CAP_EFFECTIVE_SURFACE just before each MEDIACMD_OPENURL.
     this._effectiveSurface = '';
     this._effectivePlayer = '';
@@ -317,7 +317,7 @@ export class MiniClientConnection extends EventTarget {
     this._bandwidthKbps = 0;
   }
 
-  // ── Connection Lifecycle ──────────────────────────────────
+  // ?????? Connection Lifecycle ??????????????????????????????????????????????????????????????????????????????????????????????????????
 
   /**
    * Connect to the SageTV server via the WebSocket bridge.
@@ -328,7 +328,7 @@ export class MiniClientConnection extends EventTarget {
 
     // Fetch server capabilities from the bridge in the BACKGROUND. This was
     // previously awaited here, adding up to 5s (its fetch timeout) of dead time
-    // BEFORE the GFX socket even opened — a big chunk of the startup black
+    // BEFORE the GFX socket even opened ??? a big chunk of the startup black
     // screen when the bridge/server-info endpoint is slow. The profile is only
     // needed later for transcode decisions, so let it resolve in parallel with
     // the handshake and first frame instead of blocking the connect.
@@ -387,7 +387,7 @@ export class MiniClientConnection extends EventTarget {
 
     // Assert our real render resolution to the server via UI_RESIZE. Without
     // this the STV renders at its default 720x480 (SD) and we passively follow
-    // it down — producing blurry, side-letterboxed menus on an HD/16:9 panel.
+    // it down ??? producing blurry, side-letterboxed menus on an HD/16:9 panel.
     // Telling the server our actual size makes it render the UI at HD. (This
     // does NOT affect video quality: AVPlay/<video> decode on their own plane
     // at full panel resolution regardless of the UI render size.)
@@ -476,7 +476,7 @@ export class MiniClientConnection extends EventTarget {
     });
   }
 
-  // ── GFX Stream Processing ────────────────────────────────
+  // ?????? GFX Stream Processing ????????????????????????????????????????????????????????????????????????????????????????????????
 
   /**
    * Handle incoming GFX data from WebSocket.
@@ -498,7 +498,7 @@ export class MiniClientConnection extends EventTarget {
     if (perf.enabled) perf.noteServerBytes(rawLen);
 
     // If zlib is enabled, decompress the ENTIRE incoming stream
-    // (Java wraps the socket with ZInputStream — all bytes are deflated)
+    // (Java wraps the socket with ZInputStream ??? all bytes are deflated)
     if (this.zipMode && this.inflater.enabled) {
       const compressed = bytes;
       bytes = this.inflater.inflate(bytes);
@@ -508,7 +508,7 @@ export class MiniClientConnection extends EventTarget {
       }
       // Verbose: log data flow after first frame for debugging
       if (this._verboseGfxLog && this.firstFrameStarted) {
-        console.log(`[GFX] Data: ${compressed.length}B compressed → ${bytes.length}B (buf=${this.gfxBuffer.length}B)`);
+        console.log(`[GFX] Data: ${compressed.length}B compressed ??? ${bytes.length}B (buf=${this.gfxBuffer.length}B)`);
       }
     }
 
@@ -537,7 +537,7 @@ export class MiniClientConnection extends EventTarget {
    */
   _processGfxBuffer() {
     // If an async image decode is in progress, clear the reference.
-    // We no longer block processing — the decode runs in the background
+    // We no longer block processing ??? the decode runs in the background
     // and the image will be ready when drawTexture/xfmImage needs it.
     // Blocking here caused the server's EventThread to hang waiting for
     // replies (FLIPBUFFER, LOADIMAGE) that were stuck behind the decode.
@@ -586,7 +586,7 @@ export class MiniClientConnection extends EventTarget {
         }
 
         // If an image decode was started by this message, just clear it.
-        // The decode runs async in the background — we don't block here
+        // The decode runs async in the background ??? we don't block here
         // because doing so stalls replies and causes EventThread hangs.
         if (this._pendingImageDecode) {
           this._pendingImageDecode = null;
@@ -601,7 +601,7 @@ export class MiniClientConnection extends EventTarget {
           this.gfxBuffer.clear();
           const decompressed = this.inflater.inflate(compressedTail);
           if (decompressed.length > 0) {
-            console.log(`[Connection] ZLIB transition: inflated ${compressedTail.length} leftover bytes → ${decompressed.length}`);
+            console.log(`[Connection] ZLIB transition: inflated ${compressedTail.length} leftover bytes ??? ${decompressed.length}`);
             this.gfxBuffer.append(decompressed);
             // Continue the while loop to parse the decompressed data
           } else {
@@ -657,7 +657,7 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
-  // ── Property Negotiation ─────────────────────────────────
+  // ?????? Property Negotiation ???????????????????????????????????????????????????????????????????????????????????????????????????
 
   /**
    * Handle GET_PROPERTY request from server.
@@ -668,15 +668,15 @@ export class MiniClientConnection extends EventTarget {
     const name = new TextDecoder('iso-8859-1').decode(data);
     this._propCount = (this._propCount || 0) + 1;
 
-    // CRYPTO_SYMMETRIC_KEY needs async RSA — handle separately
+    // CRYPTO_SYMMETRIC_KEY needs async RSA ??? handle separately
     if (name === 'CRYPTO_SYMMETRIC_KEY') {
-      console.log(`[Connection] GET_PROPERTY: ${name} → [async RSA key exchange]`);
+      console.log(`[Connection] GET_PROPERTY: ${name} ??? [async RSA key exchange]`);
       this._handleCryptoSymmetricKeyRequest();
       return;
     }
 
     const value = this._resolveProperty(name);
-    console.log(`[Connection] GET_PROPERTY: ${name} → ${value}`);
+    console.log(`[Connection] GET_PROPERTY: ${name} ??? ${value}`);
 
     this._sendPropertyResponse(value);
   }
@@ -736,7 +736,7 @@ export class MiniClientConnection extends EventTarget {
     this._sendSetPropertyReply(retval || 0, encryptThisReply);
   }
 
-  // ── Server Profile Detection ──────────────────────────────
+  // ?????? Server Profile Detection ??????????????????????????????????????????????????????????????????????????????????????????
 
   /**
    * Fetch server info from the bridge's /api/server-info endpoint.
@@ -746,7 +746,7 @@ export class MiniClientConnection extends EventTarget {
    */
   async _fetchServerInfo() {
     try {
-      // Convert ws://host:port → http://host:port
+      // Convert ws://host:port ??? http://host:port
       const httpUrl = this.bridgeUrl
         .replace(/^ws:/, 'http:')
         .replace(/^wss:/, 'https:');
@@ -774,7 +774,7 @@ export class MiniClientConnection extends EventTarget {
       }
     } catch (err) {
       console.warn('[Connection] Could not fetch server info:', err.message);
-      // Non-fatal — we'll use defaults (standard profile)
+      // Non-fatal ??? we'll use defaults (standard profile)
     }
   }
 
@@ -811,6 +811,14 @@ export class MiniClientConnection extends EventTarget {
    * Conservative browser video decoder matrix for NG negotiation.
    */
   _buildVideoDecoderMatrix() {
+    // Source geometry from Phase 3 multi-resolution probe when available;
+    // fall back to canPlayType-based defaults for legacy compat.
+    const geoResults = getDecoderGeometry();
+    const geoMap = new Map();
+    if (geoResults) {
+      for (const g of geoResults) geoMap.set(g.name, g);
+    }
+
     const video = document.createElement('video');
     const canPlay = (mime) => {
       try {
@@ -819,22 +827,198 @@ export class MiniClientConnection extends EventTarget {
         return false;
       }
     };
+
+    const entry = (codec, mime, fallbackW, fallbackH, fallbackFps, fallbackKbps, profiles) => {
+      const hw = canPlay(mime);
+      const geo = geoMap.get(codec);
+      return {
+        codec,
+        hw,
+        maxW: geo ? geo.maxW : fallbackW,
+        maxH: geo ? geo.maxH : fallbackH,
+        maxFps: geo ? geo.maxFps : fallbackFps,
+        maxKbps: fallbackKbps,
+        decoder: geo ? geo.decoder : (hw ? 'hw' : 'sw'),
+        profiles: profiles || [],
+      };
+    };
+
     const matrix = [
-      { codec: 'H264', hw: canPlay('video/mp4; codecs="avc1.42E01E"'), maxW: 3840, maxH: 2160, maxFps: 60, maxKbps: 80000, profiles: ['Baseline', 'Main', 'High'] },
-      { codec: 'HEVC', hw: canPlay('video/mp4; codecs="hvc1"') || canPlay('video/mp4; codecs="hev1"'), maxW: 3840, maxH: 2160, maxFps: 60, maxKbps: 120000, profiles: ['Main', 'Main10'] },
-      { codec: 'AV1', hw: canPlay('video/mp4; codecs="av01.0.08M.08"'), maxW: 1920, maxH: 1080, maxFps: 30 },
-      { codec: 'VP9', hw: canPlay('video/webm; codecs="vp9"'), maxW: 3840, maxH: 2160, maxFps: 60 },
-      { codec: 'MPEG2', hw: false },
+      entry('H264', 'video/mp4; codecs="avc1.42E01E"', 3840, 2160, 60, 80000, ['Baseline', 'Main', 'High']),
+      entry('HEVC', 'video/mp4; codecs="hvc1"', 3840, 2160, 60, 120000, ['Main', 'Main10']),
+      entry('AV1', 'video/mp4; codecs="av01.0.08M.08"', 1920, 1080, 30, 50000),
+      entry('VP9', 'video/webm; codecs="vp9"', 3840, 2160, 60, 80000),
+      { codec: 'MPEG2', hw: false, decoder: 'sw' },
     ];
     return JSON.stringify(matrix);
   }
 
   /**
-   * Probe the browser once for supported codecs and containers, then cache.
-   * Every browser advertises what it can decode via HTMLMediaElement.canPlayType,
-   * so this works uniformly for desktop Chrome/Edge/Safari/Firefox and Tizen.
+   * Build a PWA_VIDEO_CODECS constraint string matching the EXO_VIDEO_CODECS
+   * format. Each codec entry carries its real decoder ceiling from Phase 3
+   * multi-resolution probing. The server uses these per-codec maxW/maxH/maxFps
+   * and decoder=hw|sw fields as the decode gate for GPU enhancement decisions.
    *
-   * Policy:
+   * Fail-closed: codecs without confirmed geometry are omitted entirely.
+   * decoder=sw is a hard block ??? the server will never route enhanced output to it.
+   *
+   * Format per entry:
+   *   CODEC;scan=progressive;interlaced=false;decoder=hw|sw;maxW=N;maxH=N;maxFps=N;maxBitrate=N;profiles=P:L|...
+   */
+  _buildPwaVideoCodecs() {
+    const geoResults = getDecoderGeometry();
+    if (!geoResults || !geoResults.length) return '';
+
+    // Profile mappings for codecs we know about
+    const PROFILES = {
+      H264: 'Baseline:4.2|Main:4.2|High:4.2',
+      HEVC: 'Main:5.1|Main10:5.1',
+      AV1: 'Main:5.1',
+      VP9: 'Profile0:5.1',
+    };
+    const BITRATES = { H264: 80000, HEVC: 120000, AV1: 50000, VP9: 80000 };
+
+    return geoResults.map((g) => {
+      const parts = [
+        g.name,
+        'scan=progressive',
+        'interlaced=false',
+        `decoder=${g.decoder}`,
+        `maxW=${g.maxW}`,
+        `maxH=${g.maxH}`,
+        `maxFps=${g.maxFps}`,
+      ];
+      const br = BITRATES[g.name];
+      if (br) parts.push(`maxBitrate=${br}`);
+      const prof = PROFILES[g.name];
+      if (prof) parts.push(`profiles=${prof}`);
+      return parts.join(';');
+    }).join(',');
+  }
+
+  /**
+   * Detect DISPLAY_SINK_RESOLUTION ??? the true physical panel resolution.
+   *
+   * Per ??7.3: an absent/empty sink is an ABSTENTION, not a refusal ??? the
+   * server skips the panel clamp, which is strictly worse than sending the
+   * honest value. So we ALWAYS send the true physical panel when we can
+   * measure it. The user's "Never" intent is routed through QUALITY_HINT
+   * (=savings) instead, per ??7.3's recommendation.
+   *
+   * The Auto/Always distinction is retained only for the eligibility heuristic
+   * (Auto suppresses on small screens to avoid inviting upscale on phones).
+   * Never no longer withholds the sink ??? it sends the honest value AND sets
+   * QUALITY_HINT=savings.
+   */
+  _getDisplaySinkResolution() {
+    try {
+      // On Tizen TVs the web runtime renders into a 1920??1080 framebuffer even
+      // on 4K panels.  screen.width * DPR returns that framebuffer, NOT the
+      // physical panel ??? exactly the trap ??2.1 warns about.  Use the platform
+      // API to get the real panel resolution.
+      let w, h;
+      if (this.platformDetector?.isTizen?.()) {
+        const panel = this._getTizenPanelResolution();
+        w = panel.w;
+        h = panel.h;
+      } else {
+        const dpr = window.devicePixelRatio;
+        if (!dpr || !isFinite(dpr) || dpr <= 0) return '';
+        w = Math.round(screen.width * dpr);
+        h = Math.round(screen.height * dpr);
+      }
+      // Range check: 640??480 ??? 7680??4320 (server discards outside this range)
+      if (w < 640 || h < 480 || w > 7680 || h > 4320) return '';
+
+      const override = (this.settings ? this.settings.get('display_sink_override', 'auto') : 'auto').toLowerCase();
+
+      // Auto: suppress on small screens (phone/small tablet) to avoid
+      // inviting upscale on devices that can't benefit. Tizen = TV = always.
+      if (override === 'auto') {
+        if (this.platformDetector?.isTizen?.()) return `${w}x${h}`;
+        if (screen.width >= 1280) return `${w}x${h}`;
+        return ''; // small screen ??? abstain (server infers from decode ceilings)
+      }
+
+      // Always AND Never: send the honest panel. Never routes intent
+      // through QUALITY_HINT=savings (see _getEffectiveQualityHint).
+      return `${w}x${h}`;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Resolve the Tizen TV's true physical panel resolution.
+   * The web runtime always reports a 1920??1080 framebuffer via screen/DPR,
+   * so we must use platform APIs:
+   *   1. webapis.productinfo.isUdPanelSupported() ??? true on 4K panels
+   *   2. tizen.systeminfo 'DISPLAY' ??? sometimes returns physical resolution
+   *   3. Fallback: 1920??1080 (the framebuffer size ??? safe lower bound)
+   */
+  _getTizenPanelResolution() {
+    // Method 1: webapis.productinfo.isUdPanelSupported()
+    // Samsung API: returns true when the physical panel is UHD (3840??2160).
+    try {
+      const pi = window.webapis?.productinfo;
+      if (pi?.isUdPanelSupported?.()) {
+        return { w: 3840, h: 2160 };
+      }
+      // If the call succeeded and returned false, the panel is FHD.
+      if (pi && typeof pi.isUdPanelSupported === 'function') {
+        return { w: 1920, h: 1080 };
+      }
+    } catch { /* API unavailable ??? try next */ }
+
+    // Method 2: tizen.systeminfo DISPLAY ??? may report physical res on some models
+    try {
+      const tzsi = window.tizen?.systeminfo;
+      if (tzsi?.getCapability) {
+        const sw = tzsi.getCapability('http://tizen.org/feature/screen.width');
+        const sh = tzsi.getCapability('http://tizen.org/feature/screen.height');
+        if (sw > 1920 || sh > 1080) {
+          return { w: Number(sw), h: Number(sh) };
+        }
+      }
+    } catch { /* unavailable */ }
+
+    // Fallback: framebuffer size (safe ??? server treats as FHD panel)
+    const dpr = window.devicePixelRatio || 1;
+    return { w: Math.round(screen.width * dpr), h: Math.round(screen.height * dpr) };
+  }
+
+  /**
+   * Effective QUALITY_HINT: if user set display_sink_override=never,
+   * override to 'savings' per ??7.3 ??? this is where the opt-out intent lives.
+   */
+  _getEffectiveQualityHint() {
+    const override = (this.settings ? this.settings.get('display_sink_override', 'auto') : 'auto').toLowerCase();
+    if (override === 'never' || override === 'off') return 'savings';
+    return this.settings ? this.settings.get('quality_hint', 'auto') : 'auto';
+  }
+
+  /**
+   * Detect DISPLAY_HDR_TYPES from browser media queries.
+   * Probes (dynamic-range: high) and (color-gamut: p3|rec2020).
+   */
+  _getDisplayHdrTypes() {
+    try {
+      const hdr = window.matchMedia?.('(dynamic-range: high)')?.matches;
+      if (!hdr) return 'NONE';
+      const rec2020 = window.matchMedia?.('(color-gamut: rec2020)')?.matches;
+      const p3 = window.matchMedia?.('(color-gamut: p3)')?.matches;
+      // HDR10 is the baseline HDR type when dynamic-range: high is true.
+      // rec2020 gamut suggests wider HDR capability.
+      const types = ['HDR10'];
+      if (rec2020) types.push('HLG');
+      return types.join(',');
+    } catch {
+      return 'NONE';
+    }
+  }
+
+  /**
+   * Probe the browser once for supported codecs and containers, then cache.
    *  - Only 'probably' counts as supported. 'maybe' is treated as unsupported
    *    because in practice ('maybe' == "I know the container, unsure about
    *    the codec") the browser frequently fails to decode. We'd rather force
@@ -850,7 +1034,7 @@ export class MiniClientConnection extends EventTarget {
     const v = document.createElement('video');
     const a = document.createElement('audio');
     // Strict: 'probably' only. 'maybe' means the browser recognizes the
-    // container but has no committed decoder — those combos regularly fail
+    // container but has no committed decoder ??? those combos regularly fail
     // at decode time and are better handled by server-side transcode.
     const ok = (el, m) => {
       try { return el.canPlayType(m) === 'probably'; } catch { return false; }
@@ -946,7 +1130,7 @@ export class MiniClientConnection extends EventTarget {
     // decode, advertise the stream containers as pull-capable so the server
     // serves the file via /rawmedia (native <video src=...> decode) instead
     // of Push mode. Push mode would route MPEG2-Video through mux.js, which
-    // only transmuxes H.264 — producing a broken MSE stream.
+    // only transmuxes H.264 ??? producing a broken MSE stream.
     //
     // Tizen-vs-generic: verified on Samsung Tizen TVs that native pull-mode
     // decode of MPEG2-PS/MPEG works. Desktop Chrome/Edge/Safari report
@@ -1002,7 +1186,7 @@ export class MiniClientConnection extends EventTarget {
       try { return !!(MS && MS.isTypeSupported && MS.isTypeSupported(mime)); } catch { return false; }
     };
 
-    // ── Fast path: use pre-computed codec probe results ───────────────
+    // ?????? Fast path: use pre-computed codec probe results ?????????????????????????????????????????????
     // The codec probe (codec-probe.js) ran during app init while the
     // connect screen was visible. If complete, its results are more
     // thorough (includes decodingInfo hardware validation) than the
@@ -1052,13 +1236,13 @@ export class MiniClientConnection extends EventTarget {
       // Log suspicious codecs (canPlayType yes but decodingInfo no)
       for (const r of [...probeResults.video, ...probeResults.audio]) {
         if (r.confidence === 'suspicious') {
-          console.warn(`[PlaybackSurfaces] ${r.name}: canPlayType=${r.nativeVal} but decodingInfo.supported=false — SUSPICIOUS`);
+          console.warn(`[PlaybackSurfaces] ${r.name}: canPlayType=${r.nativeVal} but decodingInfo.supported=false ??? SUSPICIOUS`);
         }
       }
     } else {
-      // ── Inline fallback: probe hasn't completed yet ──────────────
+      // ?????? Inline fallback: probe hasn't completed yet ??????????????????????????????????????????
       if (probeResults) {
-        console.log('[PlaybackSurfaces] Codec probe not yet complete — using inline canPlayType');
+        console.log('[PlaybackSurfaces] Codec probe not yet complete ??? using inline canPlayType');
       }
 
       // pwa_mse: what MediaSource can decode inside fMP4 SourceBuffer
@@ -1110,11 +1294,11 @@ export class MiniClientConnection extends EventTarget {
       }
     }
 
-    // Native surface capability pipeline:  (query ∪ whitelist) − blacklist
+    // Native surface capability pipeline:  (query ??? whitelist) ??? blacklist
     //   query      = canPlayType() results already in `native.*` above
-    //   ∪ whitelist = curated Tizen Profile 4 (restores canPlayType's false
+    //   ??? whitelist = curated Tizen Profile 4 (restores canPlayType's false
     //                 negatives for the TV's hardware broadcast decoders)
-    //   − blacklist = drop codecs no <video> / Samsung decodes (e.g. DTS)
+    //   ??? blacklist = drop codecs no <video> / Samsung decodes (e.g. DTS)
     if (this.platformDetector?.isTizen?.()) {
       const caps = getTizenNativeCapabilities();
       // Validation log: what the runtime probe MISSED vs the whitelist. A
@@ -1152,7 +1336,7 @@ export class MiniClientConnection extends EventTarget {
         const before = native[dim].slice();
         native[dim] = native[dim].filter((c) => !badList.includes(c));
         if (before.length !== native[dim].length) {
-          console.warn(`[PlaybackSurfaces] on-device learned downgrade — removed native ${dim} [`
+          console.warn(`[PlaybackSurfaces] on-device learned downgrade ??? removed native ${dim} [`
             + before.filter((c) => !native[dim].includes(c)).join(',') + ']');
         }
       }
@@ -1161,7 +1345,7 @@ export class MiniClientConnection extends EventTarget {
     // pwa_mse HONEST end-to-end capability. With a DYNAMIC MSE SourceBuffer
     // (the player sniffs the fMP4 init segment and creates a matching
     // SourceBuffer), the deliverable set is exactly what MediaSource.
-    // isTypeSupported() confirms — baseline H.264/AAC always, plus HEVC/VP9/AV1
+    // isTypeSupported() confirms ??? baseline H.264/AAC always, plus HEVC/VP9/AV1
     // and AC-3/E-AC-3/Opus ONLY when the browser proves it. So the server can
     // REMUX (copy) HEVC on an HEVC-capable browser instead of re-encoding it.
     // Container stays MP4 (MSE ingests fMP4). Anything NOT in the probe (MPEG-2,
@@ -1185,19 +1369,19 @@ export class MiniClientConnection extends EventTarget {
         // pull: direct-play (no transcode). The native <video> element decodes
         //       the raw bitstream.
         // pull-xcode: audio-transcode / remux. The server conditions the stream
-        //       (e.g. HEVC video copy + AC-4→AAC audio transcode) into fMP4 via
+        //       (e.g. HEVC video copy + AC-4???AAC audio transcode) into fMP4 via
         //       MediaServer, and the native <video> element decodes it. This
-        //       avoids MSE HEVC limitations — native <video src=url> handles
+        //       avoids MSE HEVC limitations ??? native <video src=url> handles
         //       HEVC when the browser has platform decoder support (HEVC Video
         //       Extensions on Windows Edge/Chrome).
         deliveryModes: 'pull,pull-xcode',
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
-        // Audio track-access (Protocol 2.1.0006, §3 fields 7-9). Declared
+        // Audio track-access (Protocol 2.1.0006, ??3 fields 7-9). Declared
         // conservatively and TRUTHFULLY: an HTML5 <video> element cannot
-        // reliably switch audio tracks — the HTMLMediaElement.audioTracks
-        // selection API is unsupported/inert in Chromium and spotty on Tizen —
+        // reliably switch audio tracks ??? the HTMLMediaElement.audioTracks
+        // selection API is unsupported/inert in Chromium and spotty on Tizen ???
         // so native playback only ever renders the container's DEFAULT track.
         //   default_only : we can only reach the container default track.
         //   server       : we can't pick a track, so the server must preselect
@@ -1219,7 +1403,7 @@ export class MiniClientConnection extends EventTarget {
         // set made the NG engine rule DIRECT_PLAY and hand us a raw MPEG-2 file
         // we can't decode (the spin/Broken-pipe bug).
         //
-        // Delivery declares BOTH transports — "deliver" is part of "honest":
+        // Delivery declares BOTH transports ??? "deliver" is part of "honest":
         //   pull       -> direct H.264/AAC fMP4 (native <video>/rawmedia). Needed
         //                 so a DIRECT_PLAY decision for THIS surface has a
         //                 transport. pwa_native usually wins direct on priority,
@@ -1233,9 +1417,9 @@ export class MiniClientConnection extends EventTarget {
         videoCodecs: mseDelivVideo,
         audioCodecs: mseDelivAudio,
         containers: mseDelivContainers,
-        // Audio track-access (Protocol 2.1.0006, §3 fields 7-9). The bridge
+        // Audio track-access (Protocol 2.1.0006, ??3 fields 7-9). The bridge
         // /transcode (ffmpeg) COULD map any audio track, but it does not yet
-        // select by language — it emits ffmpeg's default stream. So today the
+        // select by language ??? it emits ffmpeg's default stream. So today the
         // MSE surface, like native, effectively delivers only the default
         // track. Declare that truthfully: default_only + server preselection.
         // When the bridge learns to `-map` a chosen language track, upgrade
@@ -1253,7 +1437,7 @@ export class MiniClientConnection extends EventTarget {
     // codec/container is "supported" here, the server hands us a PULL url (real
     // file path); otherwise it pushes (which we retired).
     //
-    // LEGACY SERVER path ONLY (there is NO legacy PWA client — the PWA is all
+    // LEGACY SERVER path ONLY (there is NO legacy PWA client ??? the PWA is all
     // NG). A 9.2.16 server does no surface negotiation; it reads VIDEO_CODECS/
     // AUDIO_CODECS/PULL_AV_CONTAINERS and decides pull vs push. We declare the
     // BROAD bridge-transcodable set so a legacy server ALWAYS hands us a pull
@@ -1273,10 +1457,10 @@ export class MiniClientConnection extends EventTarget {
     // GPU validation via mediaCapabilities.decodingInfo() is advisory only.
     // On Edge/Windows it often returns supported=false for HEVC even though
     // canPlayType returns 'maybe' and native <video> playback works fine.
-    // canPlayType is authoritative for native pull — don't let decodingInfo veto it.
+    // canPlayType is authoritative for native pull ??? don't let decodingInfo veto it.
     if (this._hevcPendingValidation) {
       if (MiniClientConnection._hevcHwValidated === false) {
-        console.warn('[PlaybackSurfaces] HEVC GPU pre-validate FAIL — keeping HEVC anyway (canPlayType authoritative for native pull)');
+        console.warn('[PlaybackSurfaces] HEVC GPU pre-validate FAIL ??? keeping HEVC anyway (canPlayType authoritative for native pull)');
       }
       this._hevcPendingValidation = false;
     }
@@ -1290,8 +1474,8 @@ export class MiniClientConnection extends EventTarget {
    */
   async _validateHevcHwDecode() {
     if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
-      // API not available — trust the 'maybe' (fallback exists at runtime)
-      console.log('[PlaybackSurfaces] mediaCapabilities unavailable — trusting HEVC maybe');
+      // API not available ??? trust the 'maybe' (fallback exists at runtime)
+      console.log('[PlaybackSurfaces] mediaCapabilities unavailable ??? trusting HEVC maybe');
       return true;
     }
     try {
@@ -1306,11 +1490,11 @@ export class MiniClientConnection extends EventTarget {
         },
       });
       const ok = result.supported && result.powerEfficient;
-      console.log(`[PlaybackSurfaces] HEVC GPU validate: supported=${result.supported} smooth=${result.smooth} powerEfficient=${result.powerEfficient} → ${ok ? 'PASS' : 'FAIL'}`);
+      console.log(`[PlaybackSurfaces] HEVC GPU validate: supported=${result.supported} smooth=${result.smooth} powerEfficient=${result.powerEfficient} ??? ${ok ? 'PASS' : 'FAIL'}`);
       return ok;
     } catch (e) {
       console.warn('[PlaybackSurfaces] HEVC GPU validate error:', e.message);
-      return true;  // err on side of trying — runtime fallback exists
+      return true;  // err on side of trying ??? runtime fallback exists
     }
   }
 
@@ -1322,11 +1506,11 @@ export class MiniClientConnection extends EventTarget {
 
   /**
    * Resolve the client's preferred audio language as an ISO 639-2 3-letter
-   * lowercase code for CLIENT_AUDIO_LANGUAGE (Protocol 2.1.0007, §2).
+   * lowercase code for CLIENT_AUDIO_LANGUAGE (Protocol 2.1.0007, ??2).
    *
    * The server compares this against broadcast/DVB audio-track language tags
-   * with an EXACT case-insensitive match — it does NOT convert 2<->3 letter
-   * codes — so we must emit the 3-letter form the tags use.
+   * with an EXACT case-insensitive match ??? it does NOT convert 2<->3 letter
+   * codes ??? so we must emit the 3-letter form the tags use.
    *
    * Sources, in priority order:
    *   1. explicit setting 'audio.language' (verbatim; lets the operator match
@@ -1335,7 +1519,7 @@ export class MiniClientConnection extends EventTarget {
    *   2. navigator.languages[0] / navigator.language 2-letter prefix, mapped
    *      to 3-letter via the table below (forms chosen to match the spec's
    *      examples: eng, spa, fra, deu, jpn).
-   * Returns '' when unknown/unset — the server then falls back to its own
+   * Returns '' when unknown/unset ??? the server then falls back to its own
    * userLocale, then the first available track.
    */
   _resolveClientAudioLanguage() {
@@ -1395,7 +1579,7 @@ export class MiniClientConnection extends EventTarget {
 
   /**
    * Public accessor for probed client codec capability lists (comma-joined
-   * strings — video, audio, pull). Used by the settings UI to hide options
+   * strings ??? video, audio, pull). Used by the settings UI to hide options
    * that only make sense when the client can also decode them.
    */
   getProbedCapabilities() {
@@ -1432,6 +1616,13 @@ export class MiniClientConnection extends EventTarget {
    */
   _buildDownloadCapabilities() {
     const caps = this.platformDetector?.getNgDownloadCapabilities?.() || [];
+    // Trick-play contract capabilities ??? advertised in the aggregate
+    // SAGETV_NG_CAPABILITIES string so the server sees them (it reads this
+    // string, not individual GetProperty round-trips for each cap).
+    caps.push('TRICKPLAY_POSITION_V1', 'SEEK_EPOCH_V1', 'DVR_WINDOW_V1');
+    // GPU enhancement reporting ??? advertise support so the server queries
+    // DISPLAY_SINK_RESOLUTION, PWA_VIDEO_CODECS, LOCAL_ENHANCEMENT, DISPLAY_HDR_TYPES
+    caps.push('GPU_ENHANCE_REPORT_V1', 'DISPLAY_SINK_V1');
     return caps.join(',');
   }
 
@@ -1587,7 +1778,7 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
-  // ── Audio Processing delegate registration ──
+  // ?????? Audio Processing delegate registration ??????
 
   /**
    * Register audio processing delegate for GET_PROPERTY responses.
@@ -1614,7 +1805,7 @@ export class MiniClientConnection extends EventTarget {
     // Helper to read settings with fallback
     const pref = (key, def) => this.settings ? this.settings.get(key, def) : def;
 
-    // ── Protocol 2.1 Playback Surface advertisements ──
+    // ?????? Protocol 2.1 Playback Surface advertisements ??????
     // Server enumerates surfaces via PLAYBACK_SURFACES then reads per-surface
     // attributes as PLAYBACK_SURFACE_<id>_<attr>. Legacy servers ignore these.
     if (name === 'PLAYBACK_SURFACES') {
@@ -1641,11 +1832,34 @@ export class MiniClientConnection extends EventTarget {
         case 'VIDEO_CODECS': return surface.videoCodecs.join(',');
         case 'AUDIO_CODECS': return surface.audioCodecs.join(',');
         case 'CONTAINERS': return surface.containers.join(',');
-        // Protocol 2.1.0006 §3 fields 7-9 (optional). Empty string is a valid
+        // Protocol 2.1.0006 ??3 fields 7-9 (optional). Empty string is a valid
         // reply and yields the server's conservative defaults.
         case 'AUDIO_TRACK_ACCESS': return surface.audioTrackAccess || '';
         case 'AUDIO_TRACK_SELECTION_MODE': return surface.audioTrackSelectionMode || '';
         case 'AUDIO_CONTAINER_RULES': return surface.audioContainerRules || '';
+        // GPU enhancement decode ceiling (??2.6) ??? the server uses these to
+        // gate whether the client can decode an enhanced (upscaled) stream.
+        // Sourced from Phase 3 multi-resolution codec probe results.
+        case 'MAX_OUTPUT_WIDTH':
+        case 'MAX_OUTPUT_HEIGHT':
+        case 'MAX_FPS': {
+          const geo = getDecoderGeometry();
+          if (!geo || !geo.length) return '0';
+          // Find the highest HW-decoded resolution across all codecs for this surface
+          let bestW = 0, bestH = 0, bestFps = 0;
+          for (const g of geo) {
+            if (g.decoder !== 'hw') continue;
+            const area = g.maxW * g.maxH;
+            if (area > bestW * bestH) {
+              bestW = g.maxW;
+              bestH = g.maxH;
+              bestFps = g.maxFps;
+            }
+          }
+          if (attr === 'MAX_OUTPUT_WIDTH') return String(bestW);
+          if (attr === 'MAX_OUTPUT_HEIGHT') return String(bestH);
+          return String(bestFps);
+        }
         default:
           console.warn(`[Connection] Unknown surface attribute: ${attr}`);
           return '';
@@ -1653,7 +1867,7 @@ export class MiniClientConnection extends EventTarget {
     }
 
     switch (name) {
-      // ── NG capability negotiation ──
+      // ?????? NG capability negotiation ??????
       case 'SAGETV_NG_VERSION':
         this._markNgNegotiated(name);
         return '2.0.0';
@@ -1669,7 +1883,7 @@ export class MiniClientConnection extends EventTarget {
       case 'CLIENT_PLATFORM':
         this._markNgNegotiated(name);
         return this.platformDetector?.isTizen?.() ? 'tizen' : 'browser';
-      // Session-level preferred audio language (Protocol 2.1.0007 §2). 3-letter
+      // Session-level preferred audio language (Protocol 2.1.0007 ??2). 3-letter
       // ISO 639-2 lowercase; empty = no preference (server uses its own
       // userLocale, then first track). Same value for every surface.
       case 'CLIENT_AUDIO_LANGUAGE':
@@ -1701,13 +1915,22 @@ export class MiniClientConnection extends EventTarget {
         return '60';
       case 'DISPLAY_HDR_TYPES':
         this._markNgNegotiated(name);
-        return 'NONE';
+        return this._getDisplayHdrTypes();
       case 'DISPLAY_MAX_LUMINANCE':
         this._markNgNegotiated(name);
         return '0';
       case 'DISPLAY_WIDE_COLOR':
         this._markNgNegotiated(name);
         return 'false';
+      case 'DISPLAY_SINK_RESOLUTION':
+        this._markNgNegotiated(name);
+        return this._getDisplaySinkResolution();
+      case 'PWA_VIDEO_CODECS':
+        this._markNgNegotiated(name);
+        return this._buildPwaVideoCodecs();
+      case 'LOCAL_ENHANCEMENT':
+        this._markNgNegotiated(name);
+        return `pref=${this._getEffectiveQualityHint()};status=none`;
       case 'VIDEO_DECODER_MATRIX':
         this._markNgNegotiated(name);
         return this._buildVideoDecoderMatrix();
@@ -1749,7 +1972,7 @@ export class MiniClientConnection extends EventTarget {
         return '0';
       case 'QUALITY_HINT':
         this._markNgNegotiated(name);
-        return pref('quality_hint', 'auto');
+        return this._getEffectiveQualityHint();
       case 'DOWNLOADS_SUPPORTED':
         this._markNgNegotiated(name);
         return this._isDownloadSupported() ? 'TRUE' : 'FALSE';
@@ -1778,7 +2001,7 @@ export class MiniClientConnection extends EventTarget {
         this._markNgNegotiated(name);
         return 'TRUE';
 
-      // ── Audio Processing / Equalizer ──
+      // ?????? Audio Processing / Equalizer ??????
       case 'AUDIO_PROCESSING_CAPABILITIES':
         return this._audioProcessing?.capabilities
           ? JSON.stringify(this._audioProcessing.capabilities())
@@ -1833,7 +2056,7 @@ export class MiniClientConnection extends EventTarget {
         // MUST return empty. A non-empty value sets iPhoneMode=true server-side
         // (MiniClientSageRenderer.java ~L4102), and iPhoneMode forces
         // clientDoesPull=httpls=true in MiniPlayer.load() (~L829) for all
-        // video/TV — routing the ENTIRE session through the legacy iOS HTTPLS
+        // video/TV ??? routing the ENTIRE session through the legacy iOS HTTPLS
         // subsystem (iosstream_*.m3u8) whose bandwidth tiers are hard-capped at
         // 480x272. That is the root cause of low-res playback.
         //
@@ -1841,7 +2064,7 @@ export class MiniClientConnection extends EventTarget {
         // when the mux.js push transmuxer (H.264-only) would stall on MPEG-PS.
         // mux.js is retired; we now use Protocol 2.1 surfaces + the bridge
         // /transcode path. Returning empty keeps us OUT of iPhoneMode so the
-        // server delivers via normal pull (file path) — the client then
+        // server delivers via normal pull (file path) ??? the client then
         // direct-plays compatible content via the bridge /rawmedia endpoint and
         // bridge-transcodes HEVC/etc. to HD fMP4, exactly like the Android
         // client's pull path. Modern displays are square-pixel, so no forced
@@ -1926,7 +2149,7 @@ export class MiniClientConnection extends EventTarget {
       case 'FIXED_PUSH_MEDIA_FORMAT': {
         // Push was retired in Protocol 2.1 (mux.js transmuxer removed) and both
         // PWA surfaces advertise deliveryModes='pull'. Advertising a concrete
-        // push transcode recipe here is a lie the client can no longer honor —
+        // push transcode recipe here is a lie the client can no longer honor ???
         // and it invites the server to PUSH (which the client then discards,
         // tearing the session down). Return empty so the story is consistently
         // pull-only, matching PUSH_AV_CONTAINERS and FIXED_PUSH_REMUX_FORMAT.
@@ -1944,6 +2167,13 @@ export class MiniClientConnection extends EventTarget {
         return 'TRUE';
       case 'DETAILED_BUFFER_STATS':
         this._detailedBufferStats = true;
+        return 'TRUE';
+      case 'TRICKPLAY_POSITION_V1':
+        return 'TRUE';
+      case 'SEEK_EPOCH_V1':
+        this._seekEpochEnabled = true;
+        return 'TRUE';
+      case 'DVR_WINDOW_V1':
         return 'TRUE';
       case 'FORCED_MEDIA_RECONNECT':
         return 'TRUE';
@@ -2002,7 +2232,7 @@ export class MiniClientConnection extends EventTarget {
         console.log(`[Connection] Reconnect allowed: ${this.reconnectAllowed}`);
         return 0;
       case 'CAP_EFFECTIVE_SURFACE':
-        // Protocol 2.1 §7 return path: the surface the server chose for the
+        // Protocol 2.1 ??7 return path: the surface the server chose for the
         // stream it is about to open. Consumed by the next MEDIACMD_OPENURL to
         // route the stream into the matching client pipeline:
         //   pwa_native -> native <video> pull (/rawmedia)
@@ -2014,7 +2244,7 @@ export class MiniClientConnection extends EventTarget {
         return 0;
       case 'CAP_EFFECTIVE_PLAYER':
         // Legacy compatibility tag; recorded for diagnostics only. We honor
-        // CAP_EFFECTIVE_SURFACE for routing (§7).
+        // CAP_EFFECTIVE_SURFACE for routing (??7).
         this._effectivePlayer = value ? value.trim() : '';
         console.log(`[Connection] CAP_EFFECTIVE_PLAYER = ${this._effectivePlayer || '(none)'} (informational)`);
         return 0;
@@ -2026,7 +2256,7 @@ export class MiniClientConnection extends EventTarget {
         //   pull-xcode:mpeg2tsremux  -> /msproxy?mode=remux:ts (TS copy-remux)
         //   pull-xcode:browserhd     -> /msproxy?mode=xcode:browserhd (server fMP4)
         // When present, the next MEDIACMD_OPENURL honors it verbatim (the PWA
-        // stops sniffing codecs — the NG server decided from our reported
+        // stops sniffing codecs ??? the NG server decided from our reported
         // capabilities). Absent (legacy / pre-upgrade NG) => existing
         // surface-sniff routing is used unchanged. Session-sticky per OPENURL.
         this._effectiveDelivery = value ? value.trim() : '';
@@ -2190,7 +2420,7 @@ export class MiniClientConnection extends EventTarget {
     if (match) {
       const newW = parseInt(match[1], 10);
       const newH = parseInt(match[2], 10);
-      console.log(`[Connection] GFX_RESOLUTION changed: ${this.width}x${this.height} → ${newW}x${newH}`);
+      console.log(`[Connection] GFX_RESOLUTION changed: ${this.width}x${this.height} ??? ${newW}x${newH}`);
       this.width = newW;
       this.height = newH;
       this.renderer.setSize(this.width, this.height);
@@ -2209,7 +2439,7 @@ export class MiniClientConnection extends EventTarget {
     const valBytes = new Uint8Array(value.length);
     for (let i = 0; i < value.length; i++) valBytes[i] = value.charCodeAt(i) & 0xFF;
 
-    // Only encrypt when data is non-empty — server skips decryption when dataLen == 0
+    // Only encrypt when data is non-empty ??? server skips decryption when dataLen == 0
     const origLen = valBytes.length;
     const encVal = (origLen > 0 && this.crypto.isEnabled()) ? this.crypto.encrypt(valBytes) : valBytes;
     const frame = new Uint8Array(16 + encVal.length);
@@ -2233,7 +2463,7 @@ export class MiniClientConnection extends EventTarget {
    * Same frame format as _sendPropertyResponse but takes Uint8Array directly.
    */
   _sendPropertyResponseBytes(rawBytes) {
-    // Only encrypt when data is non-empty — server skips decryption when dataLen == 0
+    // Only encrypt when data is non-empty ??? server skips decryption when dataLen == 0
     const origLen = rawBytes.length;
     const encVal = (origLen > 0 && this.crypto.isEnabled()) ? this.crypto.encrypt(rawBytes) : rawBytes;
     const frame = new Uint8Array(16 + encVal.length);
@@ -2263,7 +2493,7 @@ export class MiniClientConnection extends EventTarget {
     new DataView(retbuf.buffer).setInt32(0, retval, false);
 
     const shouldEncrypt = encrypt !== undefined ? encrypt : this.crypto.isEnabled();
-    // Use forceEncrypt() to bypass the enabled check — the handler may have already
+    // Use forceEncrypt() to bypass the enabled check ??? the handler may have already
     // called crypto.disable() (e.g. CRYPTO_EVENTS_ENABLE=FALSE), but the reply must
     // still be encrypted based on the snapshot taken before the handler ran.
     const encRet = shouldEncrypt ? this.crypto.forceEncrypt(retbuf) : retbuf;
@@ -2284,7 +2514,7 @@ export class MiniClientConnection extends EventTarget {
     this._sendGfx(frame);
   }
 
-  // ── Drawing Commands ────────────────────────────────────
+  // ?????? Drawing Commands ????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
   /**
    * Handle a DRAWING_CMD message containing a single GFX command.
@@ -2327,7 +2557,7 @@ export class MiniClientConnection extends EventTarget {
              (cmddata[off + 3] & 0xFF);
     };
 
-    // Per-command diagnostics — only when perf instrumentation is enabled
+    // Per-command diagnostics ??? only when perf instrumentation is enabled
     // (?perf=1 / localStorage sagetv.perf=1). Off by default: no per-command
     // string work or console output in the hot path.
     if (perf.enabled) {
@@ -2356,7 +2586,7 @@ export class MiniClientConnection extends EventTarget {
         return 1;
 
       case GFXCMD.DEINIT:
-        console.log('[Connection] Server sent GFXCMD_DEINIT — exiting to connect screen');
+        console.log('[Connection] Server sent GFXCMD_DEINIT ??? exiting to connect screen');
         this._exitRequested = true;
         this.reconnectAllowed = false;
         this.renderer.deinit();
@@ -2388,7 +2618,7 @@ export class MiniClientConnection extends EventTarget {
         } else {
           this.renderer.flipBuffer();
         }
-        // Frame-level perf summary — only when instrumentation is enabled.
+        // Frame-level perf summary ??? only when instrumentation is enabled.
         if (perf.enabled) {
           const cacheStats = this.renderer.getCacheStats ? this.renderer.getCacheStats() : null;
           perf.endFrame(cacheStats, this.gfxSocket ? this.gfxSocket.bufferedAmount : undefined);
@@ -2547,7 +2777,7 @@ export class MiniClientConnection extends EventTarget {
             const absDw = Math.abs(dw);
             const absDh = Math.abs(dh);
             if (absDw !== this.width || absDh !== this.height) {
-              console.log(`[Connection] Server renders at ${absDw}x${absDh}, canvas was ${this.width}x${this.height} — resizing`);
+              console.log(`[Connection] Server renders at ${absDw}x${absDh}, canvas was ${this.width}x${this.height} ??? resizing`);
               this.width = absDw;
               this.height = absDh;
               this.renderer.setSize(absDw, absDh);
@@ -2555,7 +2785,7 @@ export class MiniClientConnection extends EventTarget {
             }
             this._serverResDetected = true;
             // If the server rendered BELOW our real (desired) resolution, it
-            // ignored or hadn't yet processed our UI_RESIZE — re-assert (bounded)
+            // ignored or hadn't yet processed our UI_RESIZE ??? re-assert (bounded)
             // so it re-renders the UI at HD instead of leaving us blurry/SD.
             if ((absDw < this._originalWidth || absDh < this._originalHeight) && this._uiResizeAsserts < 3) {
               this._uiResizeAsserts++;
@@ -2563,7 +2793,7 @@ export class MiniClientConnection extends EventTarget {
               this.sendResize(this._originalWidth, this._originalHeight);
             }
           }
-          // One-shot DRAWTEXTURED diagnostic — perf-gated so it doesn't rebuild
+          // One-shot DRAWTEXTURED diagnostic ??? perf-gated so it doesn't rebuild
           // every frame when instrumentation is off (_firstFrameLogged only
           // flips inside the perf-enabled FLIPBUFFER path).
           if (perf.enabled && !this._firstFrameLogged) {
@@ -2828,7 +3058,7 @@ export class MiniClientConnection extends EventTarget {
       }
 
       case GFXCMD.UNLOADFONT:
-        // Server's unloadFontMini is empty — no reply expected
+        // Server's unloadFontMini is empty ??? no reply expected
         break;
 
       case GFXCMD.LOADFONTSTREAM: {
@@ -2871,8 +3101,8 @@ export class MiniClientConnection extends EventTarget {
         // channel and none is present, it sends this nudge on the /gfx channel.
         // Open a brand-new /media immediately (repeating the channelType=1
         // handshake), even if a prior /media already closed. No /gfx reply is
-        // expected — the server is satisfied once the new player channel appears.
-        console.log('[Connection] Server sent GFXCMD_MEDIA_RECONNECT — opening a fresh player channel');
+        // expected ??? the server is satisfied once the new player channel appears.
+        console.log('[Connection] Server sent GFXCMD_MEDIA_RECONNECT ??? opening a fresh player channel');
         this._openMediaChannel('GFXCMD_MEDIA_RECONNECT');
         break;
 
@@ -2929,7 +3159,7 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
-  // ── Media Stream Processing ──────────────────────────────
+  // ?????? Media Stream Processing ??????????????????????????????????????????????????????????????????????????????????????????
 
   _onMediaData(data, sock) {
     const bytes = new Uint8Array(data);
@@ -3068,8 +3298,8 @@ export class MiniClientConnection extends EventTarget {
         // any device-path dispatch (onMediaOpen/setFormatHint/load). The server
         // enforces a hard 30s read on this reply int (nonzero = OK). Deferring the
         // ack until after the dispatch made it vulnerable to a synchronous throw
-        // in that dispatch aborting the handler and skipping the write — the server
-        // then saw "zero bytes for 30s" → PlaybackException while INIT (which does
+        // in that dispatch aborting the handler and skipping the write ??? the server
+        // then saw "zero bytes for 30s" ??? PlaybackException while INIT (which does
         // no device work) always replied fine. Mirror INIT: ack immediately.
         this._sendMediaReturn(1);
         if (len >= 4) {
@@ -3079,14 +3309,14 @@ export class MiniClientConnection extends EventTarget {
             urlString = new TextDecoder('iso-8859-1').decode(data.subarray(4, 4 + strLen - 1));
           }
           // Server's HTTPLSServer emits URLs with a literal "HOSTNAME"
-          // placeholder (see sage/MiniPlayer.java: `ipPort = "HOSTNAME"`) —
+          // placeholder (see sage/MiniPlayer.java: `ipPort = "HOSTNAME"`) ???
           // MCSR shares the socket with HTTPLSServer, so the correct target
           // is our current SageTV host+port.
           if (urlString.includes('HOSTNAME')) {
             const hostPort = `${this.serverHost}:${this.serverPort}`;
             urlString = urlString.split('HOSTNAME').join(hostPort);
           }
-          // ── NG Format Hint (ng_fmt) ──────────────────────────────────────
+          // ?????? NG Format Hint (ng_fmt) ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????
           // NG servers append ?ng_fmt=containerMime,videoMime,audioMime to the
           // OPENURL so the client can configure its decoder pipeline immediately
           // without probing/sniffing the stream. Strip it before passing the URL
@@ -3130,8 +3360,8 @@ export class MiniClientConnection extends EventTarget {
           // null so its outcome never feeds native-codec learning.
           if (this._avcapMemory) this._pendingNativeProbe = null;
           if (msRoute) {
-            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} — routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
-            this._effectiveDelivery = '';  // consumed — clear to avoid stale routing on next OPENURL
+            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} ??? routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this._effectiveDelivery = '';  // consumed ??? clear to avoid stale routing on next OPENURL
             this._effectiveSurface = '';
             this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
             break;
@@ -3141,7 +3371,7 @@ export class MiniClientConnection extends EventTarget {
           // "iosstream" HLS URL (the legacy iOS Placeshifter subsystem, capped
           // at 480x272). Rather than follow it, extract the SageTV MediaFile ID
           // and route to the bridge /transcode endpoint, which resolves the ID
-          // to the on-disk file and remuxes/transcodes to HD fMP4 for MSE —
+          // to the on-disk file and remuxes/transcodes to HD fMP4 for MSE ???
           // bypassing HTTPLS entirely. Falls through to normal load() for any
           // non-iosstream URL (direct pull paths, push, etc.).
           const iosMatch = urlString.match(/iosstream_[0-9a-fA-F]+_(\d+)_\d+_list\.m3u8/i);
@@ -3150,7 +3380,7 @@ export class MiniClientConnection extends EventTarget {
             console.log(`[Media] Server HLS (iosstream) detected for mfid=${mfid}; routing to bridge transcode (HD, bypass HTTPLS)`);
             this.mediaPlayer.loadBridgeMfid(mfid, this.serverHost, 0);
           } else {
-            // Protocol 2.1 §7: honor the server's per-stream surface decision
+            // Protocol 2.1 ??7: honor the server's per-stream surface decision
             // (CAP_EFFECTIVE_SURFACE, set just before this OPENURL). If the
             // server chose pwa_mse for a pull abs-path source, route it through
             // the bridge /transcode pipeline (pass urlString as bridgeFilePath)
@@ -3161,14 +3391,14 @@ export class MiniClientConnection extends EventTarget {
             const surface = this._effectiveSurface;
             const routeToBridge = surface === 'pwa_mse' && isAbsPath && !isPush;
             if (routeToBridge) {
-              console.log(`[Media] CAP_EFFECTIVE_SURFACE=pwa_mse — routing pull source to bridge transcode: ${urlString}`);
+              console.log(`[Media] CAP_EFFECTIVE_SURFACE=pwa_mse ??? routing pull source to bridge transcode: ${urlString}`);
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0, urlString);
             } else {
               // Pull-mode URLs (stv:// or bare abs path) are handled by MediaPlayer
-              // via the bridge's /rawmedia byte-range endpoint — matches the fork's
+              // via the bridge's /rawmedia byte-range endpoint ??? matches the fork's
               // stv:// pull data source (browser-safe HTTP equivalent). Don't route
               // through the transcoder: DIRECT_PLAY should preserve original bitstream.
-              if (surface) console.log(`[Media] CAP_EFFECTIVE_SURFACE=${surface} — native pull path`);
+              if (surface) console.log(`[Media] CAP_EFFECTIVE_SURFACE=${surface} ??? native pull path`);
               // Native, server-unconditioned DIRECT_PLAY (Tizen AVPlay): remember
               // the codec being attempted so the firstframe/failure listeners can
               // record on-device proof (see constructor + avplay-capability-memory).
@@ -3226,6 +3456,8 @@ export class MiniClientConnection extends EventTarget {
 
       case 22: // MEDIACMD_FLUSH
         this._serverMuxTime = -1;
+        this._seekEpoch = (this._seekEpoch || 0) + 1;
+        this._lastReportedPosition = -1;
         this.mediaPlayer.flush();
         this._sendMediaReturn(1);
         break;
@@ -3248,12 +3480,12 @@ export class MiniClientConnection extends EventTarget {
           // Bandwidth estimation probe: the server sends 4 dummy PUSHBUFFER
           // frames BEFORE OPENURL to measure round-trip throughput. The payload
           // is garbage ((byte)(i & 0xFF)). If no media URL has been opened yet,
-          // these are probe packets — just ACK them with bufferLeft and do NOT
+          // these are probe packets ??? just ACK them with bufferLeft and do NOT
           // forward to the player (which would trigger a spurious "push data
           // discarded" warning and can interrupt a subsequent play() promise).
           if (!this._mediaOpened) {
             if (this._pushDataCount <= 5) {
-              console.log(`[Media] Bandwidth probe #${this._pushDataCount} (${bufSize}B) — ACK only, no OPENURL yet`);
+              console.log(`[Media] Bandwidth probe #${this._pushDataCount} (${bufSize}B) ??? ACK only, no OPENURL yet`);
             }
             // Fall through to send bufferLeft response below
           } else {
@@ -3282,7 +3514,13 @@ export class MiniClientConnection extends EventTarget {
           const buf = new Uint8Array(9);
           const dv = new DataView(buf.buffer);
           dv.setInt32(0, bufLeft, false);
-          dv.setInt32(4, this.mediaPlayer.getMediaTimeMillis() & 0x7FFFFFFF, false);
+          let pos = this.mediaPlayer.getMediaTimeMillis();
+          // Monotonic guard: within an epoch, never report lower than previous
+          if (this._lastReportedPosition >= 0 && pos < this._lastReportedPosition) {
+            pos = this._lastReportedPosition;
+          }
+          this._lastReportedPosition = pos;
+          dv.setInt32(4, pos & 0x7FFFFFFF, false);
           buf[8] = this.mediaPlayer.getState() & 0xFF;
           this._sendMedia(buf);
         } else {
@@ -3327,10 +3565,12 @@ export class MiniClientConnection extends EventTarget {
         this._sendMediaReturn(0);
         break;
 
-      case 29: { // MEDIACMD_SEEK — no reply per Java client
+      case 29: { // MEDIACMD_SEEK ??? no reply per Java client
         if (len >= 8) {
           const timeMS = readLong(0);
           console.log(`[Media] SEEK: ${timeMS}ms`);
+          this._seekEpoch = (this._seekEpoch || 0) + 1;
+          this._lastReportedPosition = -1;
           this.mediaPlayer.seek(timeMS);
         }
         // Java returns 0 bytes (no reply)
@@ -3397,12 +3637,12 @@ export class MiniClientConnection extends EventTarget {
     if (!token) return null;
 
     // Bare transport word with NO conditioning token. An NG server emits a plain
-    // "pull" (or "pull-xcode") CAP_EFFECTIVE_DELIVERY for a DIRECT_PLAY decision —
+    // "pull" (or "pull-xcode") CAP_EFFECTIVE_DELIVERY for a DIRECT_PLAY decision ???
     // there is no MediaServer /msproxy mode to request. Return null so OPENURL
     // falls through to the native /rawmedia direct-pull path, preserving the
     // original bitstream. WITHOUT this guard, bare "pull" (which has no ":") skips
     // the prefix-strip above and lands in the `else` mode-mapping below, producing
-    // a bogus "xcode:pull" key that MediaServer rejects — AVPlay then never opens,
+    // a bogus "xcode:pull" key that MediaServer rejects ??? AVPlay then never opens,
     // the server's openURL0 times out after 30s -> PlaybackException + infinite
     // client spinner (broke ALL DIRECT_PLAY sources on Tizen: MPEG-PS, HEVC, ...).
     if (token === 'pull' || token === 'pull-xcode') return null;
@@ -3420,16 +3660,16 @@ export class MiniClientConnection extends EventTarget {
     if (!token) return null;
 
     // DIRECT_PLAY (pull:direct) on the native AVPlay surface (Tizen): serve the
-    // ORIGINAL bytes via the proven /rawmedia byte-range endpoint — the Jul-11
+    // ORIGINAL bytes via the proven /rawmedia byte-range endpoint ??? the Jul-11
     // "Tizen AVPlay native playback" path (79f47bd) that reliably played HEVC /
     // EAC3 / MPEG2 natively, BEFORE /msproxy existed. Once the server began
     // emitting `pull:direct` (server 8e6a958f) instead of bare `pull`, this token
     // slipped past the bare-`pull` guard above into the mode='direct' mapping and
     // rerouted every DIRECT_PLAY title through /msproxy?mode=direct, where AVPlay
-    // never prepares a first frame → infinite "Loading" (server-side openURL0
+    // never prepares a first frame ??? infinite "Loading" (server-side openURL0
     // read then times out with AsynchronousCloseException). Return null so OPENURL
-    // falls through to this.mediaPlayer.load() → AVPlay /rawmedia. Browser/MSE
-    // surfaces keep /msproxy?mode=direct (seekable MP4) — this guard is Tizen-only,
+    // falls through to this.mediaPlayer.load() ??? AVPlay /rawmedia. Browser/MSE
+    // surfaces keep /msproxy?mode=direct (seekable MP4) ??? this guard is Tizen-only,
     // so no non-Tizen path changes.
     if (token === 'direct' && this.platformDetector?.isTizen?.() === true) return null;
 
@@ -3493,7 +3733,7 @@ export class MiniClientConnection extends EventTarget {
     if (sock && sock.readyState === WebSocket.OPEN) {
       sock.send(data.buffer || data);
     } else {
-      console.warn(`[Media] Cannot send ${data.length}B — media socket not open`);
+      console.warn(`[Media] Cannot send ${data.length}B ??? media socket not open`);
     }
   }
 
@@ -3515,7 +3755,7 @@ export class MiniClientConnection extends EventTarget {
     // Gate on intent, not idleness, so the player socket is restored like the
     // browser does while a genuine Exit still skips (no reconnect churn).
     if (!this.reconnectAllowed || this._exitRequested) {
-      console.log(`[Connection] Media socket closed (code=${closeCode}); session ending (reconnectAllowed=${this.reconnectAllowed}, exitRequested=${this._exitRequested}) — not reconnecting`);
+      console.log(`[Connection] Media socket closed (code=${closeCode}); session ending (reconnectAllowed=${this.reconnectAllowed}, exitRequested=${this._exitRequested}) ??? not reconnecting`);
       return;
     }
 
@@ -3523,7 +3763,7 @@ export class MiniClientConnection extends EventTarget {
       return;
     }
 
-    console.warn(`[Connection] Media socket closed (code=${closeCode}) — scheduling auto-reconnect`);
+    console.warn(`[Connection] Media socket closed (code=${closeCode}) ??? scheduling auto-reconnect`);
     if (!this.alive || !this.gfxSocket || this.gfxSocket.readyState !== WebSocket.OPEN) {
       console.warn('[Connection] GFX not alive, skipping media reconnect');
       return;
@@ -3546,7 +3786,7 @@ export class MiniClientConnection extends EventTarget {
    *
    * The previous media socket (if any) is detached and closed first so we hold
    * exactly one player channel at a time and its onclose can't schedule a second
-   * reconnect. This is a PUBLIC reconnect helper only — it performs no binary or
+   * reconnect. This is a PUBLIC reconnect helper only ??? it performs no binary or
    * protocol parsing itself; the existing handshake path is reused unchanged.
    *
    * @param {string} reason - diagnostic label for logging
@@ -3599,7 +3839,7 @@ export class MiniClientConnection extends EventTarget {
     }
   }
 
-  // ── Event Sending (Client → Server) ──────────────────────
+  // ?????? Event Sending (Client ??? Server) ??????????????????????????????????????????????????????????????????
 
   /**
    * Build and send an event frame.
@@ -3736,7 +3976,7 @@ export class MiniClientConnection extends EventTarget {
       this._lateRepaintWindowStart = now;
       this._lateRepaintCount = 0;
     }
-    if (this._lateRepaintCount >= 5) return; // suspected loop — stop repainting
+    if (this._lateRepaintCount >= 5) return; // suspected loop ??? stop repainting
     this._lateImageRepaintTimer = setTimeout(() => {
       this._lateImageRepaintTimer = null;
       this._lateRepaintCount = (this._lateRepaintCount || 0) + 1;
@@ -3744,7 +3984,7 @@ export class MiniClientConnection extends EventTarget {
     }, 16);
   }
 
-  // ── FS Commands ─────────────────────────────────────────
+  // ?????? FS Commands ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
   _handleFSCommand(data) {
     const readInt = (pos) => {
@@ -3787,7 +4027,7 @@ export class MiniClientConnection extends EventTarget {
     this._sendGfxReturnValue(FSResult.NO_PERMISSIONS);
   }
 
-  // ── Offline Cache ───────────────────────────────────────
+  // ?????? Offline Cache ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
   postOfflineCacheChange(added, resourceId) {
     this._offlineCacheChanges.push({ added, resourceId });
@@ -3798,7 +4038,7 @@ export class MiniClientConnection extends EventTarget {
     return this._advancedImageCaching;
   }
 
-  // ── Disconnect / Reconnect / Keepalive ──────────────────
+  // ?????? Disconnect / Reconnect / Keepalive ??????????????????????????????????????????????????????
 
   /**
    * Start periodic keepalive pings to detect dead connections.
@@ -3811,7 +4051,7 @@ export class MiniClientConnection extends EventTarget {
           // Send a JSON text ping to the bridge (bridge replies with pong)
           this.gfxSocket.send(JSON.stringify({ type: 'ping' }));
         } catch {
-          // Socket write failed — trigger disconnect
+          // Socket write failed ??? trigger disconnect
           this._onDisconnect('keepalive send failed');
         }
       }
@@ -3835,7 +4075,7 @@ export class MiniClientConnection extends EventTarget {
     // If we ever need to distinguish, add a heuristic here.
     const isUserExit = this._exitRequested || closeCode === 1000 || closeCode === 1001;
     if (isUserExit) {
-      console.log(`[Connection] Exit (exitRequested=${this._exitRequested}, code=${closeCode}) — skipping reconnect`);
+      console.log(`[Connection] Exit (exitRequested=${this._exitRequested}, code=${closeCode}) ??? skipping reconnect`);
       this.alive = false;
       this._stopKeepalive();
       this._stopBandwidthTracking();
@@ -3857,17 +4097,17 @@ export class MiniClientConnection extends EventTarget {
     }
 
     // After login: server sends CRYPTO_EVENTS_ENABLE=FALSE then closes socket.
-    // Reconnect using type 5 (session resume by MAC) — matching Java client.
+    // Reconnect using type 5 (session resume by MAC) ??? matching Java client.
     // Java condition: reconnectAllowed && alive && firstFrameStarted && !encryptEvents
-    // (no cached auth requirement — type 5 resumes existing server session)
+    // (no cached auth requirement ??? type 5 resumes existing server session)
     if (this.reconnectAllowed && this.firstFrameStarted && !this._encryptEvents) {
       if (this._shortSessionCount >= 10) {
-        console.warn(`[Connection] Stopping reconnect — ${this._shortSessionCount} consecutive short sessions`);
+        console.warn(`[Connection] Stopping reconnect ??? ${this._shortSessionCount} consecutive short sessions`);
         this.alive = false;
         this._shortSessionCount = 0;
         this.dispatchEvent(new CustomEvent('disconnected', { detail: { reason: 'Server keeps disconnecting after auth' } }));
       } else {
-        console.log(`[Connection] Post-login disconnect (short#${this._shortSessionCount}) — attempting type-5 session resume`);
+        console.log(`[Connection] Post-login disconnect (short#${this._shortSessionCount}) ??? attempting type-5 session resume`);
         this.alive = false;
         this._attemptSessionReconnect();
       }
@@ -3932,7 +4172,7 @@ export class MiniClientConnection extends EventTarget {
   /**
    * Attempt type-5 session-resume reconnect (matching Java client behavior).
    * Type 5 tells the server to resume the existing session by MAC address.
-   * No property renegotiation needed — server continues sending GFX commands.
+   * No property renegotiation needed ??? server continues sending GFX commands.
    * Falls back to type 0 (fresh) with cached auth if type 5 fails.
    */
   async _attemptSessionReconnect() {
@@ -4021,7 +4261,7 @@ export class MiniClientConnection extends EventTarget {
       this._startKeepalive();
       this._startBandwidthTracking();
       this.dispatchEvent(new CustomEvent('reconnected'));
-      console.log('[Connection] Session resume successful — server will continue rendering');
+      console.log('[Connection] Session resume successful ??? server will continue rendering');
     } catch (err) {
       console.error('[Connection] Session reconnect failed:', err);
       this._scheduleReconnect();
@@ -4071,14 +4311,14 @@ export class MiniClientConnection extends EventTarget {
       this.replyCount = 0;
       this._detailedBufferStats = false;
       this._serverMuxTime = -1;
-      // Do NOT reset handleCount — with ADVANCED_IMAGE_CACHING, the server
+      // Do NOT reset handleCount ??? with ADVANCED_IMAGE_CACHING, the server
       // assumes client images persist. Keeping handleCount avoids collisions
       // between old cached images and new LOADIMAGE assignments.
       this._gfxCmdCount = 0;
       this._propCount = 0;
       this._connectTime = Date.now();
 
-      // Do NOT call renderer.deinit() — with ADVANCED_IMAGE_CACHING=TRUE,
+      // Do NOT call renderer.deinit() ??? with ADVANCED_IMAGE_CACHING=TRUE,
       // the server won't re-send images it already sent in the previous session.
       // Keeping images in memory lets the server reference them by handle.
       console.log(`[Connection] Reconnect: keeping ${this.renderer.images.size} cached images, handleCount=${this.handleCount}`);
@@ -4122,10 +4362,10 @@ export class MiniClientConnection extends EventTarget {
       this._startKeepalive();
       this._startBandwidthTracking();
       this.dispatchEvent(new CustomEvent('reconnected'));
-      console.log('[Connection] Full reconnect successful — server will negotiate properties');
+      console.log('[Connection] Full reconnect successful ??? server will negotiate properties');
 
       // The server will now send GET_PROPERTY/SET_PROPERTY again.
-      // GET_CACHED_AUTH will return our stored auth block → auto-login.
+      // GET_CACHED_AUTH will return our stored auth block ??? auto-login.
     } catch (err) {
       console.error('[Connection] Full reconnect failed:', err);
       this._scheduleReconnect();
@@ -4174,7 +4414,7 @@ export class MiniClientConnection extends EventTarget {
   }
 }
 
-// ── Static HEVC GPU validation (runs once at module load) ──────────────
+// ?????? Static HEVC GPU validation (runs once at module load) ??????????????????????????????????????????
 // Probes the MediaCapabilities API to confirm hardware HEVC decode.
 // Result is available synchronously when _probePlaybackSurfaces() runs.
 (async () => {
@@ -4194,13 +4434,13 @@ export class MiniClientConnection extends EventTarget {
       },
     });
     MiniClientConnection._hevcHwValidated = !!(result.supported && result.powerEfficient);
-    console.log(`[PlaybackSurfaces] HEVC GPU pre-validate: supported=${result.supported} powerEfficient=${result.powerEfficient} → ${MiniClientConnection._hevcHwValidated ? 'PASS' : 'FAIL'}`);
+    console.log(`[PlaybackSurfaces] HEVC GPU pre-validate: supported=${result.supported} powerEfficient=${result.powerEfficient} ??? ${MiniClientConnection._hevcHwValidated ? 'PASS' : 'FAIL'}`);
   } catch (e) {
     MiniClientConnection._hevcHwValidated = true; // err on trying
   }
 })();
 
-// ── Utility ──────────────────────────────────────────────
+// ?????? Utility ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
 /** Java String.hashCode() equivalent */
 function hashCode(str) {
@@ -4210,3 +4450,4 @@ function hashCode(str) {
   }
   return hash;
 }
+

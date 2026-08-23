@@ -36,7 +36,7 @@ import { streamInfoToFormatHint } from './ng-streaminfo.js';
  * still starts in time, yet long enough not to trip on normal LAN buffering
  * (first frame is typically <3s).
  */
-const PREPARE_WATCHDOG_MS = 15000;
+const PREPARE_WATCHDOG_MS = 25000;
 
 export class AVPlayPlayer extends EventTarget {
   /**
@@ -74,6 +74,7 @@ export class AVPlayPlayer extends EventTarget {
     this._volume = 1;
     this._telemetrySequence = 0;
     this._reportedFailureKeys = new Set();
+    this._bridgeSessionId = null;  // per-load() session ID for bridge dedup
 
     // Server UI coordinate space (advertised UI resolution). setVideoRectangles
     // rects are in this space; we scale to physical display pixels for AVPlay.
@@ -157,14 +158,16 @@ export class AVPlayPlayer extends EventTarget {
 
   _rawMediaUrl(absPath) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    return `${base}/rawmedia?path=${encodeURIComponent(absPath)}`;
+    const sess = this._bridgeSessionId ? `&session=${encodeURIComponent(this._bridgeSessionId)}` : '';
+    return `${base}/rawmedia?path=${encodeURIComponent(absPath)}${sess}`;
   }
 
   _resolveMediaUrl(url, bridgeFilePath) {
     // Server chose a bridge/transcode surface for this source.
     if (bridgeFilePath) {
       const base = (this._bridgeBase || '').replace(/\/$/, '');
-      return `${base}/transcode?file=${encodeURIComponent(bridgeFilePath)}`;
+      const sess = this._bridgeSessionId ? `&session=${encodeURIComponent(this._bridgeSessionId)}` : '';
+      return `${base}/transcode?file=${encodeURIComponent(bridgeFilePath)}${sess}`;
     }
     if (!url) return url;
     if (url.startsWith('http://') || url.startsWith('https://')) return url;
@@ -186,6 +189,9 @@ export class AVPlayPlayer extends EventTarget {
 
   async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath, msproxyFallbackUrl = null) {
     this.stop();
+    // Generate a unique session ID for this load so the bridge can dedup
+    // concurrent AVPlay HTTP connections (range probes) into one XCODE_SETUP.
+    this._bridgeSessionId = 'avplay-' + Date.now();
     // Token for THIS load. stop()/a newer load() bump _loadSeq, so the async
     // prepareAsync callbacks below are ignored if playback was already exited
     // (otherwise a late "prepared" would set state=PLAY and strand the menu
@@ -203,6 +209,7 @@ export class AVPlayPlayer extends EventTarget {
     }
 
     const mediaUrl = this._resolveMediaUrl(url, bridgeFilePath);
+    this._lastMediaUrl = mediaUrl;  // for phone-home diagnostics
     console.log(`[AVPlay] load: ${mediaUrl}`);
 
     // Resilience fallback: a prepare/open error OR a no-first-frame hang retries
@@ -265,7 +272,8 @@ export class AVPlayPlayer extends EventTarget {
     const abs = this._toAbsPath(url);
     if (!abs) return null;
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    return `${base}/transcode?file=${encodeURIComponent(abs)}`;
+    const sess = this._bridgeSessionId ? `&session=${encodeURIComponent(this._bridgeSessionId)}` : '';
+    return `${base}/transcode?file=${encodeURIComponent(abs)}${sess}`;
   }
 
   /** Extract an absolute server path from a stv:// / file:// / bare-abs URL, else null. */
@@ -309,6 +317,7 @@ export class AVPlayPlayer extends EventTarget {
    */
   _fallbackOrFail(reason, details = {}) {
     this._clearPrepareWatchdog();
+    this._phoneHome(reason, { ...details, hasFallback: !!this._fallbackUrl });
     if (this._fallbackUrl) {
       const fb = this._fallbackUrl;
       this._fallbackUrl = null;
@@ -324,7 +333,9 @@ export class AVPlayPlayer extends EventTarget {
   // Option B parity: bridge transcodes a MediaFile id to fMP4/TS AVPlay can open.
   async loadBridgeMfid(mfid, hostname, seekSec = 0) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    const url = `${base}/transcode?mfid=${encodeURIComponent(mfid)}${seekSec ? `&seek=${seekSec}` : ''}`;
+    this._bridgeSessionId = 'avplay-' + Date.now();
+    const sess = `&session=${encodeURIComponent(this._bridgeSessionId)}`;
+    const url = `${base}/transcode?mfid=${encodeURIComponent(mfid)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
     return this.load(0, 0, '', url, hostname, false, 0, null);
   }
 
@@ -339,8 +350,10 @@ export class AVPlayPlayer extends EventTarget {
    */
   async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}`;
-    const fallbackUrl = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}`;
+    this._bridgeSessionId = 'avplay-' + Date.now();
+    const sess = `&session=${encodeURIComponent(this._bridgeSessionId)}`;
+    const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
+    const fallbackUrl = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
     console.log(`[AVPlay] loadMsProxy mode=${mode}: ${url}`);
     return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl);
   }
@@ -370,6 +383,7 @@ export class AVPlayPlayer extends EventTarget {
       },
       onerror: (e) => {
         console.error('[AVPlay] error:', e);
+        this._phoneHome('AVPLAY_RUNTIME_ERROR', { code: String(e) });
         this._emitPlaybackFailure('AVPLAY_RUNTIME_ERROR', { mode: 'avplay', code: String(e) });
       },
     });
@@ -379,6 +393,7 @@ export class AVPlayPlayer extends EventTarget {
     if (this._firstFrameEmitted) return;
     this._firstFrameEmitted = true;
     this._clearPrepareWatchdog();
+    this._phoneHome('FIRST_FRAME', { positionMs: this._positionMs, dims: this._videoDimensions });
     this.dispatchEvent(new CustomEvent('firstframe'));
   }
 
@@ -596,9 +611,41 @@ export class AVPlayPlayer extends EventTarget {
     const key = `${reason}|${details.mode || ''}|${details.code || ''}`;
     if (this._reportedFailureKeys.has(key)) return;
     this._reportedFailureKeys.add(key);
+    this._phoneHome(reason, details);
     this.dispatchEvent(new CustomEvent('playbackfailure', {
       detail: { reason, sequence: ++this._telemetrySequence, timestamp: Date.now(), ...details },
     }));
+  }
+
+  /**
+   * Phone-home: POST AVPlay lifecycle events to the bridge so they appear in
+   * server logs — crucial for diagnosing AVPlay disconnects when sdb/debug
+   * access to the TV is unavailable.
+   */
+  _phoneHome(reason, details = {}) {
+    try {
+      const base = (this._bridgeBase || '').replace(/\/$/, '');
+      if (!base) return;
+      const body = JSON.stringify({
+        reason,
+        session: this._bridgeSessionId || '',
+        url: this._lastMediaUrl || '',
+        fallbackUrl: this._fallbackUrl || '',
+        state: this.state,
+        positionMs: this._positionMs,
+        firstFrame: this._firstFrameEmitted,
+        durationMs: this._durationMs || 0,
+        dims: this._videoDimensions,
+        ts: Date.now(),
+        ...details,
+      });
+      // Fire-and-forget — never block playback on telemetry
+      fetch(`${base}/msproxy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }).catch(() => {});
+    } catch { /* ignore */ }
   }
 
   free() {

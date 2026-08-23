@@ -76,6 +76,10 @@ const Confidence = Object.freeze({
  * @property {boolean|null} hwDecode - decodingInfo().supported (null = not tested)
  * @property {boolean|null} hwPowerEff - decodingInfo().powerEfficient (null = not tested)
  * @property {string} confidence     - Confidence level
+ * @property {number|null} maxDecodedW  - Highest probed width where HW decode confirmed (null = not probed)
+ * @property {number|null} maxDecodedH  - Highest probed height where HW decode confirmed (null = not probed)
+ * @property {number|null} maxDecodedFps - Max framerate at highest probed resolution (null = not probed)
+ * @property {'hw'|'sw'|null} decoderType - 'hw' if powerEfficient at max res, 'sw' if supported but not efficient, null if not probed
  */
 
 /**
@@ -85,6 +89,7 @@ const Confidence = Object.freeze({
  * @property {CodecResult[]} containers - Container results
  * @property {number} phase1Ms          - Phase 1 duration (sync)
  * @property {number} phase2Ms          - Phase 2 duration (async)
+ * @property {number} phase3Ms          - Phase 3 duration (geometry probing)
  * @property {boolean} complete         - True when Phase 2 is done
  */
 
@@ -136,6 +141,10 @@ async function _runProbe() {
     mse: c.mseMime ? canMse(c.mseMime) : false,
     hwDecode: null,
     hwPowerEff: null,
+    maxDecodedW: null,
+    maxDecodedH: null,
+    maxDecodedFps: null,
+    decoderType: null,
     confidence: !!canPlay(c.nativeMime) ? Confidence.PROBABLE : Confidence.UNSUPPORTED,
     _decodingCfg: c.decodingCfg,
   }));
@@ -223,11 +232,104 @@ async function _runProbe() {
   for (const r of videoResults) delete r._decodingCfg;
   for (const r of audioResults) delete r._decodingCfg;
 
+  // ── Phase 3: multi-resolution geometry probing (GPU enhancement) ──
+  // For each supported video codec, probe descending candidate resolutions to
+  // discover the real decoder ceiling. Used by the server's GPU enhancement
+  // pipeline to decide whether the client can decode an upscaled stream.
+  // Fail-closed: if probing fails or times out, maxDecoded* stays null (= not eligible).
+  const t2 = performance.now();
+  const CANDIDATE_GEOMETRIES = [
+    { w: 3840, h: 2160, fps: 60, bitrate: 80_000_000, label: '4K' },
+    { w: 2560, h: 1440, fps: 60, bitrate: 40_000_000, label: '1440p' },
+    { w: 1920, h: 1080, fps: 60, bitrate: 20_000_000, label: '1080p' },
+  ];
+
+  if (mc && mc.decodingInfo) {
+    const geoTasks = [];
+
+    for (const result of videoResults) {
+      // Only probe codecs that Phase 1/2 confirmed can decode
+      if (result.confidence === Confidence.UNSUPPORTED) continue;
+      // Need a contentType to build decodingInfo configs
+      const baseCfg = VIDEO_CODECS.find((c) => c.name === result.name);
+      if (!baseCfg || !baseCfg.decodingCfg) continue;
+
+      // Probe each geometry from highest to lowest; stop at first success per codec
+      const probeCodecGeometry = async () => {
+        for (const geo of CANDIDATE_GEOMETRIES) {
+          try {
+            const cfg = {
+              type: 'file',
+              video: {
+                contentType: baseCfg.decodingCfg.contentType,
+                width: geo.w,
+                height: geo.h,
+                bitrate: geo.bitrate,
+                framerate: geo.fps,
+              },
+            };
+            const info = await mc.decodingInfo(cfg);
+            if (info.supported) {
+              result.maxDecodedW = geo.w;
+              result.maxDecodedH = geo.h;
+              result.maxDecodedFps = geo.fps;
+              result.decoderType = info.powerEfficient ? 'hw' : 'sw';
+              return; // highest supported found
+            }
+          } catch {
+            // decodingInfo failed at this geometry — try next lower
+          }
+        }
+        // No geometry confirmed — leave null (fail-closed)
+      };
+      geoTasks.push(probeCodecGeometry());
+    }
+
+    // Race all geometry probes against a 500ms deadline
+    if (geoTasks.length) {
+      await Promise.race([
+        Promise.allSettled(geoTasks),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ]);
+    }
+  }
+
+  // Tizen fallback: if decodingInfo didn't populate geometry (buggy on older Tizen),
+  // infer from panel resolution + known Samsung TV decoder capabilities.
+  // Samsung 4K Tizen TVs have HW decoders for H264 and HEVC at 4K@60fps.
+  const isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
+  if (isTizen) {
+    const panelW = screen.width * (window.devicePixelRatio || 1);
+    const panelH = screen.height * (window.devicePixelRatio || 1);
+    const is4kPanel = panelW >= 3840 && panelH >= 2160;
+    const TIZEN_4K_CODECS = ['H264', 'H264-baseline', 'HEVC', 'HEVC-Main10', 'HEVC-hev1'];
+    for (const result of videoResults) {
+      if (result.maxDecodedW != null) continue; // already probed successfully
+      if (result.confidence === Confidence.UNSUPPORTED) continue;
+      if (TIZEN_4K_CODECS.includes(result.name) && is4kPanel) {
+        result.maxDecodedW = 3840;
+        result.maxDecodedH = 2160;
+        result.maxDecodedFps = 60;
+        result.decoderType = 'hw';
+      } else if (result.native || result.mse) {
+        // Non-4K Tizen or non-primary codec: conservative 1080p
+        result.maxDecodedW = 1920;
+        result.maxDecodedH = 1080;
+        result.maxDecodedFps = 30;
+        result.decoderType = 'hw';
+      }
+    }
+  }
+
+  const phase3Ms = performance.now() - t2;
+
   _probeResults.phase2Ms = phase2Ms;
+  _probeResults.phase3Ms = phase3Ms;
   _probeResults.complete = true;
 
   _logTable('Phase 2 (async decode)', _probeResults);
-  console.log(`[CodecProbe] Complete: phase1=${phase1Ms.toFixed(1)}ms phase2=${phase2Ms.toFixed(1)}ms total=${(phase1Ms + phase2Ms).toFixed(1)}ms`);
+  _logGeometry('Phase 3 (geometry)', videoResults);
+  console.log(`[CodecProbe] Complete: phase1=${phase1Ms.toFixed(1)}ms phase2=${phase2Ms.toFixed(1)}ms phase3=${phase3Ms.toFixed(1)}ms total=${(phase1Ms + phase2Ms + phase3Ms).toFixed(1)}ms`);
 
   return _probeResults;
 }
@@ -281,6 +383,65 @@ function _normalizeName(name) {
   return name;
 }
 
+
+/**
+ * Get per-codec decoder geometry results for GPU enhancement capability reporting.
+ * Returns an array of { name, maxW, maxH, maxFps, decoder } for codecs with
+ * confirmed geometry. Missing/failed codecs are omitted (fail-closed).
+ * @returns {{ name: string, maxW: number, maxH: number, maxFps: number, decoder: 'hw'|'sw' }[] | null}
+ */
+export function getDecoderGeometry() {
+  if (!_probeResults || !_probeResults.complete) return null;
+  const results = [];
+  for (const r of _probeResults.video) {
+    if (r.maxDecodedW == null || r.maxDecodedH == null || r.decoderType == null) continue;
+    results.push({
+      name: _normalizeName(r.name),
+      maxW: r.maxDecodedW,
+      maxH: r.maxDecodedH,
+      maxFps: r.maxDecodedFps || 30,
+      decoder: r.decoderType,
+    });
+  }
+  // Deduplicate codec families (e.g. HEVC / HEVC-Main10 / HEVC-hev1 → keep the
+  // one with the highest maxW*maxH that is hw, or the first if tied)
+  const byFamily = new Map();
+  for (const r of results) {
+    const existing = byFamily.get(r.name);
+    if (!existing) { byFamily.set(r.name, r); continue; }
+    const rArea = r.maxW * r.maxH;
+    const eArea = existing.maxW * existing.maxH;
+    // Prefer hw over sw; then prefer higher resolution
+    if (r.decoder === 'hw' && existing.decoder !== 'hw') { byFamily.set(r.name, r); }
+    else if (r.decoder === existing.decoder && rArea > eArea) { byFamily.set(r.name, r); }
+  }
+  return Array.from(byFamily.values());
+}
+
+
+function _logGeometry(phase, videoResults) {
+  const rows = videoResults
+    .filter((r) => r.maxDecodedW != null)
+    .map((r) => ({
+      codec: r.name,
+      maxW: r.maxDecodedW,
+      maxH: r.maxDecodedH,
+      maxFps: r.maxDecodedFps,
+      decoder: r.decoderType,
+    }));
+  if (!rows.length) {
+    console.log(`[CodecProbe] ${phase}: no geometry probed (decodingInfo unavailable or all failed)`);
+    return;
+  }
+  console.log(`[CodecProbe] ${phase}:`);
+  try {
+    console.table(rows);
+  } catch {
+    for (const r of rows) {
+      console.log(`  ${r.codec.padEnd(14)} ${r.maxW}x${r.maxH}@${r.maxFps} decoder=${r.decoder}`);
+    }
+  }
+}
 
 function _logTable(phase, results) {
   const rows = [];
