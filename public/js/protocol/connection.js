@@ -300,6 +300,17 @@ export class MiniClientConnection extends EventTarget {
   /** Total bytes received on Media channel. */
   get bytesReceivedMedia() { return this._bytesReceivedMedia; }
 
+  /**
+   * True when the server is actively drawing menu/OSD content while a media
+   * file is open. Used by the input manager to detect "menu over video" and
+   * route arrow keys to menu navigation instead of REW/FF seek.
+   * The 2-second window covers the gap between the last server-drawn frame
+   * and the next user interaction (which triggers a redraw → resets the timer).
+   */
+  isMenuActive() {
+    return this._mediaOpened && (Date.now() - (this._lastGfxFlipAt || 0)) < 2000;
+  }
+
   _startBandwidthTracking() {
     this._stopBandwidthTracking();
     this._bytesReceivedWindow = 0;
@@ -2611,6 +2622,10 @@ export class MiniClientConnection extends EventTarget {
 
       case GFXCMD.FLIPBUFFER: {
         hasret[0] = 1;
+        // Track when the server last drew a GFX frame — used by the input
+        // manager to detect "menu over video" (arrows should navigate the
+        // menu, not seek, when the server is actively drawing UI).
+        this._lastGfxFlipAt = Date.now();
         if (perf.enabled) {
           const _t = performance.now();
           this.renderer.flipBuffer();

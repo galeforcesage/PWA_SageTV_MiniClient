@@ -421,14 +421,19 @@ export class InputManager {
   }
 
   /** True when a media file is actively loaded/playing/paused in FULLSCREEN
-   * (video context). A "play during menus" PIP (small video rect while a menu
-   * is up) is NOT playback context — input must drive the menu there. */
+   * (video context) with NO menu/OSD drawn over it. A "play during menus"
+   * PIP (small video rect while a menu is up) is NOT playback context, and
+   * neither is "menu drawn over fullscreen video" (the server kept the video
+   * playing but drew menu content on the canvas OSD).
+   * Input must drive the menu in those cases. */
   _inPlayback() {
     const mp = this.connection && this.connection.mediaPlayer;
     if (!mp) return false;
     const s = mp.state;
     const playing = s === PlayerState.LOADED || s === PlayerState.PLAY || s === PlayerState.PAUSE;
     if (!playing) return false;
+    // Menu/OSD drawn over video → arrows should navigate, not seek
+    if (this.connection.isMenuActive?.()) return false;
     // isVideoFullscreen may be absent on an older player build → default to the
     // prior behavior (treat any playing state as playback context).
     return typeof mp.isVideoFullscreen === 'function' ? mp.isVideoFullscreen() : true;
