@@ -446,6 +446,14 @@ export class AVPlayPlayer extends EventTarget {
     if (this.state !== PlayerState.NO_STATE) this._disableVideoPlane();
     this.state = PlayerState.STOPPED;
     this._firstFrameEmitted = false;
+    this._lastDestRect = null;
+    // Signal bridge to tear down the server-side transcode (mirrors MSE player)
+    if (this._bridgeBase && this._bridgeSessionId) {
+      fetch(`${this._bridgeBase}/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
+    }
+    // On Tizen, removing the AVPlay <object> can orphan keyboard focus.
+    // Restore it to the document so remote keys fire immediately.
+    try { document.body.focus(); } catch { /* ignore */ }
   }
 
   /** @param {number} timeMS absolute position in milliseconds. */

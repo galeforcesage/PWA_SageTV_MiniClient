@@ -297,6 +297,8 @@ async function _runProbe() {
   // Tizen fallback: if decodingInfo didn't populate geometry (buggy on older Tizen),
   // infer from panel resolution + known Samsung TV decoder capabilities.
   // Samsung 4K Tizen TVs have HW decoders for H264 and HEVC at 4K@60fps.
+  // NOTE: uses direct window.tizen check (same as platformDetector.isTizen())
+  // because this module is a standalone singleton with no DI.
   const isTizen = typeof window !== 'undefined' && typeof window.tizen !== 'undefined';
   if (isTizen) {
     const panelW = screen.width * (window.devicePixelRatio || 1);

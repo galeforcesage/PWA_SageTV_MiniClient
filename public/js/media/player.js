@@ -212,6 +212,7 @@ export class MediaPlayer extends EventTarget {
       // engine attach, overlay teardown) listen for this on both backends.
       if (!this._firstFrameFired) {
         this._firstFrameFired = true;
+        this._phoneHome('FIRST_FRAME');
         this.dispatchEvent(new CustomEvent('firstframe'));
       }
     });
@@ -2027,6 +2028,8 @@ export class MediaPlayer extends EventTarget {
     }
     this._reportedFailureKeys.add(key);
 
+    this._phoneHome(reason, details);
+
     this.dispatchEvent(new CustomEvent('playbackfailure', {
       detail: {
         reason,
@@ -2035,6 +2038,36 @@ export class MediaPlayer extends EventTarget {
         ...details,
       },
     }));
+  }
+
+  /**
+   * Phone-home: POST playback lifecycle events to the bridge so they appear
+   * in server logs — mirrors AVPlay's _phoneHome() for diagnostic parity.
+   */
+  _phoneHome(reason, details = {}) {
+    try {
+      const base = (this._bridgeBase || '').replace(/\/$/, '');
+      if (!base) return;
+      const v = this.video;
+      const body = JSON.stringify({
+        reason,
+        session: this._bridgeSessionId || '',
+        url: this._msproxyStreamUrl || '',
+        state: this.state,
+        positionMs: v ? Math.round((v.currentTime || 0) * 1000) : 0,
+        firstFrame: !!this._firstFrameFired,
+        durationMs: v ? Math.round((v.duration || 0) * 1000) : 0,
+        dims: v ? { width: v.videoWidth || 0, height: v.videoHeight || 0 } : {},
+        ts: Date.now(),
+        client: 'mse',
+        ...details,
+      });
+      fetch(`${base}/msproxy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }).catch(() => {});
+    } catch { /* ignore */ }
   }
 
   /**

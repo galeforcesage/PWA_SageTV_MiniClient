@@ -1356,7 +1356,7 @@ input[type="time"].eq-focused {
   display: flex;
   align-items: center;
   gap: 10px;
-  z-index: 180;
+  z-index: 1;  /* below canvas OSD (z:2) so server-drawn menus cover it */
   pointer-events: none;
 }
 
