@@ -1366,6 +1366,7 @@ function openSettings() {
 
   // Streaming
   document.getElementById('set-streaming-mode').value = g('streaming_mode', 'fixed');
+  document.getElementById('set-gpu-enhance').value = g('display_sink_override', 'auto');
 
   // Transcoding
   document.getElementById('set-transcode-vcodec').value = g('fixed_encoding/video_codec', 'H.264');
@@ -1500,6 +1501,7 @@ function saveSettings() {
 
   // Streaming
   s('streaming_mode', document.getElementById('set-streaming-mode').value);
+  s('display_sink_override', document.getElementById('set-gpu-enhance').value);
 
   // Transcoding
   s('fixed_encoding/video_codec', document.getElementById('set-transcode-vcodec').value);
