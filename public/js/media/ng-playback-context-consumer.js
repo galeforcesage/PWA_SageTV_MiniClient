@@ -27,6 +27,8 @@
 
 const FETCH_TIMEOUT_MS = 3000;
 
+import { SegmentTimeline } from './segment-timeline.js';
+
 export class NgPlaybackContextConsumer {
   /**
    * @param {import('./player.js').MediaPlayer} player
@@ -232,6 +234,17 @@ export class NgPlaybackContextConsumer {
       player._ngDurationMs = ctx.durationMs;
     }
 
+    // ── Segment timeline (multi-segment recordings) ──
+    if (ctx.segments && ctx.segments.items && ctx.segments.items.length > 0) {
+      player._segmentTimeline = new SegmentTimeline(ctx.segments);
+      if (player._segmentTimeline.isMultiSegment()) {
+        console.debug(`[NgContextConsumer] segments: ${player._segmentTimeline.segmentCount()} segs, ` +
+          `totalContent=${player._segmentTimeline.totalContentMs()}ms, hasGaps=${player._segmentTimeline.hasGaps()}`);
+      }
+    } else {
+      player._segmentTimeline = null;
+    }
+
     // ── Live edge ──
     const live = ctx.live;
     if (live && live.isLive) {
@@ -269,5 +282,6 @@ export class NgPlaybackContextConsumer {
     player._ngDurationMs = undefined;
     player._ngLivePlayableEndMs = null;
     player._ngLiveSafeSeekEndMs = null;
+    player._segmentTimeline = null;
   }
 }

@@ -51,19 +51,19 @@ public class TranscodeServlet extends HttpServlet {
      *
      * sage.Wizard.getInstance().getFileForID(id).getFile(0).getAbsolutePath()
      */
-    private static String resolveMediaFilePath(int mfid) {
+    private static String resolveMediaFilePath(int mfid, int segIndex) {
         try {
             Class<?> wizardCls = Class.forName("sage.Wizard");
             Object wizard = wizardCls.getMethod("getInstance").invoke(null);
             Object mf = wizardCls.getMethod("getFileForID", int.class).invoke(wizard, mfid);
             if (mf == null) return null;
-            Object f = mf.getClass().getMethod("getFile", int.class).invoke(mf, 0);
+            Object f = mf.getClass().getMethod("getFile", int.class).invoke(mf, segIndex);
             if (f instanceof File) {
                 File file = (File) f;
                 return file.getAbsolutePath();
             }
         } catch (Throwable t) {
-            log.warn("[Transcode] MFID {} resolution failed: {}", mfid, t.toString());
+            log.warn("[Transcode] MFID {} seg {} resolution failed: {}", mfid, segIndex, t.toString());
         }
         return null;
     }
@@ -97,12 +97,19 @@ public class TranscodeServlet extends HttpServlet {
                 resp.sendError(400, "Invalid mfid");
                 return;
             }
-            filePath = resolveMediaFilePath(mfid);
+            // Multi-segment: &seg=N selects which physical file (default 0)
+            int segIndex = 0;
+            String segStr = req.getParameter("seg");
+            if (segStr != null && !segStr.isEmpty()) {
+                try { segIndex = Math.max(0, Integer.parseInt(segStr.trim())); }
+                catch (NumberFormatException ignored) { /* default 0 */ }
+            }
+            filePath = resolveMediaFilePath(mfid, segIndex);
             if (filePath == null) {
-                resp.sendError(404, "MediaFile " + mfid + " not found or has no file");
+                resp.sendError(404, "MediaFile " + mfid + " seg " + segIndex + " not found or has no file");
                 return;
             }
-            log.info("[Transcode] Resolved mfid {} -> {}", mfid, filePath);
+            log.info("[Transcode] Resolved mfid {} seg {} -> {}", mfid, segIndex, filePath);
         }
 
         if (filePath == null || filePath.isEmpty()) {

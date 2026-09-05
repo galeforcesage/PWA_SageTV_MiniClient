@@ -57,8 +57,17 @@ public class MediaServerProxyServlet extends HttpServlet {
     };
 
     private static final int COPY_BUF = 512 * 1024;
-    /** Max idle (no new bytes appearing) before we give up on a live stream. */
-    private static final long LIVE_IDLE_TIMEOUT_MS = 30_000L;
+    /**
+     * Max idle (no new bytes appearing) before we consider the transcode done.
+     * A browser that buffers ahead will cause TCP back-pressure on out.write(),
+     * NOT a pause in SIZE growth — so this timeout only fires when the encoder
+     * genuinely stops producing.  120s is generous: even a slow encoder that
+     * stalls between GOPs should resume within this window.  A completed
+     * recording transcode finishes cleanly (avail==total stabilises and the
+     * XCODE_COMPLETE path below fires), so this is truly a safety net for
+     * abandoned live-TV streams.
+     */
+    private static final long LIVE_IDLE_TIMEOUT_MS = 120_000L;
     private static final long LIVE_POLL_MS = 10L;
     /** Collapse window: concurrent requests within this window for the same
      *  session skip XCODE_SETUP (AVPlay range probes). */
@@ -109,17 +118,20 @@ public class MediaServerProxyServlet extends HttpServlet {
         return 7818;
     }
 
-    /** {@code sage.Wizard.getInstance().getFileForID(id).getFile(0).getAbsolutePath()}. */
-    private static String resolveMediaFilePath(int mfid) {
+    /**
+     * {@code sage.Wizard.getInstance().getFileForID(id).getFile(segIndex).getAbsolutePath()}.
+     * @param segIndex 0-based segment index (multi-segment recordings have N physical files)
+     */
+    private static String resolveMediaFilePath(int mfid, int segIndex) {
         try {
             Class<?> wizardCls = Class.forName("sage.Wizard");
             Object wizard = wizardCls.getMethod("getInstance").invoke(null);
             Object mf = wizardCls.getMethod("getFileForID", int.class).invoke(wizard, mfid);
             if (mf == null) return null;
-            Object f = mf.getClass().getMethod("getFile", int.class).invoke(mf, 0);
+            Object f = mf.getClass().getMethod("getFile", int.class).invoke(mf, segIndex);
             if (f instanceof File) return ((File) f).getAbsolutePath();
         } catch (Throwable t) {
-            log.warn("[MsProxy] MFID {} resolution failed: {}", mfid, t.toString());
+            log.warn("[MsProxy] MFID {} seg {} resolution failed: {}", mfid, segIndex, t.toString());
         }
         return null;
     }
@@ -136,9 +148,16 @@ public class MediaServerProxyServlet extends HttpServlet {
                 resp.sendError(400, "Invalid mfid");
                 return;
             }
-            path = resolveMediaFilePath(mfid);
+            // Multi-segment: &seg=N selects which physical file (default 0)
+            int segIndex = 0;
+            String segStr = req.getParameter("seg");
+            if (segStr != null && !segStr.isEmpty()) {
+                try { segIndex = Math.max(0, Integer.parseInt(segStr.trim())); }
+                catch (NumberFormatException ignored) { /* default 0 */ }
+            }
+            path = resolveMediaFilePath(mfid, segIndex);
             if (path == null) {
-                resp.sendError(404, "MediaFile " + mfid + " not found or has no file");
+                resp.sendError(404, "MediaFile " + mfid + " seg " + segIndex + " not found or has no file");
                 return;
             }
         }
@@ -179,6 +198,7 @@ public class MediaServerProxyServlet extends HttpServlet {
         // seek opens a fresh /msproxy request, so a start-seek on setup is all
         // that's needed (no mid-stream seek command).
         long seekMs = parseSeekMillis(req.getParameter("seek"));
+        String sinkParam = parseSinkParam(req.getParameter("sink"));
         String sessionId = req.getParameter("session");
 
         Socket socket = null;
@@ -220,6 +240,7 @@ public class MediaServerProxyServlet extends HttpServlet {
                 // ignores keys it doesn't recognize, so this is forward/backward
                 // safe (older servers simply start at 0).
                 if (seekMs > 0) setup += ";ss=" + seekMs;
+                if (sinkParam != null) setup += ";sink=" + sinkParam;
                 log.info("[MsProxy] XCODE_SETUP: {} session={}", setup, sessionId);
                 sendLine(sockOut, setup);
                 String ack = readLine(in);
@@ -358,18 +379,22 @@ public class MediaServerProxyServlet extends HttpServlet {
                              InputStream in, OutputStream sockOut,
                              long avail, long total, String contentType,
                              boolean liveXcode) throws IOException {
-        // For a growing raw recording a client may seek by byte offset; for a
-        // transcode the output offset is stream position (start from 0).
+        // For a live xcode, the output is a sequential pipe — byte offsets are
+        // meaningless and Range requests would restart the transcode at the same
+        // -ss position.  Always stream from 0 and present as non-seekable so
+        // MSE appends forward instead of trying random-access byte ranges.
         long offset = 0;
-        String range = req.getHeader("Range");
-        if (range != null && range.toLowerCase(Locale.ROOT).startsWith("bytes=")) {
-            long dash = -1;
-            try {
-                String spec = range.substring(6).trim();
-                int d = spec.indexOf('-');
-                if (d > 0) dash = Long.parseLong(spec.substring(0, d).trim());
-            } catch (RuntimeException ignore) { /* stream from 0 */ }
-            if (dash > 0 && dash < avail) offset = dash;
+        if (!liveXcode) {
+            String range = req.getHeader("Range");
+            if (range != null && range.toLowerCase(Locale.ROOT).startsWith("bytes=")) {
+                long dash = -1;
+                try {
+                    String spec = range.substring(6).trim();
+                    int d = spec.indexOf('-');
+                    if (d > 0) dash = Long.parseLong(spec.substring(0, d).trim());
+                } catch (RuntimeException ignore) { /* stream from 0 */ }
+                if (dash > 0 && dash < avail) offset = dash;
+            }
         }
 
         resp.setStatus(200);
@@ -405,15 +430,32 @@ public class MediaServerProxyServlet extends HttpServlet {
                 // which manifests as avail no longer growing -> the idle timeout
                 // below. For a static/growing RAW file (not xcode) avail==total
                 // remains a valid completion signal.
-                boolean done = !liveXcode && (newAvail == newTotal) && offset >= newAvail;
                 if (newAvail > avail) {
                     avail = newAvail;
                     total = newTotal;
                     lastGrowthAt = System.currentTimeMillis();
                     continue;
                 }
-                if (done) { log.info("[MsProxy] stream complete ({} bytes, {}s)", offset,
-                    String.format("%.1f", (System.currentTimeMillis() - streamStart) / 1000.0)); break; }
+                // Completion: we've read everything AND the encoder is no
+                // longer producing.  For static files (!liveXcode) this is
+                // avail==total after we've consumed it all.  For a transcode
+                // of a COMPLETED recording, ffmpeg exits and the server's SIZE
+                // response stabilises with avail==total as well — treat two
+                // consecutive identical SIZE responses with offset>=avail as
+                // done (the first query lands here, the second confirms).
+                boolean staticDone = !liveXcode && (newAvail == newTotal) && offset >= newAvail;
+                // Guard: require newAvail > 0 so we never declare "done" before
+                // ffmpeg produces its first byte.  At stream start avail==total==0
+                // and lastGrowthAt is set to now(); without this guard, a slow
+                // ffmpeg probe phase (>2s) triggers xcodeDone on the 0==0 state.
+                boolean xcodeDone = liveXcode && newAvail > 0 && (newAvail == newTotal)
+                    && offset >= newAvail
+                    && (System.currentTimeMillis() - lastGrowthAt > 2_000L);
+                if (staticDone || xcodeDone) {
+                    log.info("[MsProxy] stream complete ({} bytes, {}s, xcode={})", offset,
+                        String.format("%.1f", (System.currentTimeMillis() - streamStart) / 1000.0), liveXcode);
+                    break;
+                }
                 if (System.currentTimeMillis() - lastGrowthAt > LIVE_IDLE_TIMEOUT_MS) {
                     log.info("[MsProxy] live stream idle {}ms after {} bytes, ending", LIVE_IDLE_TIMEOUT_MS, offset);
                     break;
@@ -550,6 +592,26 @@ public class MediaServerProxyServlet extends HttpServlet {
             return (long) (sec * 1000.0);
         } catch (NumberFormatException e) {
             return 0L;
+        }
+    }
+
+    /**
+     * Parse and validate the client's {@code &sink=<W>x<H>} parameter for live
+     * sink re-negotiation on monitor move.  Returns {@code "WxH"} if valid and
+     * within the 640–7680 × 480–4320 range, or {@code null} otherwise (fail-closed).
+     */
+    private static String parseSinkParam(String sinkParam) {
+        if (sinkParam == null || sinkParam.isEmpty()) return null;
+        String s = sinkParam.trim().toLowerCase(Locale.ROOT);
+        int xi = s.indexOf('x');
+        if (xi <= 0 || xi >= s.length() - 1) return null;
+        try {
+            int w = Integer.parseInt(s.substring(0, xi));
+            int h = Integer.parseInt(s.substring(xi + 1));
+            if (w < 640 || w > 7680 || h < 480 || h > 4320) return null;
+            return w + "x" + h;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

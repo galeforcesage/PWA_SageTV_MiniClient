@@ -96,6 +96,14 @@ export class MediaPlayer extends EventTarget {
     // this flag is set.
     this._userMuted = false;
 
+    // Live sink re-negotiation: tracks the current monitor's physical resolution
+    // so we can detect moves between monitors and re-open the transcode.
+    this._liveSinkOverride = null;   // one-shot "WxH" appended to next bridge URL
+    this._lastSinkW = 0;
+    this._lastSinkH = 0;
+    this._sinkDebounceTimer = null;
+    this._screenChangeCleanup = null;
+
     // Runtime telemetry state
     this._telemetrySequence = 0;
     this._reportedFailureKeys = new Set();
@@ -230,15 +238,30 @@ export class MediaPlayer extends EventTarget {
       // In bridge mode, endOfStream() is called during MediaSource teardown on
       // seek — the video fires 'ended' but we are about to restart the stream.
       // Only transition to EOS when NOT mid-seek (seeking flag or debounce timer).
-      if (this.bridgeMode && (this.seeking || this._seekDebounceTimer)) return;
+      if (this.bridgeMode && (this.seeking || this._seekDebounceTimer || this._sinkDebounceTimer)) return;
       this.state = PlayerState.EOS;
       this.dispatchEvent(new CustomEvent('eos'));
     });
 
     this.video.addEventListener('error', (e) => {
-      // In bridge mode, errors during MediaSource recreation on seek are expected and harmless.
+      // In bridge mode during an active flush/seek, the old MediaSource is being
+      // torn down — errors from the dying SourceBuffer are expected and harmless.
+      if (this.bridgeMode && this._currentRestartId) {
+        console.debug('[MediaPlayer] Ignoring video error during bridge flush/seek:', this.video.error?.message);
+        return;
+      }
+      // In bridge mode during normal playback: a real decode error (corrupt NAL,
+      // codec mismatch, etc.).  HTMLMediaElement.error stays set and poisons all
+      // future appendBuffer() calls, so we must recover via fallback.
       if (this.bridgeMode) {
-        console.debug('[MediaPlayer] Ignoring video error during bridge mode:', this.video.error?.message);
+        console.warn(`[MediaPlayer] Bridge decode error (code=${this.video.error?.code} msg=${this.video.error?.message}); attempting fallback`);
+        if (this._forceMsproxyTranscodeFallback()) return;
+        // Fallback not possible (already on bare browserhd) — report failure
+        this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
+          mode: 'bridge',
+          code: this.video.error?.code || null,
+          message: this.video.error?.message || 'HTMLVideoElement decode error in bridge mode',
+        });
         return;
       }
       // Pull-mode native decode failed (Tizen's canPlayType sometimes lies
@@ -601,11 +624,27 @@ export class MediaPlayer extends EventTarget {
 
         // pwa_mse + xcode: feed MSE via the shared bridge machinery,
         // sourced from /msproxy (override consumed by _startBridgeStream).
-        this._msproxyStreamUrl = msUrl;
+        // Chrome MSE cannot decode multichannel (5.1+) AAC — force stereo.
+        // The server may emit ac=6 for surround sources; cap to ac=2.
+        if (/;ac=([3-9]|\d{2,})/.test(mode)) {
+          const stereoMode = mode.replace(/;ac=\d+/, ';ac=2');
+          console.log(`[MediaPlayer] MSE stereo cap: ${mode} → ${stereoMode}`);
+          mode = stereoMode;
+        }
+        const mseMsUrl = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}`;
+        this._msproxyStreamUrl = mseMsUrl;
         this._msproxyAbsPath = absPath;   // for the force-full-transcode safety net
         this._msproxyMode = mode;
         await this._loadBridgeMode(absPath, hostname, null);
         if (seekSec > 0 && this.bridgeMode) {
+          // Cancel the deferred initial fetch — we're about to restart at the
+          // seek position.  Without this, the grace-timer fires and starts a
+          // competing stream at 0 whose PTS-0 data collides with the seek
+          // stream's PTS-0 data in the same SourceBuffer.
+          if (this._initialFetchTimer) {
+            clearTimeout(this._initialFetchTimer);
+            this._initialFetchTimer = null;
+          }
           this._flushAndRestart(absPath, seekSec);
         }
         return;
@@ -634,6 +673,7 @@ export class MediaPlayer extends EventTarget {
     this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
     this._ngFmtAttempted = false;  // allow ng_fmt fast-path for this stream
+    this.startSinkMonitor();
     // Set up MSE
     const MSClass = this._getMediaSourceClass();
     if (!MSClass) {
@@ -735,14 +775,19 @@ export class MediaPlayer extends EventTarget {
     // the server-produced fMP4 from /msproxy instead of the bridge's own ffmpeg
     // /transcode — same MSE consumption, zero bridge transcoding.
     let bridgeUrl;
+    const sinkSuffix = this._liveSinkOverride ? `&sink=${this._liveSinkOverride}` : '';
+    const segSuffix = (this._segmentTimeline && this._currentSegIndex >= 0)
+      ? `&seg=${this._currentSegIndex}` : '';
     if (this._msproxyStreamUrl) {
-      bridgeUrl = `${this._msproxyStreamUrl}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+      bridgeUrl = `${this._msproxyStreamUrl}&seek=${seekSec}&session=${this._bridgeSessionId}${sinkSuffix}${segSuffix}`;
     } else {
       const src = (this._bridgeMfid !== null && this._bridgeMfid !== undefined)
         ? `mfid=${encodeURIComponent(this._bridgeMfid)}`
         : `file=${encodeURIComponent(filePath)}`;
-      bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}`;
+      bridgeUrl = `${this._bridgeBase}/transcode?${src}&seek=${seekSec}&session=${this._bridgeSessionId}${sinkSuffix}${segSuffix}`;
     }
+    // Clear the one-shot override after use
+    this._liveSinkOverride = null;
     console.log(`[MediaPlayer] Bridge stream: ${bridgeUrl}`);
 
     // Signal that we're buffering the opening of the stream so the UI can show
@@ -783,7 +828,15 @@ export class MediaPlayer extends EventTarget {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          console.log(`[MediaPlayer] Bridge stream ended, total: ${(totalBytes / 1024).toFixed(0)}KB`);
+          // Stash the current playhead so a server-initiated reopen can
+          // resume where the user was watching instead of restarting at 0.
+          const playheadMs = this.getMediaTimeMillis();
+          if (playheadMs > 0) {
+            this._lastPlayheadMs = playheadMs;
+            console.log(`[MediaPlayer] Bridge stream ended at playhead ${(playheadMs / 1000).toFixed(1)}s, total: ${(totalBytes / 1024).toFixed(0)}KB`);
+          } else {
+            console.log(`[MediaPlayer] Bridge stream ended, total: ${(totalBytes / 1024).toFixed(0)}KB`);
+          }
           // Signal EOS
           if (this.mediaSource && this.mediaSource.readyState === 'open') {
             // Wait for all pending appends
@@ -944,7 +997,11 @@ export class MediaPlayer extends EventTarget {
         // Hint resolved but codecs are null (e.g. MPEG-2/VC1 not MSE-compatible).
         // Pre-validation: if the video codec is unsupported by MSE, force full
         // transcode immediately instead of waiting for sniff → fail → retry.
-        if (this._formatHint.video && !hintCodecs.video) {
+        // BUT: skip when we're already in a transcode mode — the _formatHint
+        // describes the SOURCE codec, not the transcoded output.  The server
+        // already decided to transcode to H.264; let the init-segment sniff
+        // path confirm the actual output codec.
+        if (this._formatHint.video && !hintCodecs.video && !this._msproxyMode?.startsWith('xcode:')) {
           console.warn(`[MediaPlayer] ng_fmt: video codec ${this._formatHint.video} is not MSE-compatible — forcing transcode`);
           if (this._forceMsproxyTranscodeFallback()) return 'fallback';
         }
@@ -997,7 +1054,8 @@ export class MediaPlayer extends EventTarget {
     this.sourceBuffer.mode = 'segments';
     this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
     this.sourceBuffer.addEventListener('error', (e) => {
-      console.error('[MediaPlayer] SourceBuffer error:', e);
+      console.error('[MediaPlayer] SourceBuffer error:', e,
+        'mime:', this._cachedBridgeMime, 'mode:', this._msproxyMode, 'hint:', this._formatHint);
       // A decode/append error on a remux stream: force a full transcode.
       this._forceMsproxyTranscodeFallback();
     });
@@ -1008,6 +1066,14 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
+   * For server-side input-seek (;ss=), the fMP4 PTS starts at ~0 regardless of
+   * the absolute recording position.  Do NOT use timestampOffset — it causes
+   * decoder stalls at large values.  Instead, keep _bridgeTimeOffsetMs for
+   * getMediaTimeMillis() and let the video element play from PTS 0.
+   * Scrubber/server position = _bridgeTimeOffsetMs + video.currentTime * 1000.
+   */
+
+  /**
    * If the current stream came from /msproxy in a copy/remux mode (not already a
    * full transcode), reload it forcing xcode:browserhd (H.264/AAC) so playback
    * survives even when the browser can't handle the sniffed codec. Returns true
@@ -1016,17 +1082,30 @@ export class MediaPlayer extends EventTarget {
   _forceMsproxyTranscodeFallback() {
     if (!this._msproxyAbsPath) return false;
     const mode = this._msproxyMode || '';
-    if (mode === 'xcode:browserhd') return false;   // already full transcode — nothing more to try
-    console.warn(`[MediaPlayer] SourceBuffer/codec failure on ${mode}; forcing full transcode (xcode:browserhd)`);
+    // Already bare browserhd with no param suffix — nothing more to try.
+    if (mode === 'xcode:browserhd') return false;
+    // If mode has param suffixes (e.g. xcode:browserhd;acodec=aac;ac=6), retry
+    // with bare browserhd — the server picks default audio settings which may
+    // produce compatible output when the parameterized version fails.
+    const retryMode = 'xcode:browserhd';
+    // Preserve the current playhead so the retry resumes where the user was,
+    // not at 0.
+    const resumeSec = this.getMediaTimeMillis() / 1000;
+    console.warn(`[MediaPlayer] SourceBuffer/codec failure on ${mode}; retrying as ${retryMode} at ${resumeSec.toFixed(1)}s`);
     const absPath = this._msproxyAbsPath;
     const host = this._pullHostname;
     if (this._bridgeAbortController) { try { this._bridgeAbortController.abort(); } catch { /* ignore */ } }
+    // The fallback changes the codec (e.g. HEVC copyv → H.264 browserhd), so
+    // the cached MIME from the previous attempt is invalid.  Clear it so the
+    // new stream's init segment is sniffed fresh instead of reusing the old
+    // SourceBuffer codec (which causes "doesn't match SourceBuffer codecs").
+    this._cachedBridgeMime = null;
     // Abort any in-flight SourceBuffer append first: loadMsProxy() closes the
     // MediaSource, and closing it mid-update throws InvalidStateError on Chromium.
     if (this.sourceBuffer && this.sourceBuffer.updating) {
       try { this.sourceBuffer.abort(); } catch { /* ignore */ }
     }
-    this.loadMsProxy(absPath, 'xcode:browserhd', host, 0);
+    this.loadMsProxy(absPath, retryMode, host, resumeSec);
     return true;
   }
 
@@ -1529,6 +1608,7 @@ export class MediaPlayer extends EventTarget {
       fetch(`${this._bridgeBase}/transcode/stop?session=${this._bridgeSessionId}`).catch(() => {});
     }
     this.bridgeMode = false;
+    this.stopSinkMonitor();
     this._nativeXcodeMode = false;
     this._nativeXcodeOffsetMs = 0;
     this._bridgeFilePath = null;
@@ -1583,6 +1663,7 @@ export class MediaPlayer extends EventTarget {
     this._pushBusy = false;
     this._totalPushed = 0;
     this._appendErrorLogged = false;
+    this._currentSegIndex = 0;
     this.state = PlayerState.STOPPED;
   }
 
@@ -1635,8 +1716,18 @@ export class MediaPlayer extends EventTarget {
         this._bridgeTimeOffsetMs = timeMS;
         this._bridgeNeedTimeReset = true;
         this.seeking = false;
-        console.log(`[MediaPlayer] MSPROXY initial seek to ${timeSec.toFixed(1)}s — starting server transcode at target (no teardown)`);
-        this._startBridgeStream(this._bridgeFilePath, timeSec);
+        // Multi-segment: resolve content time → {seg, fileRelativeMs}
+        let actualSeekSec = timeSec;
+        if (this._segmentTimeline && this._segmentTimeline.isMultiSegment()) {
+          const pos = this._segmentTimeline.contentToPosition(timeMS);
+          this._currentSegIndex = pos.seg;
+          actualSeekSec = pos.fileRelativeMs / 1000;
+          console.log(`[MediaPlayer] MSPROXY initial seek: content=${timeSec.toFixed(1)}s → seg${pos.seg} fileRel=${actualSeekSec.toFixed(1)}s`);
+        } else {
+          this._currentSegIndex = 0;
+          console.log(`[MediaPlayer] MSPROXY initial seek to ${timeSec.toFixed(1)}s — starting server transcode at target (no teardown)`);
+        }
+        this._startBridgeStream(this._bridgeFilePath, actualSeekSec);
         return;
       }
 
@@ -1657,16 +1748,37 @@ export class MediaPlayer extends EventTarget {
       }
 
       // ── Out of buffer → heavy path: debounced flush + ffmpeg restart ──
-      console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s (out of buffer — restart)`);
-      this._scheduleBridgeRestartSeek(timeMS, timeSec);
+      // Multi-segment: resolve content time → {seg, fileRelativeMs}
+      let restartSeekSec = timeSec;
+      if (this._segmentTimeline && this._segmentTimeline.isMultiSegment()) {
+        const pos = this._segmentTimeline.contentToPosition(timeMS);
+        this._currentSegIndex = pos.seg;
+        restartSeekSec = pos.fileRelativeMs / 1000;
+        console.log(`[MediaPlayer] Bridge seek: content=${timeSec.toFixed(1)}s → seg${pos.seg} fileRel=${restartSeekSec.toFixed(1)}s (out of buffer — restart)`);
+      } else {
+        this._currentSegIndex = 0;
+        console.log(`[MediaPlayer] Bridge seek to ${timeSec.toFixed(1)}s (out of buffer — restart)`);
+      }
+      this._scheduleBridgeRestartSeek(timeMS, restartSeekSec);
     } else if (this._nativeXcodeMode && this._msproxyAbsPath) {
       // Native xcode mode: can't HTTP-range seek within a streaming transcode.
-      // Reload the msproxy URL with &seek=<ms> so the server starts a new
+      // Reload the msproxy URL with &seek= so the server starts a new
       // transcode at the target position.
       this._nativeXcodeOffsetMs = timeMS;
       const base = (this._bridgeBase || '').replace(/\/$/, '');
-      const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${timeMS}`;
-      console.log(`[MediaPlayer] Native xcode seek to ${timeSec.toFixed(1)}s — reloading msproxy`);
+      let nativeSeekMs = timeMS;
+      let segParam = '';
+      if (this._segmentTimeline && this._segmentTimeline.isMultiSegment()) {
+        const pos = this._segmentTimeline.contentToPosition(timeMS);
+        this._currentSegIndex = pos.seg;
+        nativeSeekMs = pos.fileRelativeMs;
+        segParam = `&seg=${pos.seg}`;
+        console.log(`[MediaPlayer] Native xcode seek: content=${timeSec.toFixed(1)}s → seg${pos.seg} fileRel=${(nativeSeekMs/1000).toFixed(1)}s`);
+      } else {
+        this._currentSegIndex = 0;
+        console.log(`[MediaPlayer] Native xcode seek to ${timeSec.toFixed(1)}s — reloading msproxy`);
+      }
+      const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${nativeSeekMs}${segParam}`;
       this.video.src = seekUrl;
       this.video.load();
     } else {
@@ -1792,6 +1904,12 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController.abort();
       this._bridgeAbortController = null;
     }
+    // Cancel any deferred initial-fetch timer to prevent a stale stream-at-0
+    // from racing with the new seek stream.
+    if (this._initialFetchTimer) {
+      clearTimeout(this._initialFetchTimer);
+      this._initialFetchTimer = null;
+    }
     this._pushQueue = [];
 
     // Tear down existing MediaSource completely — a fresh ffmpeg process produces
@@ -1866,7 +1984,9 @@ export class MediaPlayer extends EventTarget {
       this._initAccumLen = 0;
     }
 
-    // Now start the new stream.
+    // Now start the new stream.  Clear the restart guard so the video error
+    // handler knows we're back to normal playback (not mid-flush).
+    this._currentRestartId = null;
     this._startBridgeStream(filePath, seekSec);
   }
 
@@ -1903,6 +2023,18 @@ export class MediaPlayer extends EventTarget {
 
   getState() {
     return this.state;
+  }
+
+  /**
+   * Return the last known playhead position (ms) from a bridge stream that
+   * ended prematurely (e.g. the msproxy idle-killed the session).  Lets the
+   * connection layer resume at the right spot when the server re-issues
+   * OPENURL.  Returns 0 if no stashed position.
+   */
+  consumeLastPlayheadMs() {
+    const ms = this._lastPlayheadMs || 0;
+    this._lastPlayheadMs = 0;
+    return ms;
   }
 
   setMute(muted) {
@@ -2079,6 +2211,94 @@ export class MediaPlayer extends EventTarget {
   setBridgeBase(base) {
     if (typeof base !== 'string') { this._bridgeBase = ''; return; }
     this._bridgeBase = base.replace(/\/$/, '');
+  }
+
+  // ── Live sink re-negotiation on monitor move ─────────────────────────────
+  // Detects when the browser window moves to a monitor with a different
+  // physical resolution.  Triggers a debounced re-open of the transcode at the
+  // current playback position with the new sink=WxH token so the server can
+  // re-derive the enhancement tier (§3.3 of NGServerVideoEnhancement.md).
+
+  /** Measure the current monitor's physical pixel dimensions. */
+  _measureSink() {
+    const dpr = window.devicePixelRatio;
+    if (!dpr || !isFinite(dpr) || dpr <= 0) return null;
+    const w = Math.round(screen.width * dpr);
+    const h = Math.round(screen.height * dpr);
+    if (w < 640 || h < 480 || w > 7680 || h > 4320) return null;
+    return { w, h };
+  }
+
+  /** Start listening for screen/monitor changes during playback. */
+  startSinkMonitor() {
+    this.stopSinkMonitor();
+    const sink = this._measureSink();
+    if (sink) { this._lastSinkW = sink.w; this._lastSinkH = sink.h; }
+
+    const onScreenChange = () => this._onSinkMaybeChanged();
+    const cleanups = [];
+
+    // Preferred: Window Management API (screenschange + currentScreen.change)
+    if (typeof window.getScreenDetails === 'function') {
+      window.getScreenDetails().then(details => {
+        if (details.addEventListener) {
+          details.addEventListener('screenschange', onScreenChange);
+          cleanups.push(() => details.removeEventListener('screenschange', onScreenChange));
+        }
+        if (details.currentScreen?.addEventListener) {
+          details.currentScreen.addEventListener('change', onScreenChange);
+          cleanups.push(() => details.currentScreen.removeEventListener('change', onScreenChange));
+        }
+      }).catch(() => {});
+    }
+
+    // Fallback: matchMedia resolution change (fires when DPR changes on move)
+    const mq = window.matchMedia?.(`(resolution: ${window.devicePixelRatio}dppx)`);
+    if (mq?.addEventListener) {
+      mq.addEventListener('change', onScreenChange);
+      cleanups.push(() => mq.removeEventListener('change', onScreenChange));
+    }
+
+    // Note: window 'resize' deliberately omitted — it fires on layout changes
+    // (e.g. video going fullscreen) which don't change monitor resolution. The
+    // matchMedia and Window Management API listeners are sufficient.
+
+    this._screenChangeCleanup = () => cleanups.forEach(fn => fn());
+  }
+
+  /** Stop listening for screen changes. */
+  stopSinkMonitor() {
+    if (this._screenChangeCleanup) {
+      this._screenChangeCleanup();
+      this._screenChangeCleanup = null;
+    }
+    if (this._sinkDebounceTimer) {
+      clearTimeout(this._sinkDebounceTimer);
+      this._sinkDebounceTimer = null;
+    }
+  }
+
+  /** Called when screen may have changed — debounce and check. */
+  _onSinkMaybeChanged() {
+    if (this._sinkDebounceTimer) clearTimeout(this._sinkDebounceTimer);
+    this._sinkDebounceTimer = setTimeout(() => {
+      this._sinkDebounceTimer = null;
+      const sink = this._measureSink();
+      if (!sink) return;
+      // Only re-open if the resolution actually changed
+      if (sink.w === this._lastSinkW && sink.h === this._lastSinkH) return;
+      const oldW = this._lastSinkW, oldH = this._lastSinkH;
+      this._lastSinkW = sink.w;
+      this._lastSinkH = sink.h;
+
+      // Only re-open during active bridge playback with an enhanced stream
+      if (!this.bridgeMode || this.state !== PlayerState.PLAY) return;
+
+      console.log(`[MediaPlayer] Sink changed ${oldW}x${oldH} → ${sink.w}x${sink.h}, re-opening transcode`);
+      this._liveSinkOverride = `${sink.w}x${sink.h}`;
+      const currentSec = this.getMediaTimeMillis() / 1000;
+      this._flushAndRestart(this._bridgeFilePath, currentSec);
+    }, 500);  // 500ms debounce for rapid multi-monitor drags
   }
 
   /**
