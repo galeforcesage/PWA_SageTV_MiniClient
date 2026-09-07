@@ -160,6 +160,7 @@ export class MediaPlayer extends EventTarget {
       'video/mp4v-es': 'mp4v.20.8',
       'video/x-ms-wmv': null,  // VC1 — not MSE-compatible
       'video/mpeg2': null,     // MPEG-2 — not MSE-compatible
+      'video/mpeg': null,      // MPEG-2 (alternate MIME) — not MSE-compatible
     };
     const audioMap = {
       'audio/mp4a-latm': 'mp4a.40.2',
@@ -664,6 +665,115 @@ export class MediaPlayer extends EventTarget {
     }
   }
 
+  // ── CMAF/fMP4 HLS playback ────────────────────────────────────────────────
+  // Server Step 2: iosstream_*_fmp4.m3u8 + _init.mp4 + _N.m4s
+  // Safari/iOS: native <video src=m3u8> — zero library, lowest power.
+  // Chromium/Firefox: hls.js manages MSE SourceBuffers internally.
+  // Replaces the entire _startBridgeStream() fetch→appendBuffer loop for
+  // xcode modes. Ring buffer, manual eviction, codec sniffing, and
+  // SourceBuffer error chain are all bypassed.
+
+  /**
+   * Play via the server's CMAF/fMP4 HLS endpoint.
+   * @param {string} playlistUrl  full URL to _fmp4.m3u8 (bridge-proxied or direct)
+   */
+  async loadCmafHls(playlistUrl) {
+    this.stop();
+    this.bridgeMode = false;
+    this._cmafHlsMode = true;
+    this._cmafPlaylistUrl = playlistUrl;
+    this._bridgeSessionId = 'cmaf-' + Date.now();
+    this.serverEOS = false;
+    this._firstFrameEmitted = false;
+
+    this.state = PlayerState.LOADED;
+    this.dispatchEvent(new CustomEvent('buffering'));
+
+    // ── Path A: Safari (Mac + iPad/iPhone) — native HLS ──────────────
+    if (this._canPlayNativeHls()) {
+      console.log(`[MediaPlayer] CMAF HLS native: ${playlistUrl}`);
+      this.video.src = playlistUrl;
+
+      // iOS autoplay: prime with muted play, unmute on first timeupdate
+      if (this._isIOS() && !this._playbackPrimed) {
+        this.video.muted = true;
+        this.video.play().catch(() => {});
+        const unmute = () => {
+          if (!this._userMuted) this.video.muted = false;
+          this.video.removeEventListener('timeupdate', unmute);
+        };
+        this.video.addEventListener('timeupdate', unmute);
+      } else {
+        if (!this._userMuted) this.video.muted = false;
+        this.video.play().catch(() => {});
+      }
+      this.state = PlayerState.PLAY;
+      return;
+    }
+
+    // ── Path B: Chromium / Firefox — hls.js over MSE ─────────────────
+    if (!window.Hls) {
+      try {
+        await this._loadScript([
+          '/js/lib/hls.min.js',
+          'https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js',
+        ]);
+      } catch {
+        console.error('[MediaPlayer] hls.js not available for CMAF HLS');
+        this._emitPlaybackFailure('HLS_UNSUPPORTED', { mode: 'cmaf-hls' });
+        return;
+      }
+    }
+
+    if (!window.Hls || !Hls.isSupported()) {
+      console.error('[MediaPlayer] hls.js not supported');
+      this._emitPlaybackFailure('HLS_UNSUPPORTED', { mode: 'cmaf-hls' });
+      return;
+    }
+
+    console.log(`[MediaPlayer] CMAF HLS via hls.js: ${playlistUrl}`);
+    this._hls = new Hls({
+      lowLatencyMode: false,       // VOD-first, no LL-HLS tags yet
+      backBufferLength: 30,        // 30s behind playhead (REW 8/15/30s)
+      maxBufferLength: 30,         // 30s ahead
+      enableWorker: true,
+    });
+
+    this._hls.loadSource(playlistUrl);
+    this._hls.attachMedia(this.video);
+
+    this._hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      console.log('[MediaPlayer] CMAF HLS manifest parsed');
+      if (!this._userMuted) this.video.muted = false;
+      this.video.play().catch(() => {});
+      this.state = PlayerState.PLAY;
+    });
+
+    this._hls.on(Hls.Events.FRAG_LOADED, () => {
+      this._emitFirstFrameOnce();
+    });
+
+    this._hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data.fatal) return;
+      console.error('[MediaPlayer] CMAF HLS fatal:', data.type, data.details);
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        this._hls.recoverMediaError();
+      } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        this._hls.startLoad();
+      } else {
+        this._emitPlaybackFailure('HLS_FATAL', {
+          mode: 'cmaf-hls',
+          type: data.type,
+          details: data.details,
+        });
+      }
+    });
+  }
+
+  _canPlayNativeHls() {
+    return this.video.canPlayType('application/vnd.apple.mpegurl') !== '';
+  }
+
   /**
    * BRIDGE mode: fetch transcoded H.264+AAC fragmented MP4 from bridge's ffmpeg.
    * Bridge runs on same machine as SageTV, reads file directly, transcodes with system ffmpeg.
@@ -827,6 +937,7 @@ export class MediaPlayer extends EventTarget {
       let totalBytes = 0;
       let autoPlayed = false;
       this._startBandwidthTracking();
+      this._startEvictionTimer();
 
       while (true) {
         const { done, value } = await reader.read();
@@ -970,7 +1081,10 @@ export class MediaPlayer extends EventTarget {
     // ── Fast path: ng_fmt hint ──────────────────────────────────────────
     // If the server provided format info, try to create SourceBuffer without
     // waiting for the full moov. This eliminates init-segment sniff latency.
-    if (this._formatHint && !this._ngFmtAttempted) {
+    // SKIP when in xcode/transcode mode: the hint describes the SOURCE codec
+    // (e.g. MPEG-2/AC3), not the transcoded output (H.264/AAC). Using it
+    // would create a SourceBuffer with wrong codecs → APPEND_FAILED.
+    if (this._formatHint && !this._ngFmtAttempted && !this._msproxyMode?.startsWith('xcode:')) {
       this._ngFmtAttempted = true;
       const hintCodecs = this._ngFmtToMseCodecs(this._formatHint);
       if (hintCodecs && (hintCodecs.video || hintCodecs.audio)) {
@@ -1593,6 +1707,7 @@ export class MediaPlayer extends EventTarget {
     this.video.pause();
     this._lastDestRect = null;
     this._stopBandwidthTracking();
+    this._stopEvictionTimer();
     this._stopGapMonitor();
 
     // Clear seeking state
@@ -1633,6 +1748,8 @@ export class MediaPlayer extends EventTarget {
     this._initAccumLen = 0;
     this._ngFmtAttempted = false;
     this._formatHint = null;
+    this._cmafHlsMode = false;
+    this._cmafPlaylistUrl = null;
 
     if (this._hls) {
       this._hls.destroy();
@@ -1709,6 +1826,14 @@ export class MediaPlayer extends EventTarget {
         timeMS = this._ngLiveSafeSeekEndMs;
         timeSec = timeMS / 1000;
       }
+    }
+
+    if (this._cmafHlsMode) {
+      // CMAF HLS: both native HLS and hls.js handle seek by fetching the
+      // right .m4s segments. Server transparently repositions encoder for
+      // not-yet-produced parts. No restart, no URL change.
+      this.video.currentTime = timeSec;
+      return;
     }
 
     if (this.bridgeMode && this._bridgeFilePath) {
@@ -2324,17 +2449,59 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
-   * Evict old data from the source buffer when quota is exceeded.
+   * Evict old data from the source buffer. Called both proactively (timer)
+   * and reactively (QuotaExceededError). Adaptive: keeps a generous window
+   * behind the playhead when buffer usage is low (instant REW), but trims
+   * aggressively when approaching quota to prevent fetch stalls.
    */
   _evictBuffer() {
     if (!this.sourceBuffer || this.sourceBuffer.updating) return;
+    if (!this.mediaSource || this.mediaSource.readyState !== 'open') return;
 
     const currentTime = this.video.currentTime;
     const buffered = this.sourceBuffer.buffered;
-    if (buffered.length > 0 && currentTime > 30) {
+    if (buffered.length === 0 || currentTime < 1) return;
+
+    // Estimate total bytes buffered (bandwidth × buffer duration).
+    const bufStart = buffered.start(0);
+    const bufEnd = buffered.end(buffered.length - 1);
+    const bufDurationSec = bufEnd - bufStart;
+    const bwBps = (this._bwKbps || 5000) * 125;  // kbps → bytes/sec
+    const estimatedBytes = bufDurationSec * bwBps;
+
+    // Chrome SourceBuffer quota is ~150 MB; start trimming at 100 MB.
+    // Keep 30s behind playhead when relaxed (instant REW); shrink to 5s
+    // when buffer pressure is high.
+    const QUOTA_SOFT = 100 * 1024 * 1024;
+    const QUOTA_HARD = 140 * 1024 * 1024;
+    let keepBehindSec;
+    if (estimatedBytes > QUOTA_HARD) {
+      keepBehindSec = 5;       // emergency: keep minimum
+    } else if (estimatedBytes > QUOTA_SOFT) {
+      keepBehindSec = 15;      // moderate pressure
+    } else {
+      keepBehindSec = 30;      // relaxed: full REW window
+    }
+
+    const evictBefore = currentTime - keepBehindSec;
+    if (evictBefore > 0.5 && bufStart < evictBefore - 0.5) {
       try {
-        this.sourceBuffer.remove(0, currentTime - 10);
-      } catch {/* ignore */}
+        this.sourceBuffer.remove(bufStart, evictBefore);
+      } catch { /* ignore — updating or detached */ }
+    }
+  }
+
+  _startEvictionTimer() {
+    this._stopEvictionTimer();
+    // Run every 3s — frequent enough to stay ahead of high-bitrate streams
+    // filling the ~150 MB SourceBuffer quota.
+    this._evictionTimer = setInterval(() => this._evictBuffer(), 3000);
+  }
+
+  _stopEvictionTimer() {
+    if (this._evictionTimer) {
+      clearInterval(this._evictionTimer);
+      this._evictionTimer = null;
     }
   }
 

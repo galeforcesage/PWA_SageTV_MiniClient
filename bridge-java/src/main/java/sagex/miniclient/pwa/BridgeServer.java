@@ -141,6 +141,11 @@ public class BridgeServer {
         // client picks the mode (client-authoritative).
         context.addServlet(new ServletHolder("msproxy", new MediaServerProxyServlet()), "/msproxy");
 
+        // CMAF/fMP4 HLS proxy — same-origin CORS proxy for the server's
+        // iosstream_*_fmp4.m3u8 / _init.mp4 / _N.m4s endpoints. Required for
+        // hls.js (Chromium/Firefox) where the SageTV HTTP port is cross-origin.
+        context.addServlet(new ServletHolder("cmaf-proxy", new CmafProxyServlet()), "/cmaf/*");
+
         // Server info API — probes ffmpeg capabilities for profile auto-detection
         context.addServlet(new ServletHolder("server-info", new ServerInfoServlet(ffmpegPath)), "/api/server-info");
 

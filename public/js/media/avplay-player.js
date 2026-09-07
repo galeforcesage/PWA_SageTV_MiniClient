@@ -358,6 +358,16 @@ export class AVPlayPlayer extends EventTarget {
     return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl);
   }
 
+  /**
+   * Play via the server's CMAF/fMP4 HLS endpoint.
+   * AVPlay natively plays HLS — just open the m3u8 URL.
+   * @param {string} playlistUrl  full URL to _fmp4.m3u8
+   */
+  async loadCmafHls(playlistUrl) {
+    console.log(`[AVPlay] loadCmafHls: ${playlistUrl}`);
+    return this.load(0, 0, '', playlistUrl, this._pullHostname || '', false, 0, null);
+  }
+
   _installListener() {
     const av = this._avplay;
     av.setListener({

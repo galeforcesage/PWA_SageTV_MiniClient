@@ -3389,8 +3389,24 @@ export class MiniClientConnection extends EventTarget {
           // to the on-disk file and remuxes/transcodes to HD fMP4 for MSE ???
           // bypassing HTTPLS entirely. Falls through to normal load() for any
           // non-iosstream URL (direct pull paths, push, etc.).
-          const iosMatch = urlString.match(/iosstream_[0-9a-fA-F]+_(\d+)_\d+_list\.m3u8/i);
-          if (iosMatch) {
+          // ── CMAF/fMP4 HLS (server Step 2): the server's new iosstream
+          // endpoint emits CMAF segments (H.264+AAC fMP4, finalized/atomic).
+          // Detect _fmp4.m3u8 and route to loadCmafHls() — bypasses the entire
+          // msproxy ring/MSE path. Safari plays natively, Chromium uses hls.js.
+          const cmafMatch = urlString.match(/iosstream_([0-9a-fA-F]+)_(\d+)_(\d+)_(\d+)_fmp4\.m3u8/i);
+          if (cmafMatch) {
+            const [, clientName, mfId, segNum, bwKbps] = cmafMatch;
+            console.log(`[Media] CMAF HLS detected: client=${clientName} mfid=${mfId} seg=${segNum} bw=${bwKbps}`);
+            // Proxy through bridge for CORS (hls.js XHR needs same-origin)
+            const bridgeBase = this.bridgeUrl.replace(/^ws/, 'http').replace(/\/$/, '');
+            const cmafUrl = `${bridgeBase}/cmaf/iosstream_${clientName}_${mfId}_${segNum}_${bwKbps}_fmp4.m3u8`;
+            this.mediaPlayer.loadCmafHls(cmafUrl);
+          } else
+
+          // ── Legacy iosstream (TS HLS, 480x272): extract MediaFile ID and
+          // route to bridge /transcode for HD fMP4 — bypassing HTTPLS entirely.
+          if (urlString.match(/iosstream_[0-9a-fA-F]+_(\d+)_\d+_list\.m3u8/i)) {
+            const iosMatch = urlString.match(/iosstream_[0-9a-fA-F]+_(\d+)_\d+_list\.m3u8/i);
             const mfid = parseInt(iosMatch[1], 10);
             console.log(`[Media] Server HLS (iosstream) detected for mfid=${mfid}; routing to bridge transcode (HD, bypass HTTPLS)`);
             this.mediaPlayer.loadBridgeMfid(mfid, this.serverHost, 0);
