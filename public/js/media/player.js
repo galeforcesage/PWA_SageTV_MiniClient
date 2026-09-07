@@ -256,12 +256,15 @@ export class MediaPlayer extends EventTarget {
       if (this.bridgeMode) {
         console.warn(`[MediaPlayer] Bridge decode error (code=${this.video.error?.code} msg=${this.video.error?.message}); attempting fallback`);
         if (this._forceMsproxyTranscodeFallback()) return;
-        // Fallback not possible (already on bare browserhd) — report failure
+        // Fallback not possible (already on bare browserhd) — report and stop
+        // cleanly so the stuck frame clears and the server knows playback ended.
+        console.error('[MediaPlayer] Unrecoverable bridge decode error — stopping playback');
         this._emitPlaybackFailure('VIDEO_ELEMENT_ERROR', {
           mode: 'bridge',
           code: this.video.error?.code || null,
           message: this.video.error?.message || 'HTMLVideoElement decode error in bridge mode',
         });
+        this.stop();
         return;
       }
       // Pull-mode native decode failed (Tizen's canPlayType sometimes lies
