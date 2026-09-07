@@ -76,6 +76,7 @@ public class TranscodeServlet extends HttpServlet {
         String sessionId = req.getParameter("session");
 
         if (sessionId == null || sessionId.isEmpty()) sessionId = "default";
+        String clientIp = MediaServerProxyServlet.resolveClientIp(req);
         double seekSec = 0;
         if (seekStr != null) {
             try {
@@ -161,7 +162,7 @@ public class TranscodeServlet extends HttpServlet {
         List<String> ffmpegArgs = useRemux
                 ? buildRemuxArgs(filePath, seekSec)
                 : buildArgs(filePath, seekSec, hwAccel, isLive);
-        log.info("[Transcode] ffmpeg command: {}", String.join(" ", ffmpegArgs));
+        log.info("[Transcode] ffmpeg command: {} clientIp={}", String.join(" ", ffmpegArgs), clientIp);
 
         ProcessBuilder pb = new ProcessBuilder(ffmpegArgs);
         pb.redirectErrorStream(false);

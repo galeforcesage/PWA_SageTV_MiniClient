@@ -67,6 +67,12 @@ public class TransferProxyServlet extends HttpServlet {
                 conn.setRequestProperty("X-Transfer-Token", token);
             }
 
+            // Forward the real client IP so the backend can apply local-vs-remote policy
+            String clientIp = MediaServerProxyServlet.resolveClientIp(req);
+            if (clientIp != null && !clientIp.isEmpty()) {
+                conn.setRequestProperty("X-Forwarded-For", clientIp);
+            }
+
             int status = conn.getResponseCode();
             resp.setStatus(status);
 

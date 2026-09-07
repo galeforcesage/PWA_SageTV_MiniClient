@@ -105,6 +105,21 @@ public class MediaServerProxyServlet extends HttpServlet {
         this.port = port <= 0 ? 7818 : port;
     }
 
+    /**
+     * Extract the real client IP from the inbound HTTP request.
+     * Checks {@code X-Forwarded-For} first (in case there's an upstream reverse
+     * proxy), then falls back to {@code getRemoteAddr()}.
+     */
+    static String resolveClientIp(HttpServletRequest req) {
+        String xff = req.getHeader("X-Forwarded-For");
+        if (xff != null && !xff.trim().isEmpty()) {
+            // Take the first (leftmost) IP — that's the original client
+            int comma = xff.indexOf(',');
+            return (comma > 0 ? xff.substring(0, comma) : xff).trim();
+        }
+        return req.getRemoteAddr();
+    }
+
     /** {@code sage.Sage.getInt("media_server_port", 7818)} via reflection (bridge runs in-JVM). */
     private static int resolveMediaServerPort() {
         try {
@@ -200,6 +215,7 @@ public class MediaServerProxyServlet extends HttpServlet {
         long seekMs = parseSeekMillis(req.getParameter("seek"));
         String sinkParam = parseSinkParam(req.getParameter("sink"));
         String sessionId = req.getParameter("session");
+        String clientIp = resolveClientIp(req);
 
         Socket socket = null;
         try {
@@ -208,6 +224,18 @@ public class MediaServerProxyServlet extends HttpServlet {
             socket.connect(new InetSocketAddress(host, port), 5_000);
             InputStream in = socket.getInputStream();
             OutputStream sockOut = socket.getOutputStream();
+
+            // ── Forward real client IP to MediaServer ──────────────────
+            // The bridge masks the client's IP (all connections originate from
+            // 127.0.0.1). Send CLIENT_ORIGIN so the server can determine
+            // local-vs-remote for bitrate policy, ABR, and GPU_ENHANCE linkKbps.
+            // Uses the same ";k=v" hint convention as XCODE_SETUP — older servers
+            // that don't recognize the command will reply with an error line that
+            // we silently ignore (forward-safe).
+            if (clientIp != null && !clientIp.isEmpty()) {
+                sendLine(sockOut, "CLIENT_ORIGIN " + clientIp);
+                try { readLine(in); } catch (IOException ignored) { /* older server may not respond */ }
+            }
 
             // ── Session-scoped xcode gate ──────────────────────────────
             // AVPlay sends multiple concurrent HTTP connections when probing a
@@ -241,6 +269,7 @@ public class MediaServerProxyServlet extends HttpServlet {
                 // safe (older servers simply start at 0).
                 if (seekMs > 0) setup += ";ss=" + seekMs;
                 if (sinkParam != null) setup += ";sink=" + sinkParam;
+                if (clientIp != null && !clientIp.isEmpty()) setup += ";xff=" + clientIp;
                 log.info("[MsProxy] XCODE_SETUP: {} session={}", setup, sessionId);
                 sendLine(sockOut, setup);
                 String ack = readLine(in);

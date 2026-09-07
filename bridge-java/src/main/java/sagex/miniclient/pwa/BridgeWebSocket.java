@@ -57,6 +57,8 @@ public class BridgeWebSocket implements WebSocketListener {
     private long tcpReads = 0;
     private long wsFramesOut = 0;
     private long lastActivityRefresh = 0;
+    /** Real client IP extracted from the WebSocket upgrade request. */
+    private String clientIp;
 
     private static final long ACTIVITY_REFRESH_MS = 30_000;
 
@@ -66,6 +68,11 @@ public class BridgeWebSocket implements WebSocketListener {
     /** Set the shared session tracker (called once at bridge startup). */
     public static void setSessionTracker(ActivePlaybackSessionTracker tracker) {
         sessionTracker = tracker;
+    }
+
+    /** Real client IP from the WebSocket upgrade request (for logging / NG negotiation). */
+    public String getClientIp() {
+        return clientIp;
     }
 
     /** Resolve an int knob from env var, then -D system property, then default. */
@@ -106,6 +113,19 @@ public class BridgeWebSocket implements WebSocketListener {
         }
 
         log.info("[Bridge] New {} connection -> {}:{}", channel, sageHost, sagePort);
+
+        // Extract the real client IP from the WebSocket upgrade request.
+        // Check X-Forwarded-For first (upstream reverse proxy), then the direct peer.
+        String xff = session.getUpgradeRequest().getHeader("X-Forwarded-For");
+        if (xff != null && !xff.trim().isEmpty()) {
+            int comma = xff.indexOf(',');
+            this.clientIp = (comma > 0 ? xff.substring(0, comma) : xff).trim();
+        } else {
+            this.clientIp = session.getRemoteAddress() != null
+                ? session.getRemoteAddress().getAddress().getHostAddress()
+                : null;
+        }
+        log.info("[Bridge] Client origin IP: {} for {}", clientIp, channel);
 
         // Register with session tracker
         if (sessionTracker != null) {

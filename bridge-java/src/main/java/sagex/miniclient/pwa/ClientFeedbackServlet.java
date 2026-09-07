@@ -63,11 +63,12 @@ public class ClientFeedbackServlet extends HttpServlet {
 
         ClientCapabilityProfileStore.ClientCapabilityProfile profile = profileStore.applyFeedback(payload);
 
-        log.info("[ClientFeedback] type={} clientId={} host={} port={} failures={} pushFailures={} retryPolicy={}",
+        log.info("[ClientFeedback] type={} clientId={} host={} port={} clientIp={} failures={} pushFailures={} retryPolicy={}",
                 payload.type,
                 profile.clientId,
                 profile.serverHost,
                 profile.serverPort,
+                MediaServerProxyServlet.resolveClientIp(req),
                 profile.playbackFailureCount,
                 profile.pushFailureCount,
                 profile.refinement.get("retryPolicy"));
