@@ -1087,10 +1087,18 @@ export class MediaPlayer extends EventTarget {
     const mode = this._msproxyMode || '';
     // Already bare browserhd with no param suffix — nothing more to try.
     if (mode === 'xcode:browserhd') return false;
-    // If mode has param suffixes (e.g. xcode:browserhd;acodec=aac;ac=6), retry
-    // with bare browserhd — the server picks default audio settings which may
-    // produce compatible output when the parameterized version fails.
-    const retryMode = 'xcode:browserhd';
+    // Retry with bare browserhd but PRESERVE transport-critical params
+    // (acodec, ac) that the server needs to produce MSE-safe output.
+    // Only strip codec-routing params (copyv, hevc, etc.) that caused the
+    // failure. Also carry the current sink so the server can re-derive
+    // its enhancement tier.
+    const params = (mode.split(';').slice(1) || [])
+      .filter(p => /^(acodec|ac)=/.test(p));
+    const sink = this._measureSink();
+    if (sink) params.push(`sink=${sink.w}x${sink.h}`);
+    const retryMode = 'xcode:browserhd' + (params.length ? ';' + params.join(';') : '');
+    // If the retry mode is identical to what failed, nothing more to try.
+    if (retryMode === mode) return false;
     // Preserve the current playhead so the retry resumes where the user was,
     // not at 0.
     const resumeSec = this.getMediaTimeMillis() / 1000;
