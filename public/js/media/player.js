@@ -1995,6 +1995,12 @@ export class MediaPlayer extends EventTarget {
       this._initAccumLen = 0;
     }
 
+    // Flush any stale bytes that raced into _pushQueue during the async
+    // _openMediaSource() (the old read loop's last pre-abort micro-task can
+    // push one final chunk). Without this, old-stream moof/mdat bytes sit
+    // ahead of the new init segment → CHUNK_DEMUXER_ERROR_APPEND_FAILED.
+    this._pushQueue = [];
+
     // Now start the new stream.  Clear the restart guard so the video error
     // handler knows we're back to normal playback (not mid-flush).
     this._currentRestartId = null;
@@ -2307,8 +2313,13 @@ export class MediaPlayer extends EventTarget {
 
       console.log(`[MediaPlayer] Sink changed ${oldW}x${oldH} → ${sink.w}x${sink.h}, re-opening transcode`);
       this._liveSinkOverride = `${sink.w}x${sink.h}`;
-      const currentSec = this.getMediaTimeMillis() / 1000;
-      this._flushAndRestart(this._bridgeFilePath, currentSec);
+      // Capture position before restart resets video.currentTime to 0
+      const currentMs = this.getMediaTimeMillis();
+      this._bridgeTimeOffsetMs = currentMs;
+      // Resolution change may produce different H.264 profile/level — force
+      // init-segment re-sniff instead of reusing the old codec MIME.
+      this._cachedBridgeMime = null;
+      this._flushAndRestart(this._bridgeFilePath, currentMs / 1000);
     }, 500);  // 500ms debounce for rapid multi-monitor drags
   }
 
