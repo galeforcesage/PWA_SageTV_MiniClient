@@ -1651,6 +1651,7 @@ export class MiniClientConnection extends EventTarget {
    const dl = this._buildDownloadCapabilities();
    if (dl) tokens.push(dl);
    tokens.push('STREAMINFO');
+   tokens.push('HLS_FMP4');
    return tokens.join(',');
   }
 
