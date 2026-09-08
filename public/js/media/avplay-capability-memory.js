@@ -47,10 +47,10 @@ const STORAGE_KEY = 'avplay_cap_memory_v2';
 const DEFAULT_FAIL_THRESHOLD = 2;
 
 /**
- * ng_fmt video MIME (see connection.js _parseNgFmt + player.js _ngFmtToMseCodecs)
- * -> Protocol 2.1 canonical capability name used in the pwa_native surface
- * arrays (H264, HEVC, MPEG2-VIDEO, ...). Anything not mapped returns null and is
- * simply not learned (fail-safe: never blacklist a dimension we can't name).
+ * STREAMINFO video MIME → Protocol 2.1 canonical capability name used in the
+ * pwa_native surface arrays (H264, HEVC, MPEG2-VIDEO, ...). Anything not
+ * mapped returns null and is simply not learned (fail-safe: never blacklist
+ * a dimension we can't name).
  */
 const VIDEO_MIME_TO_CAP = {
   'video/hevc': 'HEVC',
@@ -68,11 +68,12 @@ const VIDEO_MIME_TO_CAP = {
 };
 
 /**
- * ng_fmt audio MIME -> Protocol 2.1 canonical native audio capability name
- * (see tizen-capabilities.js Profile-4 audio list + player.js _ngFmtToMseCodecs
- * audioMap, which is the authoritative set of tokens the server emits). Only
- * confidently-named codecs are listed; anything else returns null and is never
- * learned (fail-safe: we never blacklist an audio dimension we can't name).
+ * STREAMINFO audio MIME → Protocol 2.1 canonical native audio capability name
+ * (see tizen-capabilities.js Profile-4 audio list and ng-streaminfo.js
+ * SAGETV_CODEC_TO_MIME, which is the authoritative set of tokens the server
+ * emits). Only confidently-named codecs are listed; anything else returns null
+ * and is never learned (fail-safe: we never blacklist an audio dimension we
+ * can't name).
  */
 const AUDIO_MIME_TO_CAP = {
   'audio/mp4a-latm': 'AAC',

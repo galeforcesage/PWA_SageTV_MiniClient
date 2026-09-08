@@ -25,7 +25,6 @@
  */
 
 import { PlayerState } from '../protocol/constants.js';
-import { streamInfoToFormatHint } from './ng-streaminfo.js';
 
 /**
  * If AVPlay produces no first frame within this window after a load(), treat the
@@ -65,7 +64,6 @@ export class AVPlayPlayer extends EventTarget {
     this._seekGranularityMs = undefined;
     this._videoDimensions = { width: 0, height: 0 };
     this._firstFrameEmitted = false;
-    this._formatHint = null;
     // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
     this._streamInfo = null;
     this._prepareWatchdog = null;
@@ -95,31 +93,16 @@ export class AVPlayPlayer extends EventTarget {
   }
 
   /**
-   * Store the NG format hint (ng_fmt: {container, video, audio} MIME strings)
-   * for the next load. MediaPlayer parity — connection.js calls this on every
-   * OPENURL. AVPlay demuxes/decodes natively so it doesn't need the hint to set
-   * up a pipeline, but capability learning uses it to attribute a native
-   * DIRECT_PLAY outcome to the codec that was attempted.
-   */
-  setFormatHint(hint) {
-    this._formatHint = hint || null;
-  }
-
-  /**
-   * Apply a parsed NG STREAMINFO (MEDIACMD 40) descriptor. MediaPlayer parity.
-   * AVPlay demuxes/decodes natively so it doesn't need a hint to build a
-   * pipeline, but priming the hint before OPENURL lets capability learning
-   * attribute the DIRECT_PLAY outcome to the right codec. Returns {video, audio}
-   * booleans for the STREAMINFO ACK. Never throws (synchronous server wait).
+   * Apply a parsed NG STREAMINFO (MEDIACMD 40) descriptor. AVPlay demuxes and
+   * decodes natively, so it doesn't need codec hints to build a pipeline.
+   * Stashed for informational use (duration, live flag, track metadata).
+   * Returns {video, audio} booleans for the STREAMINFO ACK.
    */
   applyStreamInfo(info) {
     this._streamInfo = info || null;
-    const hint = streamInfoToFormatHint(info);
-    if (hint) this.setFormatHint(hint);
-    return {
-      video: !!(hint && hint.video),
-      audio: !!(hint && hint.audio),
-    };
+    const hasVideo = !!(info && info.video && info.video.length > 0);
+    const hasAudio = !!(info && info.audio && info.audio.length > 0);
+    return { video: hasVideo, audio: hasAudio };
   }
 
   _ensureObject() {

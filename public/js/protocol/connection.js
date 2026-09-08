@@ -154,7 +154,7 @@ export class MiniClientConnection extends EventTarget {
     // DIRECT_PLAY outcomes and downgrades the pwa_native surface for any video
     // codec THIS panel proves it cannot decode, so the server transcodes it
     // instead of pushing an undecodable DIRECT_PLAY. See avplay-capability-
-    // memory.js. `_pendingNativeProbe` holds the ng_fmt hint of an in-flight
+    // memory.js. `_pendingNativeProbe` holds the STREAMINFO hint of an in-flight
     // native (server-unconditioned) attempt so its firstframe/failure can be
     // attributed to the codec that was tried. Non-Tizen surfaces are untouched.
     this._pendingNativeProbe = null;
@@ -249,9 +249,6 @@ export class MiniClientConnection extends EventTarget {
     // Media stats protocol
     this._detailedBufferStats = false;
     this._serverMuxTime = -1;
-    // Set true when a STREAMINFO (MEDIACMD 40) primed the player's format hint
-    // for the next item, so the following OPENURL keeps it instead of clearing.
-    this._streamInfoPending = false;
 
     // Server profile detection (populated via /api/server-info)
     this.serverProfile = null;   // { serverType, serverFfmpeg, bridgeFfmpeg }
@@ -3263,14 +3260,12 @@ export class MiniClientConnection extends EventTarget {
         this._serverMuxTime = -1;
         this._mediaOpened = false;
         this._pushDataCount = 0;
-        this._streamInfoPending = false;
         this._sendMediaReturn(1);
         break;
 
       case 1: // MEDIACMD_DEINIT
         console.log('[Media] DEINIT');
         this._mediaOpened = false;
-        this._streamInfoPending = false;
         this.mediaPlayer.stop();
         this.playbackContextManager.onMediaClose();
         this.dispatchEvent(new CustomEvent('mediaclose'));
@@ -3301,7 +3296,6 @@ export class MiniClientConnection extends EventTarget {
                 const dims = this.mediaPlayer?.applyStreamInfo?.(info);
                 if (dims && dims.video) ack |= STREAMINFO_ACK.VIDEO;
                 if (dims && dims.audio) ack |= STREAMINFO_ACK.AUDIO;
-                this._streamInfoPending = true;
               } else {
                 console.warn('[Media] STREAMINFO: JSON parse failed — replying ACK=0');
               }
@@ -3319,7 +3313,7 @@ export class MiniClientConnection extends EventTarget {
         this._serverMuxTime = -1;
         this._mediaOpened = true;
         // Ack the OPENURL up-front, on the SAME connection it arrived on, BEFORE
-        // any device-path dispatch (onMediaOpen/setFormatHint/load). The server
+        // any device-path dispatch (onMediaOpen/load). The server
         // enforces a hard 30s read on this reply int (nonzero = OK). Deferring the
         // ack until after the dispatch made it vulnerable to a synchronous throw
         // in that dispatch aborting the handler and skipping the write ??? the server
@@ -3340,16 +3334,12 @@ export class MiniClientConnection extends EventTarget {
             const hostPort = `${this.serverHost}:${this.serverPort}`;
             urlString = urlString.split('HOSTNAME').join(hostPort);
           }
-          // ?????? NG Format Hint (ng_fmt) ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-          // NG servers append ?ng_fmt=containerMime,videoMime,audioMime to the
-          // OPENURL so the client can configure its decoder pipeline immediately
-          // without probing/sniffing the stream. Strip it before passing the URL
-          // to the player (it's metadata, not part of the media path).
-          const ngFmt = this._parseNgFmt(urlString);
-          if (ngFmt.hint) {
-            urlString = ngFmt.cleanUrl;
-            console.log(`[Media] ng_fmt: container=${ngFmt.hint.container || '?'} video=${ngFmt.hint.video || '?'} audio=${ngFmt.hint.audio || '?'}`);
-          }
+          // Strip any residual ng_fmt query param from the URL — the server
+          // is phasing it out in favor of STREAMINFO (MEDIACMD 40) for the
+          // binary protocol and CODECS on #EXT-X-STREAM-INF for CMAF HLS.
+          // We no longer parse or act on ng_fmt; just strip so it doesn't
+          // pollute the media path passed to the player.
+          urlString = this._stripQueryParam(urlString, 'ng_fmt');
 
           const isPush = urlString.startsWith('push:');
           const isStv = urlString.startsWith('stv://');
@@ -3359,18 +3349,6 @@ export class MiniClientConnection extends EventTarget {
           // Notify NG playback context manager of the media open
           this.playbackContextManager.onMediaOpen(urlString);
           this.dispatchEvent(new CustomEvent('mediaopen', { detail: { url: urlString } }));
-
-          // Pass format hint to the media player for fast-path decoder setup.
-          // Precedence: an explicit ng_fmt on the URL wins. Otherwise, if a
-          // STREAMINFO (MEDIACMD 40) just primed the hint for this item, keep it.
-          // Only clear the hint for legacy/no-hint items so a stale hint from a
-          // previous item can't leak forward.
-          if (ngFmt.hint) {
-            this.mediaPlayer.setFormatHint(ngFmt.hint);
-          } else if (!this._streamInfoPending) {
-            this.mediaPlayer.setFormatHint(null);
-          }
-          this._streamInfoPending = false;
 
           // Server-authoritative delivery (NG): if the server told us the exact
           // MediaServer :7818 conditioning to use (CAP_EFFECTIVE_DELIVERY), honor
@@ -3442,7 +3420,15 @@ export class MiniClientConnection extends EventTarget {
               // Native, server-unconditioned DIRECT_PLAY (Tizen AVPlay): remember
               // the codec being attempted so the firstframe/failure listeners can
               // record on-device proof (see constructor + avplay-capability-memory).
-              if (this._avcapMemory) this._pendingNativeProbe = { hint: ngFmt.hint };
+              // STREAMINFO (applyStreamInfo) primes _streamInfo before OPENURL;
+              // use the primary video track's MIME for attribution.
+              if (this._avcapMemory && this.mediaPlayer?._streamInfo) {
+                const vTracks = this.mediaPlayer._streamInfo.video;
+                const pv = (vTracks && vTracks.length) ? (vTracks.find(t => t && t.primary) || vTracks[0]) : null;
+                if (pv && pv.mime) {
+                  this._pendingNativeProbe = { hint: { video: pv.mime } };
+                }
+              }
               this.mediaPlayer.load(0, 0, '', urlString, this.serverHost, isPush, 0);
             }
           }
@@ -3722,28 +3708,16 @@ export class MiniClientConnection extends EventTarget {
   }
 
   /**
-   * Parse the NG format hint (ng_fmt) from a URL string.
-   * Returns { hint: {container, video, audio} | null, cleanUrl: string }.
-   * If ng_fmt is absent, hint is null and cleanUrl === input.
+   * Strip a single query parameter from a URL string. Returns the URL
+   * unchanged if the parameter is absent. Handles ?param (first) and
+   * &param (subsequent) correctly.
    */
-  _parseNgFmt(url) {
-    // Match ?ng_fmt=... or &ng_fmt=... (value is up to next & or end)
-    const re = /([?&])ng_fmt=([^&]*)/;
+  _stripQueryParam(url, name) {
+    const re = new RegExp('([?&])' + name + '=[^&]*');
     const m = url.match(re);
-    if (!m) return { hint: null, cleanUrl: url };
-
-    const raw = decodeURIComponent(m[2]);
-    const parts = raw.split(',');
-    const hint = {
-      container: (parts[0] || '').trim() || null,
-      video: (parts[1] || '').trim() || null,
-      audio: (parts[2] || '').trim() || null,
-    };
-
-    // Strip ng_fmt param from URL
+    if (!m) return url;
     let clean = url;
     if (m[1] === '?') {
-      // ng_fmt was the first (or only) query param
       const after = url.substring(m.index + m[0].length);
       if (after.startsWith('&')) {
         clean = url.substring(0, m.index) + '?' + after.substring(1);
@@ -3751,11 +3725,9 @@ export class MiniClientConnection extends EventTarget {
         clean = url.substring(0, m.index) + after;
       }
     } else {
-      // ng_fmt was a subsequent &param
       clean = url.substring(0, m.index) + url.substring(m.index + m[0].length);
     }
-
-    return { hint, cleanUrl: clean };
+    return clean;
   }
 
   _sendMediaReturnLong(value) {

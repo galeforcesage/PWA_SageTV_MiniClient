@@ -23,7 +23,7 @@ export const STREAMINFO_ACK = Object.freeze({
 
 /**
  * SageTV canonical codec name → MIME. Mirrors the authoritative table in the
- * protocol doc and the audio tokens already used by player.js (`_ngFmtToMseCodecs`).
+ * protocol doc and the audio tokens used by the server's codec-name→MIME table.
  * A track's explicit `mime` field always wins over this mapping.
  */
 export const SAGETV_CODEC_TO_MIME = Object.freeze({
@@ -106,10 +106,9 @@ export function primaryTrack(tracks) {
 }
 
 /**
- * Derive a `{container, video, audio}` MIME hint (the same shape the ng_fmt
- * fast-path produces) from a normalized STREAMINFO. Returns null when nothing
- * usable is present. This lets STREAMINFO feed the EXISTING setFormatHint path
- * with no duplicated decode logic.
+ * Derive a `{container, video, audio}` MIME hint from a normalized STREAMINFO.
+ * Returns null when nothing usable is present. Retained as a utility for tests
+ * and any future consumer that needs a flat MIME-triplet from STREAMINFO.
  */
 export function streamInfoToFormatHint(info) {
   if (!info) return null;

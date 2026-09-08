@@ -14,8 +14,6 @@
  */
 
 import { PlayerState, DESIRED_VIDEO_PREBUFFER } from '../protocol/constants.js';
-import { streamInfoToFormatHint } from './ng-streaminfo.js';
-
 export class MediaPlayer extends EventTarget {
   /**
    * @param {HTMLVideoElement} videoElement
@@ -108,91 +106,28 @@ export class MediaPlayer extends EventTarget {
     this._telemetrySequence = 0;
     this._reportedFailureKeys = new Set();
 
-    // NG format hint (ng_fmt) — set by connection.js before load
-    this._formatHint = null;
     // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
     this._streamInfo = null;
     // Bind video events
     this._setupVideoEvents();
   }
 
-  // ── NG Format Hint (ng_fmt) ──────────────────────────────────────────────
-  // Server-provided container/video/audio MIME types that let us configure
-  // the decoder pipeline immediately without sniffing the init segment.
-
-  /**
-   * Set the format hint for the next media load. Called by connection.js
-   * after parsing ng_fmt from the OPENURL. Null clears any previous hint.
-   */
-  setFormatHint(hint) {
-    this._formatHint = hint || null;
-  }
-
   /**
    * Apply a parsed NG STREAMINFO (MEDIACMD 40) descriptor. Arrives BEFORE the
-   * OPENURL, so it primes the same format-hint fast-path that ng_fmt would,
-   * only earlier and with richer metadata. Returns {video, audio} booleans for
-   * the STREAMINFO ACK — true means we have a decoder decision for that track
-   * and need no probe. Never throws (server waits synchronously on the ACK).
+   * OPENURL. Stashed for future use (e.g. duration, live flag, track list).
+   * On the CMAF/HLS path, codec selection is handled by the playlist's CODECS
+   * attribute and init.mp4 — no client-side codec mapping needed. On the
+   * legacy MSE path, init-segment sniffing handles codec detection.
+   * Returns {video, audio} booleans for the STREAMINFO ACK.
    */
   applyStreamInfo(info) {
     this._streamInfo = info || null;
-    const hint = streamInfoToFormatHint(info);
-    if (hint) this.setFormatHint(hint);
-    return {
-      video: !!(hint && hint.video),
-      audio: !!(hint && hint.audio),
-    };
-  }
-
-  /**
-   * Map ng_fmt MIME types to MSE-compatible codec strings for SourceBuffer
-   * creation. Returns {video, audio} with MSE codec strings or null.
-   * These are "good enough" defaults — the exact profile/level from the
-   * init segment may differ, but MSE SourceBuffer is flexible within the
-   * same codec family.
-   */
-  _ngFmtToMseCodecs(hint) {
-    if (!hint) return null;
-    const videoMap = {
-      'video/hevc': 'hvc1.1.6.L120.90',
-      'video/avc': 'avc1.640028',
-      'video/mp4v-es': 'mp4v.20.8',
-      'video/x-ms-wmv': null,  // VC1 — not MSE-compatible
-      'video/mpeg2': null,     // MPEG-2 — not MSE-compatible
-      'video/mpeg': null,      // MPEG-2 (alternate MIME) — not MSE-compatible
-    };
-    const audioMap = {
-      'audio/mp4a-latm': 'mp4a.40.2',
-      'audio/ac3': 'ac-3',
-      'audio/eac3': 'ec-3',
-      'audio/ac4': 'ac-4',
-      'audio/mpeg': 'mp3',
-      'audio/mpeg-L2': null,   // MP2 — not MSE-compatible
-      'audio/flac': 'flac',
-      'audio/vorbis': 'vorbis',
-      'audio/vnd.dts': null,   // DTS — not MSE-compatible
-      'audio/vnd.dts.hd': null,
-      'audio/alac': 'alac',
-    };
-    return {
-      video: (hint.video && videoMap[hint.video] !== undefined) ? videoMap[hint.video] : null,
-      audio: (hint.audio && audioMap[hint.audio] !== undefined) ? audioMap[hint.audio] : null,
-    };
-  }
-
-  /**
-   * Map ng_fmt video MIME to canPlayType()-compatible MIME string for native
-   * <video src> validation. Only checks the VIDEO codec — audio is the
-   * server's responsibility (xcode transcodes unsupported audio to AAC).
-   * Testing video+audio combined would false-fail on unsupported audio
-   * codecs like AC-4 that the server will transcode anyway.
-   */
-  _ngFmtToNativeMime(hint) {
-    if (!hint) return null;
-    const codecs = this._ngFmtToMseCodecs(hint);
-    if (!codecs || !codecs.video) return null;
-    return `video/mp4; codecs="${codecs.video}"`;
+    // Report video/audio presence so the server ACK reflects what we received.
+    // We no longer pre-configure SourceBuffers from this — the transport
+    // (HLS CODECS or init-segment moov) is the codec authority.
+    const hasVideo = !!(info && info.video && info.video.length > 0);
+    const hasAudio = !!(info && info.audio && info.audio.length > 0);
+    return { video: hasVideo, audio: hasAudio };
   }
 
   _setupVideoEvents() {
@@ -500,20 +435,6 @@ export class MediaPlayer extends EventTarget {
 
     console.log(`[MediaPlayer] PULL mode: ${mediaUrl}`);
 
-    // ng_fmt pre-validation: if the hint tells us this container+codec combo
-    // isn't natively decodable, skip the attempt and route directly to bridge
-    // transcode. Avoids the "try native → error → bridge fallback" cycle.
-    if (this._formatHint && absPath && !mediaUrl.includes('.m3u8') && !mediaUrl.includes('format=hls')) {
-      const nativeMime = this._ngFmtToNativeMime(this._formatHint);
-      if (nativeMime && !this.video.canPlayType(nativeMime)) {
-        console.warn(`[MediaPlayer] ng_fmt pre-validate FAIL for pull: ${nativeMime} — routing to bridge transcode`);
-        this._pullFallbackTried = true;  // skip the error-handler retry
-        await this._loadBridgeMode(absPath, hostname);
-        this.state = PlayerState.LOADED;
-        return;
-      }
-    }
-
     // Check if HLS
     if (mediaUrl.includes('.m3u8') || mediaUrl.includes('format=hls')) {
       await this._loadHLS(mediaUrl);
@@ -599,21 +520,6 @@ export class MediaPlayer extends EventTarget {
         // element — avoids MSE HEVC limitations. The native decoder handles HEVC
         // when the browser has platform support (HEVC Video Extensions on Windows).
         if (surface === 'pwa_native') {
-          // ng_fmt pre-validation: if the hint says the video codec is something
-          // this browser can't natively play, skip the attempt and route through
-          // MSE bridge transcode instead of waiting for a silent videoWidth=0 failure.
-          if (this._formatHint && this._formatHint.video) {
-            const nativeMime = this._ngFmtToNativeMime(this._formatHint);
-            if (nativeMime && !this.video.canPlayType(nativeMime)) {
-              console.warn(`[MediaPlayer] ng_fmt pre-validate FAIL for native: ${nativeMime} — routing to MSE bridge`);
-              this._msproxyStreamUrl = msUrl;
-              this._msproxyAbsPath = absPath;
-              this._msproxyMode = mode;
-              await this._loadBridgeMode(absPath, hostname, null);
-              return;
-            }
-          }
-
           console.log(`[MediaPlayer] Native xcode path (surface=pwa_native): <video src> for ${mode}`);
           this.pushMode = false;
           this.bridgeMode = false;
@@ -788,8 +694,6 @@ export class MediaPlayer extends EventTarget {
     this._bridgeFilePath = filePath;
     this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
-    this._ngFmtAttempted = false;  // allow ng_fmt fast-path for this stream
-    this._xcodeHintAttempted = false;  // allow xcode-profile fast-path
     this.startSinkMonitor();
     // Set up MSE
     const MSClass = this._getMediaSourceClass();
@@ -1070,107 +974,10 @@ export class MediaPlayer extends EventTarget {
    * true when created, false when the moov isn't complete yet (keep reading),
    * or the string 'fallback' when it triggered a full-transcode reload (caller
    * must stop processing this stream).
-   *
-   * Fast path: when ng_fmt hint is available, attempts to create the
-   * SourceBuffer immediately using the hinted codec strings. If the hint
-   * fails validation or addSourceBuffer, falls through to normal sniffing.
    */
   _ensureDynamicSourceBuffer() {
     const MSClass = this._getMediaSourceClass();
     if (!MSClass || !this.mediaSource || this.mediaSource.readyState !== 'open') return false;
-
-    // ── Fast path: ng_fmt hint ──────────────────────────────────────────
-    // If the server provided format info, try to create SourceBuffer without
-    // waiting for the full moov. This eliminates init-segment sniff latency.
-    // SKIP when in xcode/transcode mode: the hint describes the SOURCE codec
-    // (e.g. MPEG-2/AC3), not the transcoded output (H.264/AAC). Using it
-    // would create a SourceBuffer with wrong codecs → APPEND_FAILED.
-    if (this._formatHint && !this._ngFmtAttempted && !this._msproxyMode?.startsWith('xcode:')) {
-      this._ngFmtAttempted = true;
-      const hintCodecs = this._ngFmtToMseCodecs(this._formatHint);
-      if (hintCodecs && (hintCodecs.video || hintCodecs.audio)) {
-        const parts = [];
-        if (hintCodecs.video) parts.push(hintCodecs.video);
-        if (hintCodecs.audio) parts.push(hintCodecs.audio);
-        const hintMime = `video/mp4; codecs="${parts.join(',')}"`;
-        try {
-          if (MSClass.isTypeSupported(hintMime)) {
-            this.sourceBuffer = this.mediaSource.addSourceBuffer(hintMime);
-            this.sourceBuffer.mode = 'segments';
-            this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
-            this.sourceBuffer.addEventListener('error', (e) => {
-              console.error('[MediaPlayer] SourceBuffer error:', e);
-              this._forceMsproxyTranscodeFallback();
-            });
-            this._cachedBridgeMime = hintMime;
-            console.log(`[MediaPlayer] ng_fmt fast-path SourceBuffer: ${hintMime}`);
-            return true;
-          } else {
-            console.log(`[MediaPlayer] ng_fmt hint not supported by MSE: ${hintMime} — will sniff`);
-          }
-        } catch (e) {
-          console.warn(`[MediaPlayer] ng_fmt addSourceBuffer(${hintMime}) failed:`, e && e.message, '— will sniff');
-        }
-      } else if (hintCodecs) {
-        // Hint resolved but codecs are null (e.g. MPEG-2/VC1 not MSE-compatible).
-        // Pre-validation: if the video codec is unsupported by MSE, force full
-        // transcode immediately instead of waiting for sniff → fail → retry.
-        // BUT: skip when we're already in a transcode mode — the _formatHint
-        // describes the SOURCE codec, not the transcoded output.  The server
-        // already decided to transcode to H.264; let the init-segment sniff
-        // path confirm the actual output codec.
-        if (this._formatHint.video && !hintCodecs.video && !this._msproxyMode?.startsWith('xcode:')) {
-          console.warn(`[MediaPlayer] ng_fmt: video codec ${this._formatHint.video} is not MSE-compatible — forcing transcode`);
-          if (this._forceMsproxyTranscodeFallback()) return 'fallback';
-        }
-      }
-    }
-
-    // ── Fast path: xcode profile → known output codecs ─────────────────
-    // When the server tells us the transcode profile (e.g. xcode:browserhd),
-    // the OUTPUT codecs are deterministic — no need to wait for the moov box.
-    // browserhd / browserhd_copyv / browserhd_remux all emit fMP4 with
-    // H.264 High + AAC-LC. copyv copies the source video, but the container
-    // is still fMP4 with H.264-compatible moov (NVENC always re-encodes if
-    // the source isn't H.264, so the output IS H.264 in practice). Only
-    // attempt once per stream — if it fails, fall through to sniffing.
-    if (this._msproxyMode && !this._xcodeHintAttempted) {
-      this._xcodeHintAttempted = true;
-      const xcodeOutputMap = {
-        // profile key → { video, audio } MSE codec strings
-        'browserhd':          { video: 'avc1.640028', audio: 'mp4a.40.2' },
-        'browserhd_copyv':    { video: 'avc1.640028', audio: 'mp4a.40.2' },
-        'browserhd_remux':    { video: 'avc1.640028', audio: 'mp4a.40.2' },
-      };
-      // Extract the profile from "xcode:browserhd;ac=2" → "browserhd"
-      let profile = this._msproxyMode;
-      if (profile.startsWith('xcode:')) profile = profile.substring(6);
-      const semiIdx = profile.indexOf(';');
-      if (semiIdx >= 0) profile = profile.substring(0, semiIdx);
-      const xcodeCodecs = xcodeOutputMap[profile];
-      if (xcodeCodecs) {
-        const parts = [];
-        if (xcodeCodecs.video) parts.push(xcodeCodecs.video);
-        if (xcodeCodecs.audio) parts.push(xcodeCodecs.audio);
-        const xcodeMime = `video/mp4; codecs="${parts.join(',')}"`;
-        try {
-          if (MSClass.isTypeSupported(xcodeMime)) {
-            this.sourceBuffer = this.mediaSource.addSourceBuffer(xcodeMime);
-            this.sourceBuffer.mode = 'segments';
-            this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
-            this.sourceBuffer.addEventListener('error', (e) => {
-              console.error('[MediaPlayer] SourceBuffer error:', e);
-              this._forceMsproxyTranscodeFallback();
-            });
-            this._cachedBridgeMime = xcodeMime;
-            console.log(`[MediaPlayer] xcode-profile fast-path SourceBuffer (${profile}): ${xcodeMime}`);
-            return true;
-          }
-        } catch (e) {
-          console.warn(`[MediaPlayer] xcode-profile addSourceBuffer(${xcodeMime}) failed:`, e && e.message, '— will sniff');
-        }
-      }
-    }
 
     // ── Normal path: sniff codecs from init segment ─────────────────────
     const bytes = this._concatChunks(this._initAccum, this._initAccumLen);
@@ -1219,7 +1026,7 @@ export class MediaPlayer extends EventTarget {
     this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
     this.sourceBuffer.addEventListener('error', (e) => {
       console.error('[MediaPlayer] SourceBuffer error:', e,
-        'mime:', this._cachedBridgeMime, 'mode:', this._msproxyMode, 'hint:', this._formatHint);
+        'mime:', this._cachedBridgeMime, 'mode:', this._msproxyMode);
       // A decode/append error on a remux stream: force a full transcode.
       this._forceMsproxyTranscodeFallback();
     });
@@ -1793,9 +1600,6 @@ export class MediaPlayer extends EventTarget {
     this._sbPending = false;
     this._initAccum = null;
     this._initAccumLen = 0;
-    this._ngFmtAttempted = false;
-    this._xcodeHintAttempted = false;
-    this._formatHint = null;
     this._cmafHlsMode = false;
     this._cmafPlaylistUrl = null;
 
