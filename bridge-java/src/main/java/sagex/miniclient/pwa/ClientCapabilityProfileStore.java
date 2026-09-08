@@ -34,7 +34,15 @@ public class ClientCapabilityProfileStore {
     public ClientCapabilityProfileStore(Path storePath) {
         this.storePath = storePath;
         this.tempPath = Paths.get(storePath.toString() + ".tmp");
-        this.mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        ObjectMapper om;
+        try {
+            om = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        } catch (Throwable t) {
+            // Jackson classpath version mismatch — degrade gracefully
+            log.warn("[ClientFeedback] Jackson init failed ({}); profile persistence disabled", t.getMessage());
+            om = null;
+        }
+        this.mapper = om;
         load();
     }
 
@@ -204,7 +212,7 @@ public class ClientCapabilityProfileStore {
 
     private synchronized void load() {
         try {
-            if (!Files.exists(storePath)) {
+            if (mapper == null || !Files.exists(storePath)) {
                 return;
             }
             byte[] bytes = Files.readAllBytes(storePath);
@@ -216,12 +224,15 @@ public class ClientCapabilityProfileStore {
                 }
             }
             log.info("[ClientFeedback] Loaded {} client capability profiles from {}", profiles.size(), storePath);
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Catch Throwable (not just Exception) — Jackson NoSuchMethodError
+            // from classpath version mismatch is a LinkageError (an Error subclass).
             log.warn("[ClientFeedback] Failed to load profile store {}: {}", storePath, e.getMessage());
         }
     }
 
     private synchronized void save() {
+        if (mapper == null) return;
         try {
             Path parent = storePath.getParent();
             if (parent != null && !Files.exists(parent)) {
