@@ -943,12 +943,16 @@ export class MiniClientConnection extends EventTarget {
 
       const override = (this.settings ? this.settings.get('display_sink_override', 'auto') : 'auto').toLowerCase();
 
-      // Auto: suppress on small screens (phone/small tablet) to avoid
-      // inviting upscale on devices that can't benefit. Tizen = TV = always.
+      // Auto: suppress on small screens (phone) to avoid inviting upscale
+      // on devices that can't benefit. Tizen = TV = always send.
+      // iPad/tablet: always send — their CSS screen.width is small (1024-1194)
+      // but physical resolution is 2K+; abstaining causes the server to use
+      // the codec ceiling (3840x2160) and offer absurd 4K upscaling.
       if (override === 'auto') {
         if (this.platformDetector?.isTizen?.()) return `${w}x${h}`;
+        if (this.platformDetector?.isIOS?.()) return `${w}x${h}`;
         if (screen.width >= 1280) return `${w}x${h}`;
-        return ''; // small screen ??? abstain (server infers from decode ceilings)
+        return ''; // small screen — abstain (server infers from decode ceilings)
       }
 
       // Always AND Never: send the honest panel. Never routes intent

@@ -692,6 +692,9 @@ export class MediaPlayer extends EventTarget {
     // ── Path A: Safari (Mac + iPad/iPhone) — native HLS ──────────────
     if (this._canPlayNativeHls()) {
       console.log(`[MediaPlayer] CMAF HLS native: ${playlistUrl}`);
+      // Global video event listeners (constructor) handle waiting/playing/
+      // error/ended for all modes — no CMAF-specific listeners needed.
+
       this.video.src = playlistUrl;
 
       // iOS autoplay: prime with muted play, unmute on first timeupdate
@@ -803,22 +806,19 @@ export class MediaPlayer extends EventTarget {
       return;
     }
 
-    await this._openMediaSource(MSClass);
-
-    // Defer SourceBuffer creation until we've sniffed the fMP4 init segment's
-    // REAL codecs (dynamic SourceBuffer). browserhd emits H.264/AAC, but
-    // browserhd_remux/copyv can emit HEVC/VP9/AV1/AC-3 that the browser decodes
-    // natively — those need a matching SourceBuffer, not the old hardcoded avc1.
-    // The init segment (ftyp+moov) leads the stream; _startBridgeStream
-    // accumulates until moov is complete, then calls _ensureDynamicSourceBuffer.
+    // Kick off the fetch/grace timer IN PARALLEL with MediaSource setup.
+    // The msproxy HTTP request triggers ffmpeg startup on the server; by
+    // starting it before _openMediaSource() resolves (~50-100ms), the
+    // server's NVENC probe/init overlaps with MSE sourceopen. Data that
+    // arrives before sourceopen is buffered in _startBridgeStream's reader
+    // loop (it waits for SourceBuffer before appending).
     this._sbPending = true;
     this._initAccum = [];
     this._initAccumLen = 0;
-
     this.state = PlayerState.LOADED;
-
-    // Start fetching the fMP4 stream from the bridge / msproxy.
     this._startInitialBridgeFetch(filePath);
+
+    await this._openMediaSource(MSClass);
   }
 
   /**
