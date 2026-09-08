@@ -789,6 +789,7 @@ export class MediaPlayer extends EventTarget {
     this._bridgeMfid = (mfid !== null && mfid !== undefined) ? mfid : null;
     this._bridgeSessionId = 'pwa-' + Date.now();
     this._ngFmtAttempted = false;  // allow ng_fmt fast-path for this stream
+    this._xcodeHintAttempted = false;  // allow xcode-profile fast-path
     this.startSinkMonitor();
     // Set up MSE
     const MSClass = this._getMediaSourceClass();
@@ -1121,6 +1122,52 @@ export class MediaPlayer extends EventTarget {
         if (this._formatHint.video && !hintCodecs.video && !this._msproxyMode?.startsWith('xcode:')) {
           console.warn(`[MediaPlayer] ng_fmt: video codec ${this._formatHint.video} is not MSE-compatible — forcing transcode`);
           if (this._forceMsproxyTranscodeFallback()) return 'fallback';
+        }
+      }
+    }
+
+    // ── Fast path: xcode profile → known output codecs ─────────────────
+    // When the server tells us the transcode profile (e.g. xcode:browserhd),
+    // the OUTPUT codecs are deterministic — no need to wait for the moov box.
+    // browserhd / browserhd_copyv / browserhd_remux all emit fMP4 with
+    // H.264 High + AAC-LC. copyv copies the source video, but the container
+    // is still fMP4 with H.264-compatible moov (NVENC always re-encodes if
+    // the source isn't H.264, so the output IS H.264 in practice). Only
+    // attempt once per stream — if it fails, fall through to sniffing.
+    if (this._msproxyMode && !this._xcodeHintAttempted) {
+      this._xcodeHintAttempted = true;
+      const xcodeOutputMap = {
+        // profile key → { video, audio } MSE codec strings
+        'browserhd':          { video: 'avc1.640028', audio: 'mp4a.40.2' },
+        'browserhd_copyv':    { video: 'avc1.640028', audio: 'mp4a.40.2' },
+        'browserhd_remux':    { video: 'avc1.640028', audio: 'mp4a.40.2' },
+      };
+      // Extract the profile from "xcode:browserhd;ac=2" → "browserhd"
+      let profile = this._msproxyMode;
+      if (profile.startsWith('xcode:')) profile = profile.substring(6);
+      const semiIdx = profile.indexOf(';');
+      if (semiIdx >= 0) profile = profile.substring(0, semiIdx);
+      const xcodeCodecs = xcodeOutputMap[profile];
+      if (xcodeCodecs) {
+        const parts = [];
+        if (xcodeCodecs.video) parts.push(xcodeCodecs.video);
+        if (xcodeCodecs.audio) parts.push(xcodeCodecs.audio);
+        const xcodeMime = `video/mp4; codecs="${parts.join(',')}"`;
+        try {
+          if (MSClass.isTypeSupported(xcodeMime)) {
+            this.sourceBuffer = this.mediaSource.addSourceBuffer(xcodeMime);
+            this.sourceBuffer.mode = 'segments';
+            this.sourceBuffer.addEventListener('updateend', () => this._processPushQueue());
+            this.sourceBuffer.addEventListener('error', (e) => {
+              console.error('[MediaPlayer] SourceBuffer error:', e);
+              this._forceMsproxyTranscodeFallback();
+            });
+            this._cachedBridgeMime = xcodeMime;
+            console.log(`[MediaPlayer] xcode-profile fast-path SourceBuffer (${profile}): ${xcodeMime}`);
+            return true;
+          }
+        } catch (e) {
+          console.warn(`[MediaPlayer] xcode-profile addSourceBuffer(${xcodeMime}) failed:`, e && e.message, '— will sniff');
         }
       }
     }
@@ -1747,6 +1794,7 @@ export class MediaPlayer extends EventTarget {
     this._initAccum = null;
     this._initAccumLen = 0;
     this._ngFmtAttempted = false;
+    this._xcodeHintAttempted = false;
     this._formatHint = null;
     this._cmafHlsMode = false;
     this._cmafPlaylistUrl = null;
