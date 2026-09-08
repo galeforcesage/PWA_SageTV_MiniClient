@@ -1004,7 +1004,11 @@ export class MiniClientConnection extends EventTarget {
    */
   _getEffectiveQualityHint() {
     const override = (this.settings ? this.settings.get('display_sink_override', 'auto') : 'auto').toLowerCase();
-    if (override === 'never' || override === 'off') return 'savings';
+    // Server accepts only: auto | local | server (line 8456 of MediaServer).
+    // Map user's "never"/"off" → 'local' (no server-side upscaling; client
+    // handles its own display scaling). 'savings' was previously sent here
+    // but silently ignored by the server.
+    if (override === 'never' || override === 'off') return 'local';
     return this.settings ? this.settings.get('quality_hint', 'auto') : 'auto';
   }
 
