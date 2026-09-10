@@ -920,9 +920,9 @@ export class MiniClientConnection extends EventTarget {
    */
   _getDisplaySinkResolution() {
     try {
-      // On Tizen TVs the web runtime renders into a 1920??1080 framebuffer even
+      // On Tizen TVs the web runtime renders into a 1920×1080 framebuffer even
       // on 4K panels.  screen.width * DPR returns that framebuffer, NOT the
-      // physical panel ??? exactly the trap ??2.1 warns about.  Use the platform
+      // physical panel — exactly the trap §2.1 warns about.  Use the platform
       // API to get the real panel resolution.
       let w, h;
       if (this.platformDetector?.isTizen?.()) {
@@ -931,32 +931,29 @@ export class MiniClientConnection extends EventTarget {
         h = panel.h;
       } else {
         const dpr = window.devicePixelRatio;
-        if (!dpr || !isFinite(dpr) || dpr <= 0) return '';
+        if (!dpr || !isFinite(dpr) || dpr <= 0) {
+          console.warn(`[Connection] DISPLAY_SINK: bad DPR (${dpr}), using fallback 1920x1080`);
+          return '1920x1080';
+        }
         w = Math.round(screen.width * dpr);
         h = Math.round(screen.height * dpr);
       }
-      // Range check: 640??480 ??? 7680??4320 (server discards outside this range)
-      if (w < 640 || h < 480 || w > 7680 || h > 4320) return '';
-
-      const override = (this.settings ? this.settings.get('display_sink_override', 'auto') : 'auto').toLowerCase();
-
-      // Auto: suppress on small screens (phone) to avoid inviting upscale
-      // on devices that can't benefit. Tizen = TV = always send.
-      // iPad/tablet: always send — their CSS screen.width is small (1024-1194)
-      // but physical resolution is 2K+; abstaining causes the server to use
-      // the codec ceiling (3840x2160) and offer absurd 4K upscaling.
-      if (override === 'auto') {
-        if (this.platformDetector?.isTizen?.()) return `${w}x${h}`;
-        if (this.platformDetector?.isIOS?.()) return `${w}x${h}`;
-        if (screen.width >= 1280) return `${w}x${h}`;
-        return ''; // small screen — abstain (server infers from decode ceilings)
+      // Range check: 640×480 → 7680×4320
+      if (w < 640 || h < 480 || w > 7680 || h > 4320) {
+        console.warn(`[Connection] DISPLAY_SINK: out of range ${w}x${h} (screen=${screen.width}x${screen.height} dpr=${window.devicePixelRatio}), using fallback 1920x1080`);
+        return '1920x1080';
       }
 
-      // Always AND Never: send the honest panel. Never routes intent
-      // through QUALITY_HINT=savings (see _getEffectiveQualityHint).
+      console.log(`[Connection] DISPLAY_SINK: ${w}x${h} (screen=${screen.width}x${screen.height} dpr=${window.devicePixelRatio})`);
+      // Always send the honest resolution. Abstaining (returning '') causes
+      // the server to log sink=0x0 and infer from codec ceilings, which is
+      // strictly worse — it can offer absurd 4K upscaling for a 1080p panel.
+      // The user's "don't upscale" intent is routed through QUALITY_HINT
+      // (=local), not by withholding the sink.
       return `${w}x${h}`;
-    } catch {
-      return '';
+    } catch (e) {
+      console.warn(`[Connection] DISPLAY_SINK: exception (${e && e.message}), using fallback 1920x1080`);
+      return '1920x1080';
     }
   }
 
