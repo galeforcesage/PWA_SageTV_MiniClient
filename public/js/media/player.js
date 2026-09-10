@@ -1058,12 +1058,19 @@ export class MediaPlayer extends EventTarget {
     // Retry with bare browserhd but PRESERVE transport-critical params
     // (acodec, ac) that the server needs to produce MSE-safe output.
     // Only strip codec-routing params (copyv, hevc, etc.) that caused the
-    // failure. Also carry the current sink so the server can re-derive
-    // its enhancement tier.
+    // failure.
+    // Do NOT re-add sink= when the original mode included :enhance — the
+    // enhance attempt already failed (or its ring-overflow side-effects did),
+    // so the fallback must be a clean non-enhanced transcode. Including
+    // sink= causes the server to re-derive an enhancement tier and upscale
+    // again, producing the same high-bitrate overflow.
+    const wasEnhance = mode.includes(':enhance') || mode.includes(';tier=');
     const params = (mode.split(';').slice(1) || [])
       .filter(p => /^(acodec|ac)=/.test(p));
-    const sink = this._measureSink();
-    if (sink) params.push(`sink=${sink.w}x${sink.h}`);
+    if (!wasEnhance) {
+      const sink = this._measureSink();
+      if (sink) params.push(`sink=${sink.w}x${sink.h}`);
+    }
     const retryMode = 'xcode:browserhd' + (params.length ? ';' + params.join(';') : '');
     // If the retry mode is identical to what failed, nothing more to try.
     if (retryMode === mode) return false;
@@ -2290,8 +2297,17 @@ export class MediaPlayer extends EventTarget {
 
       console.log(`[MediaPlayer] Sink changed ${oldW}x${oldH} → ${sink.w}x${sink.h}, re-opening transcode`);
       this._liveSinkOverride = `${sink.w}x${sink.h}`;
-      // Capture position before restart resets video.currentTime to 0
-      const currentMs = this.getMediaTimeMillis();
+      // Capture position before restart resets video.currentTime to 0.
+      // Use _lastGoodPositionMs as fallback: if the sink change fires during
+      // early buffering (video.currentTime ≈ 0), getMediaTimeMillis() returns
+      // near-zero even though the user was watching at a much later position
+      // from a previous stream/seek. The server polls GETMEDIATIME periodically,
+      // so _lastGoodPositionMs reflects the last confirmed playhead.
+      let currentMs = this.getMediaTimeMillis();
+      if (currentMs < 1000 && this._lastGoodPositionMs > 1000) {
+        currentMs = this._lastGoodPositionMs;
+        console.log(`[MediaPlayer] Sink change: video.currentTime near-zero, using lastGoodPosition ${currentMs}ms`);
+      }
       this._bridgeTimeOffsetMs = currentMs;
       // Resolution change may produce different H.264 profile/level — force
       // init-segment re-sniff instead of reusing the old codec MIME.
