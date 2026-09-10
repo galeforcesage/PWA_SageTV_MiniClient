@@ -274,7 +274,14 @@ export class MiniClientConnection extends EventTarget {
     this._bytesReceivedGfx = 0;
     this._bytesReceivedMedia = 0;
     this._bytesReceivedWindow = 0;     // bytes in current 1-second window
-    this._bandwidthKbps = 0;           // computed every second
+    // Seed bandwidth with the Network Information API so the very first
+    // server poll gets a reasonable value instead of 0.  Chromium caps
+    // navigator.connection.downlink at 10 Mbps; our measured estimate
+    // overtakes it within seconds of streaming, but this avoids a cold
+    // start where the server sees ~0 and skips enhancement.
+    const navDown = navigator.connection?.downlink;  // Mbps (Chromium only)
+    this._bandwidthKbps = (navDown && isFinite(navDown) && navDown > 0)
+      ? Math.round(navDown * 1000) : 0;
     this._bandwidthTimer = null;
 
     // Media reconnect guards to prevent rapid reconnect storms.
@@ -1971,7 +1978,17 @@ export class MiniClientConnection extends EventTarget {
         return navigator.connection?.type || 'UNKNOWN';
       case 'NET_LINK_KBPS_DOWN':
         this._markNgNegotiated(name);
-        return `${navigator.connection?.downlink ? Math.round(navigator.connection.downlink * 1000) : 0}`;
+        // Return the higher of the browser's Network Information API estimate
+        // and our own measured throughput.  navigator.connection.downlink is
+        // capped at 10 Mbps by spec but available instantly; _bandwidthKbps
+        // is uncapped but starts cold.  The max gives the server the best
+        // available estimate at every polling moment.
+        {
+          const navKbps = navigator.connection?.downlink
+            ? Math.round(navigator.connection.downlink * 1000) : 0;
+          const measured = this._bandwidthKbps || 0;
+          return `${Math.max(navKbps, measured)}`;
+        }
       case 'NET_LINK_KBPS_UP':
         this._markNgNegotiated(name);
         return '0';
