@@ -211,18 +211,21 @@ export class SpatialNavigation {
   _isRendered(el) {
     if (!el) return false;
     if (el.hidden) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
     const cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return true;
   }
 
   _isFocusable(el) {
     if (!el || !(el instanceof Element)) return false;
     if (el.hidden) return false;
-    if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
     if (!el.matches(FOCUSABLE_SELECTOR)) return false;
-    return true;
+    // Tizen's older Chromium reports offsetParent=null for visible native
+    // controls inside an open <details>. Use rendered geometry instead so
+    // expanded settings controls remain reachable by the TV remote.
+    return this._isRendered(el);
   }
 
   _firstIn(scope) {

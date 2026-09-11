@@ -73,6 +73,13 @@ export class AVPlayPlayer extends EventTarget {
     this._telemetrySequence = 0;
     this._reportedFailureKeys = new Set();
     this._bridgeSessionId = null;  // per-load() session ID for bridge dedup
+    this._restartableStream = null;
+    this._streamOffsetMs = 0;
+    this._fallbackRestart = null;
+    this._restartSeekTimer = null;
+    this._pendingRestartSeekMs = 0;
+    this._restartSeekResumePaused = false;
+    this._restartSeekDestRect = null;
 
     // Server UI coordinate space (advertised UI resolution). setVideoRectangles
     // rects are in this space; we scale to physical display pixels for AVPlay.
@@ -170,11 +177,17 @@ export class AVPlayPlayer extends EventTarget {
 
   // ── Load / transport ─────────────────────────────────────
 
-  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath, msproxyFallbackUrl = null) {
+  async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath, msproxyFallbackUrl = null, streamOptions = null) {
+    const retainedRect = streamOptions?.destRect || null;
+    const startPaused = !!streamOptions?.startPaused;
     this.stop();
     // Generate a unique session ID for this load so the bridge can dedup
     // concurrent AVPlay HTTP connections (range probes) into one XCODE_SETUP.
-    this._bridgeSessionId = 'avplay-' + Date.now();
+    this._bridgeSessionId = streamOptions?.sessionId || ('avplay-' + Date.now());
+    this._restartableStream = streamOptions?.restartable || null;
+    this._streamOffsetMs = Math.max(0, Number(streamOptions?.offsetMs) || 0);
+    this._fallbackRestart = streamOptions?.fallbackRestart || null;
+    this._lastDestRect = retainedRect;
     // Token for THIS load. stop()/a newer load() bump _loadSeq, so the async
     // prepareAsync callbacks below are ignored if playback was already exited
     // (otherwise a late "prepared" would set state=PLAY and strand the menu
@@ -183,7 +196,7 @@ export class AVPlayPlayer extends EventTarget {
     this._pullHostname = hostname;
     this.serverEOS = false;
     this._firstFrameEmitted = false;
-    this._positionMs = 0;
+    this._positionMs = this._streamOffsetMs;
 
     if (!this._avplay) {
       this._emitPlaybackFailure('AVPLAY_UNAVAILABLE', { mode: 'avplay' });
@@ -220,11 +233,18 @@ export class AVPlayPlayer extends EventTarget {
           // Ignore if a stop()/newer load() happened while preparing — otherwise
           // we'd resume a video the user already exited and strand the menu.
           if (seq !== this._loadSeq) return;
-          try { this._durationMs = this._avplay.getDuration() || 0; } catch { /* ignore */ }
+          try {
+            this._durationMs = this._streamOffsetMs + (this._avplay.getDuration() || 0);
+          } catch { /* ignore */ }
           this._captureStreamInfo();
           try {
             this._avplay.play();
-            this.state = PlayerState.PLAY;
+            if (startPaused) {
+              this._avplay.pause();
+              this.state = PlayerState.PAUSE;
+            } else {
+              this.state = PlayerState.PLAY;
+            }
           } catch (e) {
             this._emitPlaybackFailure('AVPLAY_PLAY_ERROR', { mode: 'avplay', message: e && e.message });
           }
@@ -300,7 +320,27 @@ export class AVPlayPlayer extends EventTarget {
    */
   _fallbackOrFail(reason, details = {}) {
     this._clearPrepareWatchdog();
-    this._phoneHome(reason, { ...details, hasFallback: !!this._fallbackUrl });
+    const fallbackRestart = this._fallbackRestart;
+    this._phoneHome(reason, { ...details, hasFallback: !!this._fallbackUrl || !!fallbackRestart });
+    if (fallbackRestart?.kind === 'bridge-file') {
+      this._fallbackUrl = null;
+      this._fallbackRestart = null;
+      console.warn(`[AVPlay] ${reason}; falling back to server /transcode`);
+      this.dispatchEvent(new CustomEvent('nativefallback', { detail: { reason } }));
+      this.loadBridgeFile(
+        fallbackRestart.absPath,
+        fallbackRestart.hostname,
+        this._streamOffsetMs / 1000,
+        {
+          startPaused: !!fallbackRestart.startPaused,
+          destRect: fallbackRestart.destRect || this._lastDestRect,
+        }
+      ).catch((e) => this._emitPlaybackFailure('AVPLAY_FALLBACK_ERROR', {
+        mode: 'avplay',
+        message: e && e.message,
+      }));
+      return;
+    }
     if (this._fallbackUrl) {
       const fb = this._fallbackUrl;
       this._fallbackUrl = null;
@@ -314,12 +354,32 @@ export class AVPlayPlayer extends EventTarget {
   }
 
   // Option B parity: bridge transcodes a MediaFile id to fMP4/TS AVPlay can open.
-  async loadBridgeMfid(mfid, hostname, seekSec = 0) {
+  async loadBridgeMfid(mfid, hostname, seekSec = 0, playbackOptions = null) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    this._bridgeSessionId = 'avplay-' + Date.now();
-    const sess = `&session=${encodeURIComponent(this._bridgeSessionId)}`;
+    const sessionId = 'avplay-' + Date.now();
+    const sess = `&session=${encodeURIComponent(sessionId)}`;
     const url = `${base}/transcode?mfid=${encodeURIComponent(mfid)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
-    return this.load(0, 0, '', url, hostname, false, 0, null);
+    return this.load(0, 0, '', url, hostname, false, 0, null, null, {
+      sessionId,
+      offsetMs: seekSec * 1000,
+      restartable: { kind: 'bridge-mfid', mfid, hostname },
+      startPaused: !!playbackOptions?.startPaused,
+      destRect: playbackOptions?.destRect || null,
+    });
+  }
+
+  async loadBridgeFile(absPath, hostname, seekSec = 0, playbackOptions = null) {
+    const base = (this._bridgeBase || '').replace(/\/$/, '');
+    const sessionId = 'avplay-' + Date.now();
+    const sess = `&session=${encodeURIComponent(sessionId)}`;
+    const url = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
+    return this.load(0, 0, '', url, hostname, false, 0, null, null, {
+      sessionId,
+      offsetMs: seekSec * 1000,
+      restartable: { kind: 'bridge-file', absPath, hostname },
+      startPaused: !!playbackOptions?.startPaused,
+      destRect: playbackOptions?.destRect || null,
+    });
   }
 
   /**
@@ -331,14 +391,27 @@ export class AVPlayPlayer extends EventTarget {
    * @param {string} hostname SageTV host
    * @param {number} [seekSec=0]
    */
-  async loadMsProxy(absPath, mode, hostname, seekSec = 0) {
+  async loadMsProxy(absPath, mode, hostname, seekSec = 0, playbackOptions = null) {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
-    this._bridgeSessionId = 'avplay-' + Date.now();
-    const sess = `&session=${encodeURIComponent(this._bridgeSessionId)}`;
+    const sessionId = 'avplay-' + Date.now();
+    const sess = `&session=${encodeURIComponent(sessionId)}`;
     const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
     const fallbackUrl = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
     console.log(`[AVPlay] loadMsProxy mode=${mode}: ${url}`);
-    return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl);
+    return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl, {
+      sessionId,
+      offsetMs: seekSec * 1000,
+      restartable: mode === 'direct' ? null : { kind: 'msproxy', absPath, mode, hostname },
+      fallbackRestart: {
+        kind: 'bridge-file',
+        absPath,
+        hostname,
+        startPaused: !!playbackOptions?.startPaused,
+        destRect: playbackOptions?.destRect || null,
+      },
+      startPaused: !!playbackOptions?.startPaused,
+      destRect: playbackOptions?.destRect || null,
+    });
   }
 
   /**
@@ -361,7 +434,7 @@ export class AVPlayPlayer extends EventTarget {
         this.dispatchEvent(new CustomEvent('playing'));
       },
       oncurrentplaytime: (ms) => {
-        this._positionMs = ms | 0;
+        this._positionMs = this._streamOffsetMs + Math.max(0, Number(ms) || 0);
         this._emitFirstFrameOnce();
       },
       onstreamcompleted: () => {
@@ -425,6 +498,16 @@ export class AVPlayPlayer extends EventTarget {
     this._loadSeq = (this._loadSeq || 0) + 1;
     this._clearPrepareWatchdog();
     this._fallbackUrl = null;
+    this._restartableStream = null;
+    this._streamOffsetMs = 0;
+    this._fallbackRestart = null;
+    if (this._restartSeekTimer) {
+      clearTimeout(this._restartSeekTimer);
+      this._restartSeekTimer = null;
+    }
+    this._pendingRestartSeekMs = 0;
+    this._restartSeekResumePaused = false;
+    this._restartSeekDestRect = null;
     this._lastDestRect = null;
     if (this._avplay) {
       try { this._avplay.stop(); } catch { /* ignore */ }
@@ -452,7 +535,7 @@ export class AVPlayPlayer extends EventTarget {
   /** @param {number} timeMS absolute position in milliseconds. */
   seek(timeMS) {
     if (!this._avplay) return;
-    let ms = Math.max(0, timeMS | 0);
+    let ms = Math.max(0, Math.trunc(Number(timeMS) || 0));
 
     // ── Live-edge guard (NG context) ──
     // For a live recording the server advertises safeSeekEndMs (the furthest
@@ -470,6 +553,43 @@ export class AVPlayPlayer extends EventTarget {
       }
       console.debug(`[AVPlay] Live-edge clamp: target ${ms}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
       ms = this._ngLiveSafeSeekEndMs;
+    }
+
+    // /msproxy and bridge /transcode responses are forward-only HTTP streams.
+    // AVPlay.seekTo() cannot reposition them; reopen the server stream with a
+    // seek offset, just like the browser MSE path does.
+    if (this._restartableStream) {
+      this._pendingRestartSeekMs = ms;
+      this._restartSeekResumePaused = this._restartSeekResumePaused || this.state === PlayerState.PAUSE;
+      this._restartSeekDestRect = this._lastDestRect;
+      if (this._restartSeekTimer) clearTimeout(this._restartSeekTimer);
+      this._restartSeekTimer = setTimeout(() => {
+        this._restartSeekTimer = null;
+        const targetMs = this._pendingRestartSeekMs;
+        const stream = this._restartableStream;
+        const playbackOptions = {
+          startPaused: this._restartSeekResumePaused,
+          destRect: this._restartSeekDestRect,
+        };
+        this._pendingRestartSeekMs = 0;
+        this._restartSeekResumePaused = false;
+        this._restartSeekDestRect = null;
+        if (!stream) return;
+        console.log(`[AVPlay] Reopening ${stream.kind} stream at ${targetMs}ms`);
+        let restart;
+        if (stream.kind === 'msproxy') {
+          restart = this.loadMsProxy(stream.absPath, stream.mode, stream.hostname, targetMs / 1000, playbackOptions);
+        } else if (stream.kind === 'bridge-mfid') {
+          restart = this.loadBridgeMfid(stream.mfid, stream.hostname, targetMs / 1000, playbackOptions);
+        } else if (stream.kind === 'bridge-file') {
+          restart = this.loadBridgeFile(stream.absPath, stream.hostname, targetMs / 1000, playbackOptions);
+        }
+        Promise.resolve(restart).catch((e) => this._emitPlaybackFailure('AVPLAY_SEEK_RESTART_ERROR', {
+          mode: 'avplay',
+          message: e && e.message,
+        }));
+      }, 250);
+      return;
     }
 
     this.dispatchEvent(new CustomEvent('buffering'));
@@ -511,7 +631,9 @@ export class AVPlayPlayer extends EventTarget {
   getMediaTimeMillis() {
     if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) return 0;
     if (this._avplay) {
-      try { return this._avplay.getCurrentTime() | 0; } catch { /* fall through */ }
+      try {
+        return this._streamOffsetMs + Math.max(0, Number(this._avplay.getCurrentTime()) || 0);
+      } catch { /* fall through */ }
     }
     return this._positionMs;
   }

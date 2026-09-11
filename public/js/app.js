@@ -833,7 +833,14 @@ function setupEventHandlers() {
     const cancelBtn = document.getElementById('set-cancel');
     const active = document.activeElement;
     const list = Array.from(scroll.querySelectorAll(scrollFocusableSelector))
-      .filter((el) => el.offsetParent !== null);
+      .filter((el) => {
+        if (el.hidden) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return true;
+      });
     const last = list[list.length - 1];
     if (key === 'ArrowDown' && active === last && saveBtn) {
       saveBtn.focus();
