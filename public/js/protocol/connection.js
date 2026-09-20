@@ -3401,7 +3401,10 @@ export class MiniClientConnection extends EventTarget {
             // Proxy through bridge for CORS (hls.js XHR needs same-origin)
             const bridgeBase = this.bridgeUrl.replace(/^ws/, 'http').replace(/\/$/, '');
             const cmafUrl = `${bridgeBase}/cmaf/iosstream_${clientName}_${mfId}_${segNum}_${bwKbps}_fmp4.m3u8`;
-            this.mediaPlayer.loadCmafHls(cmafUrl);
+            this.mediaPlayer.loadCmafHls(cmafUrl, {
+              mfid: parseInt(mfId, 10),
+              hostname: this.serverHost,
+            });
           } else
 
           // ── Legacy iosstream (TS HLS, 480x272): extract MediaFile ID and
@@ -4476,4 +4479,3 @@ function hashCode(str) {
   }
   return hash;
 }
-

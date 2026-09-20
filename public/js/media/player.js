@@ -571,6 +571,41 @@ export class MediaPlayer extends EventTarget {
     }
   }
 
+  /**
+   * Load a server-conditioned stream by MediaFile ID. Used when the CMAF HLS
+   * encoder stalls after advertising a segment that it never finalizes.
+   */
+  async loadMsProxyMfid(mfid, mode, hostname, seekSec = 0) {
+    this.stop();
+    this.serverEOS = false;
+    this._totalPushed = 0;
+    this._pullFilePath = null;
+    this._pullHostname = hostname;
+    this._pullFallbackTried = false;
+
+    const base = (this._bridgeBase || '').replace(/\/$/, '');
+    this._msproxyStreamUrl = `${base}/msproxy?mfid=${encodeURIComponent(mfid)}&mode=${encodeURIComponent(mode)}`;
+    this._msproxyAbsPath = null;
+    this._msproxyMode = mode;
+
+    let resolveLoad;
+    this._loadingPromise = new Promise(r => { resolveLoad = r; });
+    try {
+      await this._loadBridgeMode(null, hostname, mfid);
+      if (seekSec > 0 && this.bridgeMode) {
+        if (this._initialFetchTimer) {
+          clearTimeout(this._initialFetchTimer);
+          this._initialFetchTimer = null;
+        }
+        this._bridgeTimeOffsetMs = seekSec * 1000;
+        this._flushAndRestart(null, seekSec);
+      }
+    } finally {
+      resolveLoad();
+      this._loadingPromise = null;
+    }
+  }
+
   // ── CMAF/fMP4 HLS playback ────────────────────────────────────────────────
   // Server Step 2: iosstream_*_fmp4.m3u8 + _init.mp4 + _N.m4s
   // Safari/iOS: native <video src=m3u8> — zero library, lowest power.
@@ -581,14 +616,16 @@ export class MediaPlayer extends EventTarget {
 
   /**
    * Play via the server's CMAF/fMP4 HLS endpoint.
-   * @param {string} playlistUrl  full URL to _fmp4.m3u8 (bridge-proxied or direct)
+   * @param {string} playlistUrl full URL to _fmp4.m3u8 (bridge-proxied or direct)
+   * @param {{mfid?:number, hostname?:string}} [fallback] server pull fallback
    */
-  async loadCmafHls(playlistUrl) {
+  async loadCmafHls(playlistUrl, fallback = {}) {
     this.stop();
     this.bridgeMode = false;
     this._cmafHlsMode = true;
     this._cmafPlaylistUrl = playlistUrl;
     this._bridgeSessionId = 'cmaf-' + Date.now();
+    this._hlsFatalFallbackTried = false;
     this.serverEOS = false;
     this._firstFrameEmitted = false;
 
@@ -668,6 +705,9 @@ export class MediaPlayer extends EventTarget {
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
         this._hls.recoverMediaError();
       } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        if (this._fallbackFromCmafHls(fallback.mfid, fallback.hostname, data.details)) {
+          return;
+        }
         this._hls.startLoad();
       } else {
         this._emitPlaybackFailure('HLS_FATAL', {
@@ -677,6 +717,31 @@ export class MediaPlayer extends EventTarget {
         });
       }
     });
+  }
+
+  _fallbackFromCmafHls(mfid, hostname, details) {
+    if (this._hlsFatalFallbackTried || !Number.isInteger(mfid) || mfid <= 0 || !hostname) {
+      return false;
+    }
+
+    this._hlsFatalFallbackTried = true;
+    const resumeMs = this.getMediaTimeMillis();
+    console.warn(`[MediaPlayer] CMAF HLS network failure (${details || 'unknown'}); falling back to msproxy at ${(resumeMs / 1000).toFixed(1)}s`);
+    this._emitPlaybackFailure('CMAF_NETWORK_FATAL', {
+      mode: 'cmaf-hls',
+      details: details || '',
+      fallback: 'msproxy',
+      resumeMs,
+    });
+    this.loadMsProxyMfid(mfid, 'xcode:browserhd', hostname, resumeMs / 1000)
+      .catch((error) => {
+        console.error('[MediaPlayer] CMAF msproxy fallback failed:', error);
+        this._emitPlaybackFailure('CMAF_FALLBACK_FAILED', {
+          mode: 'msproxy',
+          message: error && error.message ? error.message : String(error),
+        });
+      });
+    return true;
   }
 
   _canPlayNativeHls() {
@@ -1599,6 +1664,7 @@ export class MediaPlayer extends EventTarget {
     this._nativeXcodeMode = false;
     this._nativeXcodeOffsetMs = 0;
     this._bridgeFilePath = null;
+    this._bridgeMfid = null;
     this._bridgeTimeOffsetMs = 0;
     this._bridgeNeedTimeReset = false;
     this._msproxyStreamUrl = null;
@@ -1695,7 +1761,7 @@ export class MediaPlayer extends EventTarget {
       return;
     }
 
-    if (this.bridgeMode && this._bridgeFilePath) {
+    if (this.bridgeMode && (this._bridgeFilePath || this._bridgeMfid !== null)) {
       // ── 0) SERVER-AUTHORITATIVE PULL-XCODE (/msproxy) INITIAL SEEK ──
       // The initial seek (resume position or 0) arrives right after OPENURL,
       // while the first fetch is still deferred by _startInitialBridgeFetch.
