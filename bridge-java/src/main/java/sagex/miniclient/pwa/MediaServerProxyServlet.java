@@ -69,6 +69,7 @@ public class MediaServerProxyServlet extends HttpServlet {
      */
     private static final long LIVE_IDLE_TIMEOUT_MS = 120_000L;
     private static final long LIVE_POLL_MS = 10L;
+    private static final long XCODE_ADJUST_INTERVAL_MS = 5_000L;
     /** Collapse window: concurrent requests within this window for the same
      *  session skip XCODE_SETUP (AVPlay range probes). */
     private static final long SESSION_COLLAPSE_WINDOW_MS = 400L;
@@ -302,7 +303,8 @@ public class MediaServerProxyServlet extends HttpServlet {
             if (!growing) {
                 serveStatic(req, resp, in, sockOut, total, contentType);
             } else {
-                serveStream(req, resp, in, sockOut, avail, total, contentType, xcodeMode != null);
+                serveStream(req, resp, in, sockOut, avail, total, contentType,
+                    xcodeMode != null, isAdaptiveTranscodeMode(mode));
             }
         } catch (IOException ioe) {
             log.debug("[MsProxy] stream aborted for {}: {}", canonical, ioe.toString());
@@ -407,7 +409,7 @@ public class MediaServerProxyServlet extends HttpServlet {
     private void serveStream(HttpServletRequest req, HttpServletResponse resp,
                              InputStream in, OutputStream sockOut,
                              long avail, long total, String contentType,
-                             boolean liveXcode) throws IOException {
+                             boolean liveXcode, boolean adaptiveXcode) throws IOException {
         // For a live xcode, the output is a sequential pipe — byte offsets are
         // meaningless and Range requests would restart the transcode at the same
         // -ss position.  Always stream from 0 and present as non-seekable so
@@ -437,6 +439,7 @@ public class MediaServerProxyServlet extends HttpServlet {
         long streamStart = System.currentTimeMillis();
         long lastReportAt = streamStart;
         long lastReportBytes = 0;
+        boolean xcodeAdjustEnabled = adaptiveXcode;
         int readCount = 0;
         int sizeQueryCount = 0;
 
@@ -509,13 +512,35 @@ public class MediaServerProxyServlet extends HttpServlet {
             }
             offset += want;
 
-            // Periodic throughput report every 5 seconds
+            // Measure the HTTP goodput actually delivered to the remote client.
+            // This includes servlet/socket back-pressure across a VPN rather than
+            // trusting the client's cold browser network estimate.
             long now = System.currentTimeMillis();
-            if (now - lastReportAt >= 30_000) {
-                double sec = (now - lastReportAt) / 1000.0;
-                double mbps = ((offset - lastReportBytes) * 8.0) / (sec * 1_000_000);
-                log.debug("[MsProxy] THROUGHPUT: {} Mbps, {} bytes, gap={}",
-                    String.format("%.1f", mbps), offset, avail - offset);
+            if (now - lastReportAt >= XCODE_ADJUST_INTERVAL_MS) {
+                long elapsedMs = now - lastReportAt;
+                long deliveredBytes = offset - lastReportBytes;
+                long measuredKbps = Math.round((deliveredBytes * 8.0) / elapsedMs);
+                log.debug("[MsProxy] GOODPUT: {} kbps, {} bytes, gap={}",
+                    measuredKbps, offset, avail - offset);
+
+                if (xcodeAdjustEnabled && measuredKbps > 0) {
+                    sendLine(sockOut, "XCODE_ADJUST " + measuredKbps);
+                    String adjusted = readLine(in);
+                    try {
+                        long adjustedKbps = Long.parseLong(adjusted.trim());
+                        if (adjustedKbps > 0) {
+                            log.info("[MsProxy] XCODE_ADJUST measured={}kbps applied={}kbps",
+                                measuredKbps, adjustedKbps);
+                        } else {
+                            xcodeAdjustEnabled = false;
+                            log.info("[MsProxy] XCODE_ADJUST disabled after reply: {}", adjusted);
+                        }
+                    } catch (NumberFormatException unsupported) {
+                        // Legacy servers retain their current fixed-rate behavior.
+                        xcodeAdjustEnabled = false;
+                        log.info("[MsProxy] XCODE_ADJUST unsupported; keeping fixed rate: {}", adjusted);
+                    }
+                }
                 lastReportAt = now;
                 lastReportBytes = offset;
             }
@@ -606,6 +631,11 @@ public class MediaServerProxyServlet extends HttpServlet {
             quality = base;                  // unknown: treat as a raw quality name
         }
         return quality + params;             // re-append ;k=v for the server's XCODE_SETUP parser
+    }
+
+    private static boolean isAdaptiveTranscodeMode(String mode) {
+        String base = splitModeParams(mode)[0].toLowerCase(Locale.ROOT);
+        return base.equals("xcode") || base.startsWith("xcode:");
     }
 
     /**

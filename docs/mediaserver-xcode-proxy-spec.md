@@ -67,12 +67,13 @@ plugin, one process. It is NOT a separate proxy server.
 
 Flow:
 1. Open TCP to MediaServer `:7818`.
-2. If not `direct`: send `XCODE_SETUP <qmode>` (→ `OK`). For NG BW probe, send one
-   `XCODE_ADJUST <current>` — numeric reply ⇒ NG (enable adaptation), error ⇒
-   legacy (fixed rate).
+2. If not `direct`: send `XCODE_SETUP <qmode>` (→ `OK`).
 3. `OPEN <path>` (→ `OK`).
 4. Stream loop: `READ <offset> <len>` → write bytes to the HTTP response;
-   advance `offset`.
+   advance `offset`. For encoded `xcode:*` streams, measure the bytes actually
+   delivered over each five-second window and send that goodput as
+   `XCODE_ADJUST <kbps>`. A numeric reply keeps adaptation active; an error reply
+   identifies a legacy server and leaves its fixed-rate behavior unchanged.
 5. On client disconnect / response close: `CLOSE` + close the socket
    (**bounded lifecycle** — no orphaned connections/leaks).
 
