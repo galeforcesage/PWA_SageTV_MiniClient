@@ -180,6 +180,20 @@ export class MediaPlayer extends EventTarget {
     });
 
     this.video.addEventListener('error', (e) => {
+      // hls.js can surface an unavailable/corrupt CMAF fragment only through
+      // HTMLMediaElement.error after its network retries are exhausted. Use the
+      // same one-shot fallback as a fatal hls.js network event.
+      if (this._cmafHlsMode) {
+        const fallback = this._cmafFallback || {};
+        if (this._fallbackFromCmafHls(
+          fallback.mfid,
+          fallback.hostname,
+          this.video.error?.message || 'video-element-error'
+        )) {
+          return;
+        }
+      }
+
       // In bridge mode during an active flush/seek, the old MediaSource is being
       // torn down — errors from the dying SourceBuffer are expected and harmless.
       if (this.bridgeMode && this._currentRestartId) {
@@ -624,6 +638,7 @@ export class MediaPlayer extends EventTarget {
     this.bridgeMode = false;
     this._cmafHlsMode = true;
     this._cmafPlaylistUrl = playlistUrl;
+    this._cmafFallback = fallback;
     this._bridgeSessionId = 'cmaf-' + Date.now();
     this._hlsFatalFallbackTried = false;
     this.serverEOS = false;
@@ -1675,6 +1690,7 @@ export class MediaPlayer extends EventTarget {
     this._initAccumLen = 0;
     this._cmafHlsMode = false;
     this._cmafPlaylistUrl = null;
+    this._cmafFallback = null;
 
     if (this._hls) {
       this._hls.destroy();

@@ -27,3 +27,29 @@ test('CMAF fallback requires a valid media file and server', () => {
   assert.equal(player._fallbackFromCmafHls(0, 'server', 'fragLoadError'), false);
   assert.equal(player._fallbackFromCmafHls(123, '', 'fragLoadError'), false);
 });
+
+test('CMAF video element error uses the stored fallback context', () => {
+  const listeners = {};
+  const player = Object.create(MediaPlayer.prototype);
+  player.video = {
+    addEventListener: (name, handler) => { listeners[name] = handler; },
+    error: { code: 4, message: 'DEMUXER_ERROR_COULD_NOT_PARSE' },
+  };
+  player._cmafHlsMode = true;
+  player._cmafFallback = { mfid: 14362029, hostname: 'server' };
+
+  let received;
+  player._fallbackFromCmafHls = (...args) => {
+    received = args;
+    return true;
+  };
+
+  player._setupVideoEvents();
+  listeners.error({});
+
+  assert.deepEqual(received, [
+    14362029,
+    'server',
+    'DEMUXER_ERROR_COULD_NOT_PARSE',
+  ]);
+});
