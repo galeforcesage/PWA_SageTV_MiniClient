@@ -743,7 +743,7 @@ export class MediaPlayer extends EventTarget {
 
   _startCmafProgressWatchdog() {
     this._stopCmafProgressWatchdog();
-    this._cmafProgressTimer = setInterval(() => this._checkCmafProgress(), 5000);
+    this._cmafProgressTimer = setInterval(() => this._checkCmafProgress(), 1000);
   }
 
   _stopCmafProgressWatchdog() {
@@ -754,7 +754,7 @@ export class MediaPlayer extends EventTarget {
   }
 
   _checkCmafProgress(now = Date.now()) {
-    if (!this._cmafHlsMode || this.video.paused || this.video.ended) {
+    if (!this._cmafHlsMode || !this._firstFrameEmitted || this.seeking || this.video.paused || this.video.ended) {
       return false;
     }
     const mediaTime = Number(this.video.currentTime);
@@ -763,7 +763,7 @@ export class MediaPlayer extends EventTarget {
       this._cmafLastProgressAt = now;
       return false;
     }
-    if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < 20_000) {
+    if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < 5_000) {
       return false;
     }
     const fallback = this._cmafFallback || {};

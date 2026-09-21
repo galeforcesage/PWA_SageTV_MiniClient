@@ -55,9 +55,11 @@ test('CMAF video element error uses the stored fallback context', () => {
   ]);
 });
 
-test('CMAF progress watchdog falls back after twenty seconds of buffering', () => {
+test('CMAF progress watchdog falls back after five seconds without media progress', () => {
   const player = Object.create(MediaPlayer.prototype);
   player._cmafHlsMode = true;
+  player._firstFrameEmitted = true;
+  player.seeking = false;
   player.state = PlayerState.BUFFERING;
   player.video = { paused: false, ended: false, currentTime: 12 };
   player._cmafLastMediaTime = 12;
@@ -70,14 +72,16 @@ test('CMAF progress watchdog falls back after twenty seconds of buffering', () =
     return true;
   };
 
-  assert.equal(player._checkCmafProgress(29_999), false);
-  assert.equal(player._checkCmafProgress(30_000), true);
+  assert.equal(player._checkCmafProgress(14_999), false);
+  assert.equal(player._checkCmafProgress(15_000), true);
   assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
 });
 
 test('CMAF progress watchdog does not interrupt playing video', () => {
   const player = Object.create(MediaPlayer.prototype);
   player._cmafHlsMode = true;
+  player._firstFrameEmitted = true;
+  player.seeking = false;
   player.state = PlayerState.PLAY;
   player.video = { paused: false, ended: false, currentTime: 12 };
   player._cmafLastMediaTime = 11;
@@ -93,6 +97,8 @@ test('CMAF progress watchdog does not interrupt playing video', () => {
 test('CMAF progress watchdog does not interrupt paused video', () => {
   const player = Object.create(MediaPlayer.prototype);
   player._cmafHlsMode = true;
+  player._firstFrameEmitted = true;
+  player.seeking = false;
   player.video = { paused: true, ended: false, currentTime: 12 };
   player._cmafLastMediaTime = 12;
   player._cmafLastProgressAt = 10_000;
@@ -100,5 +106,23 @@ test('CMAF progress watchdog does not interrupt paused video', () => {
     throw new Error('fallback should not run while paused');
   };
 
+  assert.equal(player._checkCmafProgress(60_000), false);
+});
+
+test('CMAF progress watchdog waits for first frame and active seek', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._cmafHlsMode = true;
+  player._firstFrameEmitted = false;
+  player.seeking = false;
+  player.video = { paused: false, ended: false, currentTime: 0 };
+  player._cmafLastMediaTime = 0;
+  player._cmafLastProgressAt = 10_000;
+  player._fallbackFromCmafHls = () => {
+    throw new Error('fallback should not run before playback starts or during seek');
+  };
+
+  assert.equal(player._checkCmafProgress(60_000), false);
+  player._firstFrameEmitted = true;
+  player.seeking = true;
   assert.equal(player._checkCmafProgress(60_000), false);
 });
