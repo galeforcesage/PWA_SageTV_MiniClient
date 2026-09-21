@@ -75,6 +75,7 @@ export class MediaPlayer extends EventTarget {
     this._hls = null;
     this._cmafProgressTimer = null;
     this._cmafLastProgressAt = 0;
+    this._cmafLastMediaTime = 0;
 
     // Subtitle tracks
     this._subtitleTracks = [];
@@ -705,6 +706,7 @@ export class MediaPlayer extends EventTarget {
     this._hls.loadSource(playlistUrl);
     this._hls.attachMedia(this.video);
     this._cmafLastProgressAt = Date.now();
+    this._cmafLastMediaTime = Number(this.video.currentTime) || 0;
     this._startCmafProgressWatchdog();
 
     this._hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -752,7 +754,13 @@ export class MediaPlayer extends EventTarget {
   }
 
   _checkCmafProgress(now = Date.now()) {
-    if (!this._cmafHlsMode || (this.state !== PlayerState.BUFFERING && this.state !== PlayerState.LOADED)) {
+    if (!this._cmafHlsMode || this.video.paused || this.video.ended) {
+      return false;
+    }
+    const mediaTime = Number(this.video.currentTime);
+    if (Number.isFinite(mediaTime) && Math.abs(mediaTime - this._cmafLastMediaTime) >= 0.05) {
+      this._cmafLastMediaTime = mediaTime;
+      this._cmafLastProgressAt = now;
       return false;
     }
     if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < 20_000) {
@@ -770,14 +778,17 @@ export class MediaPlayer extends EventTarget {
     this._hlsFatalFallbackTried = true;
     this._stopCmafProgressWatchdog();
     const resumeMs = this.getMediaTimeMillis();
-    console.warn(`[MediaPlayer] CMAF HLS network failure (${details || 'unknown'}); falling back to msproxy at ${(resumeMs / 1000).toFixed(1)}s`);
+    const resumeSec = resumeMs / 1000;
+    const fallbackSeekSec = resumeSec > 5 ? Math.max(0, Math.floor(resumeSec / 5) * 5 - 5) : 0;
+    console.warn(`[MediaPlayer] CMAF HLS network failure (${details || 'unknown'}); falling back to msproxy at ${fallbackSeekSec.toFixed(1)}s`);
     this._emitPlaybackFailure('CMAF_NETWORK_FATAL', {
       mode: 'cmaf-hls',
       details: details || '',
       fallback: 'msproxy',
       resumeMs,
+      fallbackSeekMs: fallbackSeekSec * 1000,
     });
-    this.loadMsProxyMfid(mfid, 'xcode:browserhd', hostname, resumeMs / 1000)
+    this.loadMsProxyMfid(mfid, 'xcode:browserhd', hostname, fallbackSeekSec)
       .catch((error) => {
         console.error('[MediaPlayer] CMAF msproxy fallback failed:', error);
         this._emitPlaybackFailure('CMAF_FALLBACK_FAILED', {
@@ -1722,6 +1733,7 @@ export class MediaPlayer extends EventTarget {
     this._cmafPlaylistUrl = null;
     this._cmafFallback = null;
     this._cmafLastProgressAt = 0;
+    this._cmafLastMediaTime = 0;
 
     if (this._hls) {
       this._hls.destroy();
