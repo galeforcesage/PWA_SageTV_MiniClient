@@ -126,3 +126,16 @@ test('CMAF progress watchdog waits for first frame and active seek', () => {
   player.seeking = true;
   assert.equal(player._checkCmafProgress(60_000), false);
 });
+
+test('msproxy bandwidth seed query validates and caps the estimate', () => {
+  const player = Object.create(MediaPlayer.prototype);
+
+  player.setBandwidthSeedProvider(() => 4876.4);
+  assert.equal(player._getBandwidthSeedQuery(), '&bw=4876');
+
+  player.setBandwidthSeedProvider(() => 2_000_000);
+  assert.equal(player._getBandwidthSeedQuery(), '&bw=1000000');
+
+  player.setBandwidthSeedProvider(() => 0);
+  assert.equal(player._getBandwidthSeedQuery(), '');
+});

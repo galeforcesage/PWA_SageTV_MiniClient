@@ -283,6 +283,9 @@ export class MiniClientConnection extends EventTarget {
     this._bandwidthKbps = (navDown && isFinite(navDown) && navDown > 0)
       ? Math.round(navDown * 1000) : 0;
     this._bandwidthTimer = null;
+    if (this.mediaPlayer?.setBandwidthSeedProvider) {
+      this.mediaPlayer.setBandwidthSeedProvider(() => this._getColdStartBandwidthKbps());
+    }
 
     // Media reconnect guards to prevent rapid reconnect storms.
     this._mediaReconnectInProgress = false;
@@ -297,6 +300,17 @@ export class MiniClientConnection extends EventTarget {
 
   /** Current estimated bandwidth in Kbps. */
   get bandwidthKbps() { return this._bandwidthKbps; }
+
+  _getReportedDownlinkKbps() {
+    const navKbps = navigator.connection?.downlink
+      ? Math.round(navigator.connection.downlink * 1000) : 0;
+    return Math.max(navKbps, this._bandwidthKbps || 0);
+  }
+
+  _getColdStartBandwidthKbps() {
+    const downlink = Number(navigator.connection?.downlink);
+    return Number.isFinite(downlink) && downlink > 0 ? Math.round(downlink * 1000) : 0;
+  }
 
   /** Total bytes received on GFX channel. */
   get bytesReceivedGfx() { return this._bytesReceivedGfx; }
@@ -1386,6 +1400,7 @@ export class MiniClientConnection extends EventTarget {
       pwa_native: {
         route: 'native',
         priority: 100,
+        bandwidthFeedback: 'none',
         // pull: direct-play (no transcode). The native <video> element decodes
         //       the raw bitstream.
         // pull-xcode: audio-transcode / remux. The server conditions the stream
@@ -1416,6 +1431,7 @@ export class MiniClientConnection extends EventTarget {
       pwa_mse: {
         route: 'mse',
         priority: 80,
+        bandwidthFeedback: this._supportsXcodeAdjustFeedback() ? 'xcode_adjust' : 'none',
         // HONEST end-to-end capability, NOT "whatever ffmpeg can read". This
         // surface is reachable only through the bridge/proxy fMP4 pipeline, so
         // it advertises exactly the MSE probe INTERSECTED with the deliverable
@@ -1819,6 +1835,13 @@ export class MiniClientConnection extends EventTarget {
     await this._postCapabilityFeedback(`AUDIO_PROCESSING_${type.toUpperCase()}`, payload);
   }
 
+  _supportsXcodeAdjustFeedback() {
+    if (this.platformDetector?.isTizen?.() || this.platformDetector?.isIOS?.()) {
+      return false;
+    }
+    return navigator.vendor !== 'Apple Computer, Inc.';
+  }
+
   /**
    * Resolve a property value for GET_PROPERTY.
    */
@@ -1853,6 +1876,7 @@ export class MiniClientConnection extends EventTarget {
         case 'VIDEO_CODECS': return surface.videoCodecs.join(',');
         case 'AUDIO_CODECS': return surface.audioCodecs.join(',');
         case 'CONTAINERS': return surface.containers.join(',');
+        case 'BANDWIDTH_FEEDBACK': return surface.bandwidthFeedback || 'none';
         // Protocol 2.1.0006 ??3 fields 7-9 (optional). Empty string is a valid
         // reply and yields the server's conservative defaults.
         case 'AUDIO_TRACK_ACCESS': return surface.audioTrackAccess || '';
@@ -1983,12 +2007,7 @@ export class MiniClientConnection extends EventTarget {
         // capped at 10 Mbps by spec but available instantly; _bandwidthKbps
         // is uncapped but starts cold.  The max gives the server the best
         // available estimate at every polling moment.
-        {
-          const navKbps = navigator.connection?.downlink
-            ? Math.round(navigator.connection.downlink * 1000) : 0;
-          const measured = this._bandwidthKbps || 0;
-          return `${Math.max(navKbps, measured)}`;
-        }
+        return `${this._getReportedDownlinkKbps()}`;
       case 'NET_LINK_KBPS_UP':
         this._markNgNegotiated(name);
         return '0';
@@ -2083,6 +2102,7 @@ export class MiniClientConnection extends EventTarget {
         console.log(`[Connection] Reporting GFX_RESOLUTION = ${res}`);
         return res;
       }
+
       case 'GFX_FIXED_PAR':
         // MUST return empty. A non-empty value sets iPhoneMode=true server-side
         // (MiniClientSageRenderer.java ~L4102), and iPhoneMode forces

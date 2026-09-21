@@ -63,11 +63,13 @@ transcoder when `xcoder != null`).
 `/transcode`. To the client it's the same bridge address, one more path — one
 plugin, one process. It is NOT a separate proxy server.
 
-`GET /msproxy?path=<file>&mode=<direct|remux:<fmt>|xcode:<qmode>>&seek=<sec>`
+`GET /msproxy?path=<file>&mode=<direct|remux:<fmt>|xcode:<qmode>>&seek=<sec>&bw=<kbps>`
 
 Flow:
 1. Open TCP to MediaServer `:7818`.
-2. If not `direct`: send `XCODE_SETUP <qmode>` (→ `OK`).
+2. If not `direct`: send `XCODE_SETUP <qmode>;bw=<kbps>` (→ `OK`) when the
+   client supplied a valid initial estimate. If absent, the server applies its
+   `media_server/wan_coldstart_kbps` default.
 3. `OPEN <path>` (→ `OK`).
 4. Stream loop: `READ <offset> <len>` → write bytes to the HTTP response;
    advance `offset`. For encoded `xcode:*` streams, measure the bytes actually
@@ -76,6 +78,11 @@ Flow:
    identifies a legacy server and leaves its fixed-rate behavior unchanged.
 5. On client disconnect / response close: `CLOSE` + close the socket
    (**bounded lifecycle** — no orphaned connections/leaks).
+
+The playback-surface advertisement includes
+`PLAYBACK_SURFACE_<id>_BANDWIDTH_FEEDBACK`. Chromium/Firefox MSE advertises
+`xcode_adjust`; Safari and native/AVPlay surfaces advertise `none`. This is a
+tie-breaker and telemetry hint only; it does not select the delivery route.
 
 Notes:
 - HTTP `Range` → `READ` offset. For transcode the offset is the *output* stream

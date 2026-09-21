@@ -214,6 +214,7 @@ public class MediaServerProxyServlet extends HttpServlet {
         // seek opens a fresh /msproxy request, so a start-seek on setup is all
         // that's needed (no mid-stream seek command).
         long seekMs = parseSeekMillis(req.getParameter("seek"));
+        Integer bandwidthSeedKbps = parseBandwidthKbps(req.getParameter("bw"));
         String sinkParam = parseSinkParam(req.getParameter("sink"));
         String sessionId = req.getParameter("session");
         String clientIp = resolveClientIp(req);
@@ -269,6 +270,9 @@ public class MediaServerProxyServlet extends HttpServlet {
                 // ignores keys it doesn't recognize, so this is forward/backward
                 // safe (older servers simply start at 0).
                 if (seekMs > 0) setup += ";ss=" + seekMs;
+                if (bandwidthSeedKbps != null && !containsModeParam(xcodeMode, "bw")) {
+                    setup += ";bw=" + bandwidthSeedKbps;
+                }
                 if (sinkParam != null) setup += ";sink=" + sinkParam;
                 if (clientIp != null && !clientIp.isEmpty()) setup += ";xff=" + clientIp;
                 log.info("[MsProxy] XCODE_SETUP: {} session={}", setup, sessionId);
@@ -652,6 +656,22 @@ public class MediaServerProxyServlet extends HttpServlet {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    private static Integer parseBandwidthKbps(String bandwidthParam) {
+        if (bandwidthParam == null || bandwidthParam.isEmpty()) return null;
+        try {
+            long kbps = Long.parseLong(bandwidthParam.trim());
+            if (kbps <= 0) return null;
+            return (int) Math.min(kbps, 1_000_000L);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static boolean containsModeParam(String mode, String key) {
+        String marker = ";" + key.toLowerCase(Locale.ROOT) + "=";
+        return mode.toLowerCase(Locale.ROOT).contains(marker);
     }
 
     /**

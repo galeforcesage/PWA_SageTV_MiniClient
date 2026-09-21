@@ -48,6 +48,7 @@ export class MediaPlayer extends EventTarget {
     // (Tizen wgt, iOS home-screen install without a service worker), where a
     // root-relative URL would resolve against file:// and fail.
     this._bridgeBase = '';
+    this._bandwidthSeedProvider = null;
 
     // Bandwidth tracking (bytes received per 1-second window)
     this._bwBytesWindow = 0;
@@ -623,6 +624,16 @@ export class MediaPlayer extends EventTarget {
     }
   }
 
+  setBandwidthSeedProvider(provider) {
+    this._bandwidthSeedProvider = typeof provider === 'function' ? provider : null;
+  }
+
+  _getBandwidthSeedQuery() {
+    const kbps = Number(this._bandwidthSeedProvider?.());
+    if (!Number.isFinite(kbps) || kbps <= 0) return '';
+    return `&bw=${Math.min(1_000_000, Math.round(kbps))}`;
+  }
+
   // ── CMAF/fMP4 HLS playback ────────────────────────────────────────────────
   // Server Step 2: iosstream_*_fmp4.m3u8 + _init.mp4 + _N.m4s
   // Safari/iOS: native <video src=m3u8> — zero library, lowest power.
@@ -917,7 +928,8 @@ export class MediaPlayer extends EventTarget {
     const segSuffix = (this._segmentTimeline && this._currentSegIndex >= 0)
       ? `&seg=${this._currentSegIndex}` : '';
     if (this._msproxyStreamUrl) {
-      bridgeUrl = `${this._msproxyStreamUrl}&seek=${seekSec}&session=${this._bridgeSessionId}${sinkSuffix}${segSuffix}`;
+      const bandwidthSuffix = this._getBandwidthSeedQuery();
+      bridgeUrl = `${this._msproxyStreamUrl}&seek=${seekSec}&session=${this._bridgeSessionId}${bandwidthSuffix}${sinkSuffix}${segSuffix}`;
     } else {
       const src = (this._bridgeMfid !== null && this._bridgeMfid !== undefined)
         ? `mfid=${encodeURIComponent(this._bridgeMfid)}`
