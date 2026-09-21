@@ -83,6 +83,9 @@ The playback-surface advertisement includes
 `PLAYBACK_SURFACE_<id>_BANDWIDTH_FEEDBACK`. Chromium/Firefox MSE advertises
 `xcode_adjust`; Safari and native/AVPlay surfaces advertise `none`. This is a
 tie-breaker and telemetry hint only; it does not select the delivery route.
+Safari/WebKit's native surface advertises `hls` in addition to its pull modes
+when native HLS support is present; Blink, Gecko, and Tizen advertisements are
+unchanged.
 Tizen normally direct-plays on LAN; if it must use an `xcode:*` proxy mode, the
 client supplies a 50 Mbps cold-start seed. Direct and remux modes carry no seed.
 

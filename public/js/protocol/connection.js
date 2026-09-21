@@ -1409,7 +1409,7 @@ export class MiniClientConnection extends EventTarget {
         //       avoids MSE HEVC limitations ??? native <video src=url> handles
         //       HEVC when the browser has platform decoder support (HEVC Video
         //       Extensions on Windows Edge/Chrome).
-        deliveryModes: 'pull,pull-xcode',
+        deliveryModes: this._getNativeDeliveryModes(v),
         videoCodecs: native.video,
         audioCodecs: native.audio,
         containers: native.containers,
@@ -1840,6 +1840,35 @@ export class MiniClientConnection extends EventTarget {
       return false;
     }
     return navigator.vendor !== 'Apple Computer, Inc.';
+  }
+
+  _supportsNativeHlsDelivery(video) {
+    if (this.platformDetector?.isTizen?.()) return false;
+    const isAppleWebKit = this.platformDetector?.isIOS?.()
+      || (typeof navigator !== 'undefined' && navigator.vendor === 'Apple Computer, Inc.');
+    if (!isAppleWebKit) return false;
+    try {
+      return video.canPlayType('application/vnd.apple.mpegurl') !== ''
+        || video.canPlayType('application/x-mpegURL') !== '';
+    } catch {
+      return false;
+    }
+  }
+
+  _getNativeDeliveryModes(video) {
+    return this._supportsNativeHlsDelivery(video)
+      ? 'pull,pull-xcode,hls'
+      : 'pull,pull-xcode';
+  }
+
+  _consumeEffectiveRoutingDecision() {
+    const decision = {
+      delivery: this._effectiveDelivery,
+      surface: this._effectiveSurface,
+    };
+    this._effectiveDelivery = '';
+    this._effectiveSurface = '';
+    return decision;
   }
 
   /**
@@ -3396,10 +3425,9 @@ export class MiniClientConnection extends EventTarget {
           // null so its outcome never feeds native-codec learning.
           if (this._avcapMemory) this._pendingNativeProbe = null;
           if (msRoute) {
-            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${this._effectiveDelivery} surface=${this._effectiveSurface} ??? routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
-            this._effectiveDelivery = '';  // consumed ??? clear to avoid stale routing on next OPENURL
-            this._effectiveSurface = '';
-            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, this._effectiveSurface);
+            const decision = this._consumeEffectiveRoutingDecision();
+            console.log(`[Media] CAP_EFFECTIVE_DELIVERY=${decision.delivery} surface=${decision.surface} ??? routing to /msproxy mode=${msRoute.mode}: ${msRoute.path}`);
+            this.mediaPlayer.loadMsProxy(msRoute.path, msRoute.mode, this.serverHost, 0, decision.surface);
             break;
           }
 
