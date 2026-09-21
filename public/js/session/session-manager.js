@@ -11,10 +11,10 @@
  * This is the main orchestrator that ties all modules together.
  */
 
-import { MiniClientConnection } from '../protocol/connection.js';
+import { MiniClientConnection } from '../protocol/connection.js?v=20260920-cmafwatchdog';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { WebGLRenderer } from '../ui/webgl-renderer.js';
-import { MediaPlayer } from '../media/player.js';
+import { MediaPlayer } from '../media/player.js?v=20260920-cmafwatchdog';
 import { NgPlaybackContextConsumer } from '../media/ng-playback-context-consumer.js';
 import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';

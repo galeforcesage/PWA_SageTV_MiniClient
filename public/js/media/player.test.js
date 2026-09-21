@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { MediaPlayer } from './player.js';
+import { PlayerState } from '../protocol/constants.js';
 
 test('fatal CMAF network error falls back once at the current playhead', async () => {
   const player = Object.create(MediaPlayer.prototype);
@@ -52,4 +53,34 @@ test('CMAF video element error uses the stored fallback context', () => {
     'server',
     'DEMUXER_ERROR_COULD_NOT_PARSE',
   ]);
+});
+
+test('CMAF progress watchdog falls back after twenty seconds of buffering', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._cmafHlsMode = true;
+  player.state = PlayerState.BUFFERING;
+  player._cmafLastProgressAt = 10_000;
+  player._cmafFallback = { mfid: 42, hostname: 'server' };
+
+  let received;
+  player._fallbackFromCmafHls = (...args) => {
+    received = args;
+    return true;
+  };
+
+  assert.equal(player._checkCmafProgress(29_999), false);
+  assert.equal(player._checkCmafProgress(30_000), true);
+  assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
+});
+
+test('CMAF progress watchdog does not interrupt playing video', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._cmafHlsMode = true;
+  player.state = PlayerState.PLAY;
+  player._cmafLastProgressAt = 10_000;
+  player._fallbackFromCmafHls = () => {
+    throw new Error('fallback should not run while playback is progressing');
+  };
+
+  assert.equal(player._checkCmafProgress(60_000), false);
 });

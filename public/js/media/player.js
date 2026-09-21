@@ -73,6 +73,8 @@ export class MediaPlayer extends EventTarget {
 
     // hls.js instance for HLS streams
     this._hls = null;
+    this._cmafProgressTimer = null;
+    this._cmafLastProgressAt = 0;
 
     // Subtitle tracks
     this._subtitleTracks = [];
@@ -702,6 +704,8 @@ export class MediaPlayer extends EventTarget {
 
     this._hls.loadSource(playlistUrl);
     this._hls.attachMedia(this.video);
+    this._cmafLastProgressAt = Date.now();
+    this._startCmafProgressWatchdog();
 
     this._hls.on(Hls.Events.MANIFEST_PARSED, () => {
       console.log('[MediaPlayer] CMAF HLS manifest parsed');
@@ -711,6 +715,7 @@ export class MediaPlayer extends EventTarget {
     });
 
     this._hls.on(Hls.Events.FRAG_LOADED, () => {
+      this._cmafLastProgressAt = Date.now();
       this._emitFirstFrameOnce();
     });
 
@@ -734,12 +739,36 @@ export class MediaPlayer extends EventTarget {
     });
   }
 
+  _startCmafProgressWatchdog() {
+    this._stopCmafProgressWatchdog();
+    this._cmafProgressTimer = setInterval(() => this._checkCmafProgress(), 5000);
+  }
+
+  _stopCmafProgressWatchdog() {
+    if (this._cmafProgressTimer) {
+      clearInterval(this._cmafProgressTimer);
+      this._cmafProgressTimer = null;
+    }
+  }
+
+  _checkCmafProgress(now = Date.now()) {
+    if (!this._cmafHlsMode || (this.state !== PlayerState.BUFFERING && this.state !== PlayerState.LOADED)) {
+      return false;
+    }
+    if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < 20_000) {
+      return false;
+    }
+    const fallback = this._cmafFallback || {};
+    return this._fallbackFromCmafHls(fallback.mfid, fallback.hostname, 'fragment-progress-timeout');
+  }
+
   _fallbackFromCmafHls(mfid, hostname, details) {
     if (this._hlsFatalFallbackTried || !Number.isInteger(mfid) || mfid <= 0 || !hostname) {
       return false;
     }
 
     this._hlsFatalFallbackTried = true;
+    this._stopCmafProgressWatchdog();
     const resumeMs = this.getMediaTimeMillis();
     console.warn(`[MediaPlayer] CMAF HLS network failure (${details || 'unknown'}); falling back to msproxy at ${(resumeMs / 1000).toFixed(1)}s`);
     this._emitPlaybackFailure('CMAF_NETWORK_FATAL', {
@@ -1650,6 +1679,7 @@ export class MediaPlayer extends EventTarget {
     this._stopBandwidthTracking();
     this._stopEvictionTimer();
     this._stopGapMonitor();
+    this._stopCmafProgressWatchdog();
 
     // Clear seeking state
     if (this.seeking) {
@@ -1691,6 +1721,7 @@ export class MediaPlayer extends EventTarget {
     this._cmafHlsMode = false;
     this._cmafPlaylistUrl = null;
     this._cmafFallback = null;
+    this._cmafLastProgressAt = 0;
 
     if (this._hls) {
       this._hls.destroy();
