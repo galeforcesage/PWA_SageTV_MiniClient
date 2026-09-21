@@ -395,7 +395,8 @@ export class AVPlayPlayer extends EventTarget {
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const sessionId = 'avplay-' + Date.now();
     const sess = `&session=${encodeURIComponent(sessionId)}`;
-    const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
+    const bandwidthSeed = mode?.startsWith('xcode:') ? '&bw=50000' : '';
+    const url = `${base}/msproxy?path=${encodeURIComponent(absPath)}&mode=${encodeURIComponent(mode)}${seekSec ? `&seek=${seekSec}` : ''}${bandwidthSeed}${sess}`;
     const fallbackUrl = `${base}/transcode?file=${encodeURIComponent(absPath)}${seekSec ? `&seek=${seekSec}` : ''}${sess}`;
     console.log(`[AVPlay] loadMsProxy mode=${mode}: ${url}`);
     return this.load(0, 0, '', url, hostname, false, 0, null, fallbackUrl, {

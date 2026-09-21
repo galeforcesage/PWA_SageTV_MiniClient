@@ -83,6 +83,8 @@ The playback-surface advertisement includes
 `PLAYBACK_SURFACE_<id>_BANDWIDTH_FEEDBACK`. Chromium/Firefox MSE advertises
 `xcode_adjust`; Safari and native/AVPlay surfaces advertise `none`. This is a
 tie-breaker and telemetry hint only; it does not select the delivery route.
+Tizen normally direct-plays on LAN; if it must use an `xcode:*` proxy mode, the
+client supplies a 50 Mbps cold-start seed. Direct and remux modes carry no seed.
 
 Notes:
 - HTTP `Range` → `READ` offset. For transcode the offset is the *output* stream

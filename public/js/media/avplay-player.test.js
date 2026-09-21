@@ -65,5 +65,21 @@ test('msproxy URL and player state share one session id', async () => {
   assert.match(url, new RegExp(`session=${options.sessionId}`));
   assert.match(fallbackUrl, new RegExp(`session=${options.sessionId}`));
   assert.match(url, /seek=12\.5/);
+  assert.match(url, /bw=50000/);
   assert.equal(options.offsetMs, 12_500);
+});
+
+test('Tizen direct msproxy playback does not send a transcode bandwidth seed', async () => {
+  const player = Object.create(AVPlayPlayer.prototype);
+  player._bridgeBase = 'http://bridge';
+
+  let loadArgs;
+  player.load = (...received) => {
+    loadArgs = received;
+    return Promise.resolve();
+  };
+
+  await player.loadMsProxy('/recording.mpg', 'direct', 'server');
+
+  assert.doesNotMatch(loadArgs[3], /[?&]bw=/);
 });
