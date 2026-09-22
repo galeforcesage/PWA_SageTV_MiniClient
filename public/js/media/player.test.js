@@ -77,6 +77,32 @@ test('CMAF progress watchdog falls back after five seconds without media progres
   assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
 });
 
+test('CMAF seam hold widens the stall tolerance past the grace window', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._cmafHlsMode = true;
+  player._cmafSeamEnabled = true;
+  player._firstFrameEmitted = true;
+  player.seeking = false;
+  player.state = PlayerState.BUFFERING;
+  player.video = { paused: false, ended: false, currentTime: 12 };
+  player._cmafLastMediaTime = 12;
+  player._cmafLastProgressAt = 10_000;
+  player._cmafFallback = { mfid: 42, hostname: 'server' };
+
+  let received;
+  player._fallbackFromCmafHls = (...args) => {
+    received = args;
+    return true;
+  };
+
+  // The default 5s stall must NOT trip while a seam hold is in progress.
+  assert.equal(player._checkCmafProgress(15_000), false);
+  // ...but a genuinely stuck stream still falls back past the 12s seam window.
+  assert.equal(player._checkCmafProgress(21_999), false);
+  assert.equal(player._checkCmafProgress(22_000), true);
+  assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
+});
+
 test('CMAF progress watchdog does not interrupt playing video', () => {
   const player = Object.create(MediaPlayer.prototype);
   player._cmafHlsMode = true;

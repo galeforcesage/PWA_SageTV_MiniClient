@@ -14,6 +14,15 @@
  */
 
 import { PlayerState, DESIRED_VIDEO_PREBUFFER } from '../protocol/constants.js';
+
+// CMAF progress watchdog thresholds. A stalled CMAF stream falls back to
+// msproxy after this long without media-time advance. When the live
+// EPG-boundary seam is opted in (x-cmaf-seam), the server may hold the
+// playlist open for a grace window (~8s) while the successor airing
+// materialises, so the stall tolerance is widened to comfortably clear it.
+const CMAF_STALL_TIMEOUT_MS = 5_000;
+const CMAF_SEAM_STALL_TIMEOUT_MS = 12_000;
+
 export class MediaPlayer extends EventTarget {
   /**
    * @param {HTMLVideoElement} videoElement
@@ -77,6 +86,10 @@ export class MediaPlayer extends EventTarget {
     this._cmafProgressTimer = null;
     this._cmafLastProgressAt = 0;
     this._cmafLastMediaTime = 0;
+    // True while the live EPG-boundary seam is opted in for the active CMAF
+    // stream (hls.js path only). Widens the stall watchdog to tolerate the
+    // server's brief seam hold across an airing boundary.
+    this._cmafSeamEnabled = false;
 
     // Subtitle tracks
     this._subtitleTracks = [];
@@ -653,6 +666,7 @@ export class MediaPlayer extends EventTarget {
     this._cmafHlsMode = true;
     this._cmafPlaylistUrl = playlistUrl;
     this._cmafFallback = fallback;
+    this._cmafSeamEnabled = false;
     this._bridgeSessionId = 'cmaf-' + Date.now();
     this._hlsFatalFallbackTried = false;
     this.serverEOS = false;
@@ -707,11 +721,22 @@ export class MediaPlayer extends EventTarget {
     }
 
     console.log(`[MediaPlayer] CMAF HLS via hls.js: ${playlistUrl}`);
+    // Opt in to the live EPG-boundary seam: the server continues the fMP4
+    // variant playlist across an airing boundary (EXT-X-DISCONTINUITY + a new
+    // EXT-X-MAP) instead of emitting EXT-X-ENDLIST. hls.js follows the
+    // discontinuity, appends the successor init segment, resets the coded-frame
+    // group, and re-arms in-band CEA-608/708 captions internally. The header is
+    // harmless on segment requests. Without it the server behaves as before, so
+    // native-HLS (Safari) and legacy paths are unaffected.
+    this._cmafSeamEnabled = true;
     this._hls = new Hls({
       lowLatencyMode: false,       // VOD-first, no LL-HLS tags yet
       backBufferLength: 30,        // 30s behind playhead (REW 8/15/30s)
       maxBufferLength: 30,         // 30s ahead
       enableWorker: true,
+      xhrSetup: (xhr) => {
+        xhr.setRequestHeader('x-cmaf-seam', '1');
+      },
     });
 
     this._hls.loadSource(playlistUrl);
@@ -774,11 +799,15 @@ export class MediaPlayer extends EventTarget {
       this._cmafLastProgressAt = now;
       return false;
     }
-    if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < 5_000) {
+    if (!this._cmafLastProgressAt || now - this._cmafLastProgressAt < this._cmafStallTimeoutMs()) {
       return false;
     }
     const fallback = this._cmafFallback || {};
     return this._fallbackFromCmafHls(fallback.mfid, fallback.hostname, 'fragment-progress-timeout');
+  }
+
+  _cmafStallTimeoutMs() {
+    return this._cmafSeamEnabled ? CMAF_SEAM_STALL_TIMEOUT_MS : CMAF_STALL_TIMEOUT_MS;
   }
 
   _fallbackFromCmafHls(mfid, hostname, details) {
@@ -1744,6 +1773,7 @@ export class MediaPlayer extends EventTarget {
     this._cmafHlsMode = false;
     this._cmafPlaylistUrl = null;
     this._cmafFallback = null;
+    this._cmafSeamEnabled = false;
     this._cmafLastProgressAt = 0;
     this._cmafLastMediaTime = 0;
 
