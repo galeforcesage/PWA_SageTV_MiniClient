@@ -1940,7 +1940,13 @@ export class MediaPlayer extends EventTarget {
         this._currentSegIndex = 0;
         console.log(`[MediaPlayer] Native xcode seek to ${timeSec.toFixed(1)}s — reloading msproxy`);
       }
-      const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${nativeSeekMs}${segParam}`;
+      // The bridge parses &seek= as fractional SECONDS (MediaServerProxyServlet
+      // .parseSeekMillis → sec*1000 → XCODE_SETUP ...;ss=<ms>). nativeSeekMs is
+      // milliseconds, so send seconds — otherwise the bridge multiplies ms by
+      // 1000 again and the server sees a microsecond-scale ss= (e.g. 68.412s
+      // became ss=68412000ms and got clamped to the end).
+      const seekSec = nativeSeekMs / 1000;
+      const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${seekSec}${segParam}`;
       this.video.src = seekUrl;
       this.video.load();
     } else {

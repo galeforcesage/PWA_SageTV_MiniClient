@@ -165,3 +165,21 @@ test('msproxy bandwidth seed query validates and caps the estimate', () => {
   player.setBandwidthSeedProvider(() => 0);
   assert.equal(player._getBandwidthSeedQuery(), '');
 });
+
+test('native xcode seek sends &seek= in seconds, not milliseconds', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  let src = '';
+  player.video = { set src(v) { src = v; }, get src() { return src; }, load() {} };
+  player._bridgeBase = 'https://bridge:8099';
+  player._nativeXcodeMode = true;
+  player._msproxyAbsPath = '/media/rec/sample.mpg';
+  player._msproxyMode = 'xcode:browserhd';
+
+  // FF to 68.412s. The bridge parses &seek= as fractional SECONDS and emits
+  // ss=<sec*1000>ms, so the client must send 68.412, not 68412 — otherwise the
+  // server sees ss=68412000ms (microsecond-scale) and clamps to the end.
+  player.seek(68412);
+
+  const seek = new URL(src).searchParams.get('seek');
+  assert.equal(seek, '68.412');
+});
