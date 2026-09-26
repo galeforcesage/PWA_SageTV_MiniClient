@@ -4,7 +4,7 @@
  * Wires up the UI, session management, and PWA functionality.
  */
 
-import { SessionManager } from './session/session-manager.js?v=20260920-surfacecontract';
+import { SessionManager } from './session/session-manager.js?v=20260925-seekunit';
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js';
 import { runCodecProbe } from './media/codec-probe.js';
