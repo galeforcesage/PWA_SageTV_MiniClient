@@ -23,6 +23,20 @@ import { PlayerState, DESIRED_VIDEO_PREBUFFER } from '../protocol/constants.js';
 const CMAF_STALL_TIMEOUT_MS = 5_000;
 const CMAF_SEAM_STALL_TIMEOUT_MS = 12_000;
 
+// LL-HLS live-sync tuning for the CMAF hls.js path (1s PART-TARGET, ~3s
+// PART-HOLD-BACK). liveSyncDuration keeps playback ~3s from the live edge;
+// backBuffer retains DVR history so REW has somewhere to go.
+// liveMaxLatencyDuration is the tight edge-mode catch-up ceiling, relaxed to
+// CMAF_DVR_MAX_LATENCY_SEC while the viewer is intentionally behind the edge
+// (REW/pause) so hls.js doesn't yank them forward. A seek landing more than
+// CMAF_DVR_EDGE_MARGIN_SEC behind the edge enters that DVR mode; closer to the
+// edge restores tight low-latency sync.
+const CMAF_LIVE_SYNC_DURATION_SEC = 3;
+const CMAF_LIVE_MAX_LATENCY_SEC = 10;
+const CMAF_BACK_BUFFER_SEC = 90;
+const CMAF_DVR_EDGE_MARGIN_SEC = 5;
+const CMAF_DVR_MAX_LATENCY_SEC = 6 * 3600;
+
 export class MediaPlayer extends EventTarget {
   /**
    * @param {HTMLVideoElement} videoElement
@@ -667,6 +681,8 @@ export class MediaPlayer extends EventTarget {
     this._cmafPlaylistUrl = playlistUrl;
     this._cmafFallback = fallback;
     this._cmafSeamEnabled = false;
+    this._cmafIsLive = false;
+    this._cmafDvrMode = false;
     this._bridgeSessionId = 'cmaf-' + Date.now();
     this._hlsFatalFallbackTried = false;
     this.serverEOS = false;
@@ -729,9 +745,17 @@ export class MediaPlayer extends EventTarget {
     // harmless on segment requests. Without it the server behaves as before, so
     // native-HLS (Safari) and legacy paths are unaffected.
     this._cmafSeamEnabled = true;
+    // Low-latency HLS: the server now emits a spec-valid LL-HLS CMAF playlist
+    // (EXT-X-SERVER-CONTROL CAN-BLOCK-RELOAD, EXT-X-PART-INF, EXT-X-PART,
+    // EXT-X-PRELOAD-HINT). lowLatencyMode makes hls.js honor it — issuing
+    // blocking `?_HLS_msn=<n>&_HLS_part=<k>` playlist reloads and prefetching
+    // the preload-hint part. It stays net-neutral on plain (non-LL) playlists,
+    // which advertise none of those tags, so legacy live/VOD is unaffected.
     this._hls = new Hls({
-      lowLatencyMode: false,       // VOD-first, no LL-HLS tags yet
-      backBufferLength: 30,        // 30s behind playhead (REW 8/15/30s)
+      lowLatencyMode: true,
+      liveSyncDuration: CMAF_LIVE_SYNC_DURATION_SEC,      // ~3s from edge (>= PART-HOLD-BACK)
+      liveMaxLatencyDuration: CMAF_LIVE_MAX_LATENCY_SEC,  // relaxed for DVR in _cmafSeek()
+      backBufferLength: CMAF_BACK_BUFFER_SEC,             // keep DVR history so REW has room
       maxBufferLength: 30,         // 30s ahead
       enableWorker: true,
       xhrSetup: (xhr) => {
@@ -750,6 +774,12 @@ export class MediaPlayer extends EventTarget {
       if (!this._userMuted) this.video.muted = false;
       this.video.play().catch(() => {});
       this.state = PlayerState.PLAY;
+    });
+
+    // Track live vs VOD so _cmafSeek only engages DVR live-sync suppression on
+    // a live playlist. A VOD playlist (EXT-X-ENDLIST) reports details.live=false.
+    this._hls.on(Hls.Events.LEVEL_UPDATED, (_, data) => {
+      this._cmafIsLive = !!(data && data.details && data.details.live);
     });
 
     this._hls.on(Hls.Events.FRAG_LOADED, () => {
@@ -808,6 +838,59 @@ export class MediaPlayer extends EventTarget {
 
   _cmafStallTimeoutMs() {
     return this._cmafSeamEnabled ? CMAF_SEAM_STALL_TIMEOUT_MS : CMAF_STALL_TIMEOUT_MS;
+  }
+
+  /**
+   * Seek within the CMAF DVR window. Clamps the target into video.seekable
+   * (the DVR window the playlist exposes from MEDIA-SEQUENCE:0) — seeking
+   * outside it makes hls.js snap to the live edge — and, for live streams,
+   * toggles DVR mode so REW/pause behind the edge holds position instead of
+   * being yanked forward by hls.js's live-latency catch-up.
+   * @param {number} targetSec
+   */
+  _cmafSeek(targetSec) {
+    let target = Number(targetSec);
+    if (!Number.isFinite(target) || target < 0) target = 0;
+
+    const seekable = this.video.seekable;
+    let edge = null;
+    if (seekable && seekable.length > 0) {
+      const start = seekable.start(0);
+      edge = seekable.end(seekable.length - 1);
+      if (target < start) target = start;
+      if (target > edge) target = edge;
+    }
+
+    // Live edge vs. DVR position, made explicit: a target meaningfully behind
+    // the edge is a DVR seek (REW/skip-back); near the edge is a return to live.
+    if (this._cmafIsLive && edge !== null) {
+      this._cmafSetDvrSuppression((edge - target) > CMAF_DVR_EDGE_MARGIN_SEC);
+    }
+
+    try {
+      this.video.currentTime = target;
+    } catch (e) {
+      console.warn('[MediaPlayer] CMAF seek failed:', e && e.message);
+    }
+  }
+
+  /**
+   * Engage/release CMAF DVR mode. In DVR mode hls.js's live-latency ceiling is
+   * raised so it won't hard-seek back to the live edge (and, with the default
+   * maxLiveSyncPlaybackRate of 1, it won't speed playback up either); near the
+   * edge the tight low-latency bound is restored. No-op for native HLS
+   * (Safari), which owns its own DVR behavior.
+   * @param {boolean} on
+   */
+  _cmafSetDvrSuppression(on) {
+    if (!this._hls || !this._hls.config) return;
+    const want = !!on;
+    if (want === this._cmafDvrMode) return;
+    this._cmafDvrMode = want;
+    this._hls.config.liveMaxLatencyDuration = want
+      ? CMAF_DVR_MAX_LATENCY_SEC
+      : CMAF_LIVE_MAX_LATENCY_SEC;
+    console.log(`[MediaPlayer] CMAF DVR ${want ? 'engaged — live-sync catch-up suppressed' : 'released — live-sync restored'}`);
   }
 
   _fallbackFromCmafHls(mfid, hostname, details) {
@@ -1774,6 +1857,8 @@ export class MediaPlayer extends EventTarget {
     this._cmafPlaylistUrl = null;
     this._cmafFallback = null;
     this._cmafSeamEnabled = false;
+    this._cmafIsLive = false;
+    this._cmafDvrMode = false;
     this._cmafLastProgressAt = 0;
     this._cmafLastMediaTime = 0;
 
@@ -1855,10 +1940,10 @@ export class MediaPlayer extends EventTarget {
     }
 
     if (this._cmafHlsMode) {
-      // CMAF HLS: both native HLS and hls.js handle seek by fetching the
-      // right .m4s segments. Server transparently repositions encoder for
-      // not-yet-produced parts. No restart, no URL change.
-      this.video.currentTime = timeSec;
+      // CMAF HLS: hls.js (and native HLS) fetch the right parts/segments for
+      // the target. Clamp into the DVR window and, for live, hold DVR position
+      // instead of snapping to the live edge. No restart, no URL change.
+      this._cmafSeek(timeSec);
       return;
     }
 
