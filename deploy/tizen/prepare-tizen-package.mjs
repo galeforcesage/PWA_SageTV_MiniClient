@@ -1,4 +1,5 @@
 import { cp, mkdir, rm, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -62,6 +63,22 @@ async function validateSources() {
     for (const priv of REQUIRED_PRIVILEGES) {
       if (!configContent.includes(priv)) {
         errors.push(`  config.xml: missing required privilege "${priv}"`);
+      }
+    }
+    // Validate the launcher icon <icon src="..."> actually resolves to a file.
+    // A missing/wrong path silently ships a wgt with a blank Samsung app tile
+    // (the SageTV logo disappears). Icons under public/ come from the staged
+    // copy (root public/); any other path is relative to config.xml.
+    const iconMatch = configContent.match(/<icon\s+src="([^"]+)"/);
+    if (!iconMatch) {
+      errors.push('  config.xml: missing <icon src="...">');
+    } else {
+      const iconSrc = iconMatch[1];
+      const iconAbs = iconSrc.startsWith('public/')
+        ? path.join(root, iconSrc)
+        : path.join(__dirname, iconSrc);
+      if (!existsSync(iconAbs)) {
+        errors.push(`  config.xml: launcher icon "${iconSrc}" not found at ${iconAbs}`);
       }
     }
   } catch (e) {
