@@ -77,6 +77,32 @@ test('CMAF progress watchdog falls back after five seconds without media progres
   assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
 });
 
+test('CMAF seam hold widens the stall tolerance past the grace window', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._cmafHlsMode = true;
+  player._cmafSeamEnabled = true;
+  player._firstFrameEmitted = true;
+  player.seeking = false;
+  player.state = PlayerState.BUFFERING;
+  player.video = { paused: false, ended: false, currentTime: 12 };
+  player._cmafLastMediaTime = 12;
+  player._cmafLastProgressAt = 10_000;
+  player._cmafFallback = { mfid: 42, hostname: 'server' };
+
+  let received;
+  player._fallbackFromCmafHls = (...args) => {
+    received = args;
+    return true;
+  };
+
+  // The default 5s stall must NOT trip while a seam hold is in progress.
+  assert.equal(player._checkCmafProgress(15_000), false);
+  // ...but a genuinely stuck stream still falls back past the 12s seam window.
+  assert.equal(player._checkCmafProgress(21_999), false);
+  assert.equal(player._checkCmafProgress(22_000), true);
+  assert.deepEqual(received, [42, 'server', 'fragment-progress-timeout']);
+});
+
 test('CMAF progress watchdog does not interrupt playing video', () => {
   const player = Object.create(MediaPlayer.prototype);
   player._cmafHlsMode = true;
@@ -138,4 +164,22 @@ test('msproxy bandwidth seed query validates and caps the estimate', () => {
 
   player.setBandwidthSeedProvider(() => 0);
   assert.equal(player._getBandwidthSeedQuery(), '');
+});
+
+test('native xcode seek sends &seek= in seconds, not milliseconds', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  let src = '';
+  player.video = { set src(v) { src = v; }, get src() { return src; }, load() {} };
+  player._bridgeBase = 'https://bridge:8099';
+  player._nativeXcodeMode = true;
+  player._msproxyAbsPath = '/media/rec/sample.mpg';
+  player._msproxyMode = 'xcode:browserhd';
+
+  // FF to 68.412s. The bridge parses &seek= as fractional SECONDS and emits
+  // ss=<sec*1000>ms, so the client must send 68.412, not 68412 — otherwise the
+  // server sees ss=68412000ms (microsecond-scale) and clamps to the end.
+  player.seek(68412);
+
+  const seek = new URL(src).searchParams.get('seek');
+  assert.equal(seek, '68.412');
 });

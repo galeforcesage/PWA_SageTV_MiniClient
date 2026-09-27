@@ -101,6 +101,16 @@ public class CmafProxyServlet extends HttpServlet {
                 conn.setRequestProperty("x-playback-session-id", sessionId);
             }
 
+            // Forward the live EPG-boundary seam opt-in to the MediaServer. When
+            // present, HTTPLSServer continues the fMP4 variant playlist across an
+            // airing boundary (EXT-X-DISCONTINUITY + a new EXT-X-MAP) instead of
+            // emitting EXT-X-ENDLIST. Absent (legacy clients), behaviour is
+            // unchanged. Harmless on segment requests.
+            String cmafSeam = req.getHeader("x-cmaf-seam");
+            if (cmafSeam != null && !cmafSeam.isEmpty()) {
+                conn.setRequestProperty("x-cmaf-seam", cmafSeam);
+            }
+
             int status = conn.getResponseCode();
             resp.setStatus(status);
 
