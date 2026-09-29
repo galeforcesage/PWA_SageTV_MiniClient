@@ -229,6 +229,22 @@ export class SpatialNavigation {
   }
 
   _firstIn(scope) {
+    // A scope can declare a preferred initial-focus target via
+    // data-spatnav-start="<sel1>, <sel2>, ...". Sub-selectors are tried in
+    // priority order (NOT DOM order) so, e.g., the connect screen lands focus
+    // on the first server card rather than the "Configure" sidebar link that
+    // merely happens to come first in the DOM. Falls back to DOM order when no
+    // preferred target is rendered/focusable (e.g. an empty server grid).
+    const startSel = scope.getAttribute && scope.getAttribute('data-spatnav-start');
+    if (startSel) {
+      for (const sel of startSel.split(',')) {
+        const trimmed = sel.trim();
+        if (!trimmed) continue;
+        const el = Array.from(scope.querySelectorAll(trimmed))
+          .find((e) => this._isFocusable(e));
+        if (el) return el;
+      }
+    }
     const list = this._focusableIn(scope);
     return list[0] || null;
   }
