@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-8.52.0-ng-streaminfo';
+const CACHE_NAME = 'sagetv-miniclient-8.53.0-trickplay-position';
 
 // During development, use network-first strategy
 const DEV_MODE = true;

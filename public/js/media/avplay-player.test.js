@@ -46,6 +46,30 @@ test('media time includes the offset of a reopened stream', () => {
   assert.equal(player.getMediaTimeMillis(), 27_750);
 });
 
+test('rendered media time is local to the reopened stream', () => {
+  const player = Object.create(AVPlayPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player._streamOffsetMs = 25_500;
+  player._lastRenderedMediaTimeMs = 0;
+  player._buffering = false;
+  player._avplay = { getCurrentTime: () => 2_250 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 2_250);
+});
+
+test('rendered media time freezes while buffering or paused', () => {
+  const player = Object.create(AVPlayPlayer.prototype);
+  player._lastRenderedMediaTimeMs = 2_250;
+  player._buffering = true;
+  player.state = PlayerState.PLAY;
+  player._avplay = { getCurrentTime: () => 9_000 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 2_250);
+  player._buffering = false;
+  player.state = PlayerState.PAUSE;
+  assert.equal(player.getRenderedMediaTimeMillis(), 2_250);
+});
+
 test('msproxy URL and player state share one session id', async () => {
   const player = Object.create(AVPlayPlayer.prototype);
   player._bridgeBase = 'http://bridge';

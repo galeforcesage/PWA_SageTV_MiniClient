@@ -75,6 +75,8 @@ export class AVPlayPlayer extends EventTarget {
     this._bridgeSessionId = null;  // per-load() session ID for bridge dedup
     this._restartableStream = null;
     this._streamOffsetMs = 0;
+    this._lastRenderedMediaTimeMs = 0;
+    this._buffering = false;
     this._fallbackRestart = null;
     this._restartSeekTimer = null;
     this._pendingRestartSeekMs = 0;
@@ -428,14 +430,22 @@ export class AVPlayPlayer extends EventTarget {
   _installListener() {
     const av = this._avplay;
     av.setListener({
-      onbufferingstart: () => this.dispatchEvent(new CustomEvent('buffering')),
+      onbufferingstart: () => {
+        this._buffering = true;
+        this.dispatchEvent(new CustomEvent('buffering'));
+      },
       onbufferingprogress: () => {},
       onbufferingcomplete: () => {
+        this._buffering = false;
         this._emitFirstFrameOnce();
         this.dispatchEvent(new CustomEvent('playing'));
       },
       oncurrentplaytime: (ms) => {
-        this._positionMs = this._streamOffsetMs + Math.max(0, Number(ms) || 0);
+        const localMs = Math.max(0, Number(ms) || 0);
+        this._positionMs = this._streamOffsetMs + localMs;
+        if (!this._buffering && this.state !== PlayerState.PAUSE) {
+          this._lastRenderedMediaTimeMs = localMs;
+        }
         this._emitFirstFrameOnce();
       },
       onstreamcompleted: () => {
@@ -501,6 +511,8 @@ export class AVPlayPlayer extends EventTarget {
     this._fallbackUrl = null;
     this._restartableStream = null;
     this._streamOffsetMs = 0;
+    this._lastRenderedMediaTimeMs = 0;
+    this._buffering = false;
     this._fallbackRestart = null;
     if (this._restartSeekTimer) {
       clearTimeout(this._restartSeekTimer);
@@ -637,6 +649,21 @@ export class AVPlayPlayer extends EventTarget {
       } catch { /* fall through */ }
     }
     return this._positionMs;
+  }
+
+  getRenderedMediaTimeMillis() {
+    if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) return 0;
+    if (this._buffering || this.state === PlayerState.PAUSE) {
+      return this._lastRenderedMediaTimeMs || 0;
+    }
+    if (this._avplay) {
+      try {
+        const renderedMs = Math.max(0, Number(this._avplay.getCurrentTime()) || 0);
+        this._lastRenderedMediaTimeMs = renderedMs;
+        return renderedMs;
+      } catch { /* fall through */ }
+    }
+    return this._lastRenderedMediaTimeMs || 0;
   }
 
   getState() { return this.state; }

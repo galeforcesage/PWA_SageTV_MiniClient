@@ -11,10 +11,10 @@
  * This is the main orchestrator that ties all modules together.
  */
 
-import { MiniClientConnection } from '../protocol/connection.js?v=20260920-surfacecontract';
+import { MiniClientConnection } from '../protocol/connection.js?v=20261009-trickplayposition';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { WebGLRenderer } from '../ui/webgl-renderer.js';
-import { MediaPlayer } from '../media/player.js?v=20260927-llhls';
+import { MediaPlayer } from '../media/player.js?v=20261009-trickplayposition';
 import { NgPlaybackContextConsumer } from '../media/ng-playback-context-consumer.js';
 import { DownloadManager } from './download-manager.js';
 import { InputManager } from '../input/input-manager.js';
@@ -129,7 +129,7 @@ export class SessionManager extends EventTarget {
     if (useAvplay) {
       // Dynamic import: the AVPlay module is fetched ONLY on Tizen, so browser /
       // iPad clients never download it — keeps the web PWA footprint minimal.
-      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=20260920-tizenbw');
+      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=20261009-trickplayposition');
       this.mediaPlayer = new AVPlayPlayer(videoElement, container, {
         platformDetector: this.platformDetector,
       });

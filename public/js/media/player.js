@@ -65,6 +65,7 @@ export class MediaPlayer extends EventTarget {
     this._pullFallbackTried = false;
     this._hlsFatalFallbackTried = false;
     this._bridgeTimeOffsetMs = 0;  // offset added to video.currentTime for seek
+    this._lastRenderedMediaTimeMs = 0;
     // Absolute http(s) base of the bridge (e.g. "http://192.0.2.10:8100").
     // Set by SessionManager after the WS bridge URL is resolved. Required for
     // /transcode fetches to work when the PWA is served from a non-http origin
@@ -1012,6 +1013,10 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController.abort();
     }
     this._bridgeAbortController = new AbortController();
+    // A new pull-xcode/transcode response is a new client-local timeline.
+    // Detailed trick-play position reports must restart near zero and must
+    // never reuse the prior prime's absolute/content position.
+    this._lastRenderedMediaTimeMs = 0;
     // Reset the "has the pull/transcode stream produced any bytes yet" gate.
     // Used by seek() to distinguish the server's initial resume positioning
     // (arrives before the first byte — must NOT tear down the fetch) from a
@@ -2032,6 +2037,7 @@ export class MediaPlayer extends EventTarget {
       // became ss=68412000ms and got clamped to the end).
       const seekSec = nativeSeekMs / 1000;
       const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${seekSec}${segParam}`;
+      this._lastRenderedMediaTimeMs = 0;
       this.video.src = seekUrl;
       this.video.load();
     } else {
@@ -2259,7 +2265,8 @@ export class MediaPlayer extends EventTarget {
     const rawMs = Math.floor((this.video.currentTime || 0) * 1000);
     let posMs;
     // In bridge mode, ffmpeg outputs timestamps starting from 0 after each seek,
-    // so we add the seek offset to report the correct file position.
+    // so add the seek offset for content-time consumers. Protocol detailed
+    // position reports use getRenderedMediaTimeMillis() instead.
     if (this.bridgeMode) {
       posMs = this._bridgeTimeOffsetMs + rawMs;
     } else if (this._nativeXcodeMode) {
@@ -2278,6 +2285,24 @@ export class MediaPlayer extends EventTarget {
     }
     this._lastGoodPositionMs = posMs;
     return posMs;
+  }
+
+  /**
+   * Return the visible frame position in the current client-local media
+   * timeline. Unlike getMediaTimeMillis(), this deliberately excludes bridge
+   * and native-xcode seek offsets: every transcode prime starts near zero and
+   * Sage combines that rendered position with its known seek base.
+   */
+  getRenderedMediaTimeMillis() {
+    if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) {
+      return 0;
+    }
+    if (this.state === PlayerState.BUFFERING || this.state === PlayerState.PAUSE) {
+      return this._lastRenderedMediaTimeMs || 0;
+    }
+    const renderedMs = Math.max(0, Math.floor((Number(this.video.currentTime) || 0) * 1000));
+    this._lastRenderedMediaTimeMs = renderedMs;
+    return renderedMs;
   }
 
   getState() {
@@ -2637,6 +2662,7 @@ export class MediaPlayer extends EventTarget {
   flush() {
     this._pushQueue = [];
     this._lastGoodPositionMs = undefined; // Reset position tracking for new epoch
+    this._lastRenderedMediaTimeMs = 0;
 
     if (this.bridgeMode) {
       // Bridge mode: abort current stream, clear SourceBuffer

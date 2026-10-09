@@ -184,6 +184,29 @@ test('native xcode seek sends &seek= in seconds, not milliseconds', () => {
   assert.equal(seek, '68.412');
 });
 
+test('rendered position is client-local and excludes bridge seek offset', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = true;
+  player._bridgeTimeOffsetMs = 120_000;
+  player._lastRenderedMediaTimeMs = 0;
+  player.video = { currentTime: 2.345 };
+
+  assert.equal(player.getMediaTimeMillis(), 122_345);
+  assert.equal(player.getRenderedMediaTimeMillis(), 2_345);
+});
+
+test('rendered position freezes while buffering or paused', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._lastRenderedMediaTimeMs = 4_000;
+  player.video = { currentTime: 9 };
+
+  player.state = PlayerState.BUFFERING;
+  assert.equal(player.getRenderedMediaTimeMillis(), 4_000);
+  player.state = PlayerState.PAUSE;
+  assert.equal(player.getRenderedMediaTimeMillis(), 4_000);
+});
+
 function fakeSeekable(start, end) {
   return { length: 1, start: () => start, end: () => end };
 }
