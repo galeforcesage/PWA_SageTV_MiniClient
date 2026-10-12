@@ -1013,10 +1013,10 @@ export class MediaPlayer extends EventTarget {
       this._bridgeAbortController.abort();
     }
     this._bridgeAbortController = new AbortController();
-    // A new pull-xcode/transcode response is a new client-local timeline.
-    // Detailed trick-play position reports must restart near zero and must
-    // never reuse the prior prime's absolute/content position.
-    this._lastRenderedMediaTimeMs = 0;
+    // A new pull-xcode/transcode response starts a fresh decoder timeline at
+    // zero, but Sage's pull path does not add the prime offset back to detailed
+    // position reports. Seed the visible content clock at the requested offset.
+    this._lastRenderedMediaTimeMs = Math.max(0, Math.round(seekSec * 1000));
     // Reset the "has the pull/transcode stream produced any bytes yet" gate.
     // Used by seek() to distinguish the server's initial resume positioning
     // (arrives before the first byte — must NOT tear down the fetch) from a
@@ -2037,7 +2037,7 @@ export class MediaPlayer extends EventTarget {
       // became ss=68412000ms and got clamped to the end).
       const seekSec = nativeSeekMs / 1000;
       const seekUrl = `${base}/msproxy?path=${encodeURIComponent(this._msproxyAbsPath)}&mode=${encodeURIComponent(this._msproxyMode)}&seek=${seekSec}${segParam}`;
-      this._lastRenderedMediaTimeMs = 0;
+      this._lastRenderedMediaTimeMs = nativeSeekMs;
       this.video.src = seekUrl;
       this.video.load();
     } else {
@@ -2288,10 +2288,9 @@ export class MediaPlayer extends EventTarget {
   }
 
   /**
-   * Return the visible frame position in the current client-local media
-   * timeline. Unlike getMediaTimeMillis(), this deliberately excludes bridge
-   * and native-xcode seek offsets: every transcode prime starts near zero and
-   * Sage combines that rendered position with its known seek base.
+   * Return the visible frame position in content time. Pull-xcode decoder PTS
+   * restart near zero after each prime, and Sage does not add the requested
+   * seek offset to detailed reports, so include the active prime offset here.
    */
   getRenderedMediaTimeMillis() {
     if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) {
@@ -2300,7 +2299,13 @@ export class MediaPlayer extends EventTarget {
     if (this.state === PlayerState.BUFFERING || this.state === PlayerState.PAUSE) {
       return this._lastRenderedMediaTimeMs || 0;
     }
-    const renderedMs = Math.max(0, Math.floor((Number(this.video.currentTime) || 0) * 1000));
+    const localMs = Math.max(0, Math.floor((Number(this.video.currentTime) || 0) * 1000));
+    let renderedMs = localMs;
+    if (this.bridgeMode) {
+      renderedMs = (this._bridgeTimeOffsetMs || 0) + localMs;
+    } else if (this._nativeXcodeMode) {
+      renderedMs = (this._nativeXcodeOffsetMs || 0) + localMs;
+    }
     this._lastRenderedMediaTimeMs = renderedMs;
     return renderedMs;
   }

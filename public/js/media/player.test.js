@@ -184,7 +184,7 @@ test('native xcode seek sends &seek= in seconds, not milliseconds', () => {
   assert.equal(seek, '68.412');
 });
 
-test('rendered position is client-local and excludes bridge seek offset', () => {
+test('rendered position includes bridge prime offset for Sage pull reports', () => {
   const player = Object.create(MediaPlayer.prototype);
   player.state = PlayerState.PLAY;
   player.bridgeMode = true;
@@ -193,7 +193,30 @@ test('rendered position is client-local and excludes bridge seek offset', () => 
   player.video = { currentTime: 2.345 };
 
   assert.equal(player.getMediaTimeMillis(), 122_345);
-  assert.equal(player.getRenderedMediaTimeMillis(), 2_345);
+  assert.equal(player.getRenderedMediaTimeMillis(), 122_345);
+});
+
+test('rendered position includes native-xcode prime offset exactly once', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = false;
+  player._nativeXcodeMode = true;
+  player._nativeXcodeOffsetMs = 504_839;
+  player._lastRenderedMediaTimeMs = 504_839;
+  player.video = { currentTime: 3.996 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 508_835);
+});
+
+test('rendered position does not add an offset for an ordinary media timeline', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = false;
+  player._nativeXcodeMode = false;
+  player._lastRenderedMediaTimeMs = 0;
+  player.video = { currentTime: 3.996 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 3_996);
 });
 
 test('rendered position freezes while buffering or paused', () => {
