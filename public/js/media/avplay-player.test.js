@@ -190,6 +190,124 @@ test('superseded AVPlay callbacks cannot overwrite the active timeline', async (
   assert.equal(player.getRenderedMediaTimeMillis(), 120_000);
 });
 
+test('AVPlay diagnostics report buffering lifecycle and native clock state', () => {
+  let listener;
+  const reports = [];
+  const avplay = {
+    setListener(value) { listener = value; },
+    getCurrentTime: () => 2_250,
+    getState: () => 'PLAYING',
+  };
+  const player = Object.create(AVPlayPlayer.prototype);
+  Object.assign(player, {
+    _avplay: avplay,
+    _loadSeq: 3,
+    _streamOffsetMs: 25_500,
+    _positionMs: 27_750,
+    _lastRenderedMediaTimeMs: 27_750,
+    _buffering: false,
+    _lastBufferingProgressBucket: -1,
+    state: PlayerState.PLAY,
+    dispatchEvent() {},
+    _phoneHome(reason, details) { reports.push([reason, details]); },
+    _emitPlaybackFailure() {},
+    _emitFirstFrameOnce() {},
+    _captureStreamInfo() {},
+  });
+
+  player._installListener(3);
+  listener.onbufferingstart();
+  listener.onbufferingprogress(10);
+  listener.onbufferingprogress(20);
+  listener.onbufferingprogress(30);
+  listener.onbufferingcomplete();
+
+  assert.deepEqual(reports.map(([reason]) => reason), [
+    'BUFFERING_START',
+    'BUFFERING_PROGRESS',
+    'BUFFERING_PROGRESS',
+    'BUFFERING_COMPLETE',
+  ]);
+  assert.equal(reports[0][1].nativeState, 'PLAYING');
+  assert.equal(reports[0][1].localPositionMs, 2_250);
+  assert.equal(reports[0][1].absolutePositionMs, 27_750);
+  assert.equal(reports[0][1].buffering, true);
+  assert.equal(reports[3][1].buffering, false);
+});
+
+test('AVPlay diagnostic snapshot tolerates unavailable native state', () => {
+  const player = Object.create(AVPlayPlayer.prototype);
+  Object.assign(player, {
+    _avplay: {
+      getCurrentTime() { throw new Error('not ready'); },
+      getState() { throw new Error('not ready'); },
+    },
+    _loadSeq: 2,
+    _streamOffsetMs: 10_000,
+    _positionMs: 12_000,
+    _lastRenderedMediaTimeMs: 11_500,
+    _buffering: true,
+  });
+
+  assert.deepEqual(player._snapshotPlaybackDiagnostics(), {
+    nativeState: null,
+    localPositionMs: null,
+    absolutePositionMs: 12_000,
+    callbackPositionMs: 12_000,
+    renderedPositionMs: 11_500,
+    streamOffsetMs: 10_000,
+    buffering: true,
+    loadSequence: 2,
+  });
+});
+
+test('AVPlay heartbeat is generation-fenced and clears after load supersession', () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let tick;
+  let clearedTimer = null;
+  const reports = [];
+  globalThis.setInterval = (callback, intervalMs) => {
+    assert.equal(intervalMs, 5_000);
+    tick = callback;
+    return 77;
+  };
+  globalThis.clearInterval = (timer) => { clearedTimer = timer; };
+
+  try {
+    const avplay = {
+      getCurrentTime: () => 1_500,
+      getState: () => 'PLAYING',
+    };
+    const player = Object.create(AVPlayPlayer.prototype);
+    Object.assign(player, {
+      _avplay: avplay,
+      _loadSeq: 4,
+      _streamOffsetMs: 8_000,
+      _positionMs: 9_500,
+      _lastRenderedMediaTimeMs: 9_500,
+      _buffering: false,
+      _playbackDiagnosticTimer: null,
+      _phoneHome(reason, details) { reports.push([reason, details]); },
+    });
+
+    player._startPlaybackDiagnostics(4);
+    tick();
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0][0], 'PLAYBACK_HEARTBEAT');
+    assert.equal(reports[0][1].absolutePositionMs, 9_500);
+
+    player._loadSeq = 5;
+    tick();
+    assert.equal(clearedTimer, 77);
+    assert.equal(player._playbackDiagnosticTimer, null);
+    assert.equal(reports.length, 1);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test('full recording duration wins when AVPlay returns zero after seek reopen', async () => {
   const player = Object.create(AVPlayPlayer.prototype);
   Object.assign(player, {

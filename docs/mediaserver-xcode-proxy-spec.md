@@ -1,6 +1,6 @@
 # MediaServer XCODE Proxy — thin bridge, server-side transcoding
 
-> Status: **design / not yet built.** This is the piece that (a) deletes the
+> Status: **implemented.** This is the piece that (a) deletes the
 > bridge's own ffmpeg, (b) gives legacy 9.2.16 clients HD instead of the 480×272
 > `iosstream`, (c) lights up NG's bandwidth-adaptive transcode, and (d) makes
 > **live (in-progress) recordings** play correctly.
@@ -66,18 +66,29 @@ plugin, one process. It is NOT a separate proxy server.
 `GET /msproxy?path=<file>&mode=<direct|remux:<fmt>|xcode:<qmode>>&seek=<sec>&bw=<kbps>`
 
 Flow:
-1. Open TCP to MediaServer `:7818`.
-2. If not `direct`: send `XCODE_SETUP <qmode>;bw=<kbps>` (→ `OK`) when the
+1. For a session-tagged conditioned stream, acquire a coordinator keyed by
+   session id, canonical path, exact xcode mode/parameters, seek, bandwidth
+   seed, sink shape, client origin, and adaptive-output mode. Conflicting reuse
+   of a live session id returns HTTP 409.
+2. The coordinator opens exactly one TCP connection to MediaServer `:7818`.
+3. If not `direct`: send `XCODE_SETUP <qmode>;bw=<kbps>` (→ `OK`) when the
    client supplied a valid initial estimate. If absent, the server applies its
    `media_server/wan_coldstart_kbps` default.
-3. `OPEN <path>` (→ `OK`).
-4. Stream loop: `READ <offset> <len>` → write bytes to the HTTP response;
-   advance `offset`. For encoded `xcode:*` streams, measure the bytes actually
-   delivered over each five-second window and send that goodput as
-   `XCODE_ADJUST <kbps>`. A numeric reply keeps adaptation active; an error reply
-   identifies a legacy server and leaves its fixed-rate behavior unchanged.
-5. On client disconnect / response close: `CLOSE` + close the socket
-   (**bounded lifecycle** — no orphaned connections/leaks).
+4. `OPEN <path>` (→ `OK`).
+5. A producer thread issues sequential `READ` commands into a bounded monotonic
+   replay ring. Each attached HTTP consumer has its own cursor. Cursor advancement
+   is committed only after its servlet write succeeds; a reconnect begins at the
+   highest committed delivered watermark and does not create another producer.
+6. When the ring is full, producer reads backpressure. Consumers that stop
+   advancing beyond the stale-consumer deadline are detached so memory remains
+   bounded.
+7. For encoded `xcode:*` streams, measure the committed delivered watermark over
+   each five-second window and send that goodput as `XCODE_ADJUST <kbps>`. The
+   same interval logs producer, replay-ring, consumer, and write-block counters.
+8. A failed HTTP request detaches only that consumer. The producer remains alive
+   through a bounded zero-consumer reconnect grace. When grace expires (or the
+   producer reaches EOF/errors), it sends exactly one `CLOSE`, closes its socket,
+   and compare-removes its exact coordinator instance.
 
 The playback-surface advertisement includes
 `PLAYBACK_SURFACE_<id>_BANDWIDTH_FEEDBACK`. Chromium/Firefox MSE advertises
@@ -90,10 +101,10 @@ Tizen normally direct-plays on LAN; if it must use an `xcode:*` proxy mode, the
 client supplies a 50 Mbps cold-start seed. Direct and remux modes carry no seed.
 
 Notes:
-- HTTP `Range` → `READ` offset. For transcode the offset is the *output* stream
-  position (rate-estimated seek — the battle-tested placeshifter model).
-- One `:7818` connection per client stream (exactly like a placeshifter; the
-  server already scales to N concurrent pull+transcode sessions).
+- Static direct files retain RFC 7233 byte ranges backed by `READ` offsets.
+- Live/conditioned xcode responses are HTTP 200 with `Accept-Ranges: none`.
+  A client `Range` header does not seek, restart, or create another producer.
+- A media-time seek uses a new session id and `XCODE_SETUP ...;ss=<ms>`.
 
 ## Live (in-progress) recordings — first-class
 

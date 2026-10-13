@@ -36,6 +36,7 @@ import { PlayerState } from '../protocol/constants.js';
  * (first frame is typically <3s).
  */
 const PREPARE_WATCHDOG_MS = 25000;
+const PLAYBACK_DIAGNOSTIC_INTERVAL_MS = 5000;
 
 export class AVPlayPlayer extends EventTarget {
   /**
@@ -67,6 +68,8 @@ export class AVPlayPlayer extends EventTarget {
     // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
     this._streamInfo = null;
     this._prepareWatchdog = null;
+    this._playbackDiagnosticTimer = null;
+    this._lastBufferingProgressBucket = -1;
     this._fallbackUrl = null;
     this._userMuted = false;
     this._volume = 1;
@@ -235,6 +238,7 @@ export class AVPlayPlayer extends EventTarget {
       this._applyDisplayRect();
       try { this._avplay.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX'); } catch { /* ignore */ }
       this._installListener(seq);
+      this._startPlaybackDiagnostics(seq);
       this.state = PlayerState.LOADED;
       this._avplay.prepareAsync(
         () => {
@@ -451,12 +455,26 @@ export class AVPlayPlayer extends EventTarget {
       onbufferingstart: () => {
         if (!isActive()) return;
         this._buffering = true;
+        this._lastBufferingProgressBucket = -1;
+        this._phoneHome('BUFFERING_START', this._snapshotPlaybackDiagnostics(av));
         this.dispatchEvent(new CustomEvent('buffering'));
       },
-      onbufferingprogress: () => {},
+      onbufferingprogress: (percent) => {
+        if (!isActive()) return;
+        const progress = Math.max(0, Math.min(100, Number(percent) || 0));
+        const bucket = Math.floor(progress / 25) * 25;
+        if (bucket === this._lastBufferingProgressBucket) return;
+        this._lastBufferingProgressBucket = bucket;
+        this._phoneHome('BUFFERING_PROGRESS', {
+          ...this._snapshotPlaybackDiagnostics(av),
+          progress,
+        });
+      },
       onbufferingcomplete: () => {
         if (!isActive()) return;
         this._buffering = false;
+        this._lastBufferingProgressBucket = 100;
+        this._phoneHome('BUFFERING_COMPLETE', this._snapshotPlaybackDiagnostics(av));
         this._emitFirstFrameOnce();
         this.dispatchEvent(new CustomEvent('playing'));
       },
@@ -472,6 +490,8 @@ export class AVPlayPlayer extends EventTarget {
       onstreamcompleted: () => {
         if (!isActive()) return;
         this.state = PlayerState.EOS;
+        this._phoneHome('STREAM_COMPLETED', this._snapshotPlaybackDiagnostics(av));
+        this._clearPlaybackDiagnostics();
         this.dispatchEvent(new CustomEvent('eos'));
       },
       onevent: (type, data) => {
@@ -479,15 +499,57 @@ export class AVPlayPlayer extends EventTarget {
         if (type === 'PLAYER_MSG_RESOLUTION_CHANGED' || type === 'PLAYER_MSG_HD_VIDEO') {
           this._captureStreamInfo();
         }
-        void data;
+        this._phoneHome('AVPLAY_EVENT', {
+          ...this._snapshotPlaybackDiagnostics(av),
+          eventType: String(type),
+          eventData: data == null ? null : String(data),
+        });
       },
       onerror: (e) => {
         if (!isActive()) return;
         console.error('[AVPlay] error:', e);
         this._phoneHome('AVPLAY_RUNTIME_ERROR', { code: String(e) });
+        this._clearPlaybackDiagnostics();
         this._emitPlaybackFailure('AVPLAY_RUNTIME_ERROR', { mode: 'avplay', code: String(e) });
       },
     });
+  }
+
+  _snapshotPlaybackDiagnostics(av = this._avplay) {
+    let localPositionMs = null;
+    let nativeState = null;
+    if (av) {
+      try { localPositionMs = Math.max(0, Number(av.getCurrentTime()) || 0); } catch { /* unavailable */ }
+      try { nativeState = String(av.getState()); } catch { /* unavailable */ }
+    }
+    return {
+      nativeState,
+      localPositionMs,
+      absolutePositionMs: localPositionMs == null ? this._positionMs : this._streamOffsetMs + localPositionMs,
+      callbackPositionMs: this._positionMs,
+      renderedPositionMs: this._lastRenderedMediaTimeMs,
+      streamOffsetMs: this._streamOffsetMs,
+      buffering: this._buffering,
+      loadSequence: this._loadSeq,
+    };
+  }
+
+  _startPlaybackDiagnostics(seq = this._loadSeq) {
+    this._clearPlaybackDiagnostics();
+    const av = this._avplay;
+    this._playbackDiagnosticTimer = setInterval(() => {
+      if (seq !== this._loadSeq || av !== this._avplay) {
+        this._clearPlaybackDiagnostics();
+        return;
+      }
+      this._phoneHome('PLAYBACK_HEARTBEAT', this._snapshotPlaybackDiagnostics(av));
+    }, PLAYBACK_DIAGNOSTIC_INTERVAL_MS);
+  }
+
+  _clearPlaybackDiagnostics() {
+    if (!this._playbackDiagnosticTimer) return;
+    clearInterval(this._playbackDiagnosticTimer);
+    this._playbackDiagnosticTimer = null;
   }
 
   _resolveDurationMs(nativeDuration) {
@@ -543,6 +605,7 @@ export class AVPlayPlayer extends EventTarget {
     // late "prepared" success can't flip state back to PLAY after we've stopped.
     this._loadSeq = (this._loadSeq || 0) + 1;
     this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
     this._fallbackUrl = null;
     if (!preserveRestartSeek) this._restartableStream = null;
     this._streamOffsetMs = 0;
@@ -683,6 +746,7 @@ export class AVPlayPlayer extends EventTarget {
     if (generation !== this._restartSeekGeneration) return;
     this._loadSeq = (this._loadSeq || 0) + 1;
     this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
     if (this._avplay) {
       try { this._avplay.stop(); } catch { /* ignore */ }
       try { this._avplay.close(); } catch { /* ignore */ }
@@ -828,6 +892,7 @@ export class AVPlayPlayer extends EventTarget {
 
   _emitPlaybackFailure(reason, details = {}) {
     this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
     const key = `${reason}|${details.mode || ''}|${details.code || ''}`;
     if (this._reportedFailureKeys.has(key)) return;
     this._reportedFailureKeys.add(key);
