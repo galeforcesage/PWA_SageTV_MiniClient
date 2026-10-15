@@ -27,6 +27,30 @@ const BACK_KEYS = new Set(['Escape', 'XF86Back', 'Back', 'BrowserBack', 'GoBack'
 const BACK_KEYCODES = new Set([27, 10009, 461]);
 const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
 
+export function nextSettingsVerticalTarget(active, list, saveBtn, cancelBtn, dir) {
+  const index = list.indexOf(active);
+  if (index >= 0) {
+    if (dir === 'down') return list[index + 1] || saveBtn || null;
+    return list[index - 1] || null;
+  }
+  if (dir === 'up' && (active === saveBtn || active === cancelBtn)) {
+    return list[list.length - 1] || null;
+  }
+  return null;
+}
+
+export function isHiddenByClosedDetails(element) {
+  let ancestor = element?.parentElement || null;
+  while (ancestor) {
+    if (ancestor.tagName === 'DETAILS' && !ancestor.open) {
+      const isOwnSummary = element.tagName === 'SUMMARY' && element.parentElement === ancestor;
+      if (!isOwnSummary) return true;
+    }
+    ancestor = ancestor.parentElement;
+  }
+  return false;
+}
+
 export class SpatialNavigation {
   constructor(options = {}) {
     this._enabled = false;
@@ -152,9 +176,10 @@ export class SpatialNavigation {
         return;
       }
       const from = activeInScope ? active : this._lastFocused;
-      const next = this._findNeighbor(from, dir, scope);
+      const settingsNext = this._settingsVerticalTarget(from, dir, scope);
+      const next = settingsNext || this._findNeighbor(from, dir, scope);
       if (next) {
-        next.focus({ preventScroll: false });
+        this._focusAndReveal(next, scope);
         ev.preventDefault();
         ev.stopPropagation();
         if (this._debug) console.log('[Spatnav]', dir, '->', next);
@@ -222,6 +247,7 @@ export class SpatialNavigation {
     if (!el || !(el instanceof Element)) return false;
     if (el.hidden) return false;
     if (!el.matches(FOCUSABLE_SELECTOR)) return false;
+    if (isHiddenByClosedDetails(el)) return false;
     // Tizen's older Chromium reports offsetParent=null for visible native
     // controls inside an open <details>. Use rendered geometry instead so
     // expanded settings controls remain reachable by the TV remote.
@@ -312,5 +338,37 @@ export class SpatialNavigation {
       if (score < bestScore) { bestScore = score; best = el; }
     }
     return best;
+  }
+
+  _settingsVerticalTarget(active, dir, scope) {
+    if ((dir !== 'up' && dir !== 'down') || scope?.id !== 'settings-dialog') return null;
+    const scroll = scope.querySelector('.settings-scroll');
+    if (!scroll) return null;
+    return nextSettingsVerticalTarget(
+      active,
+      this._focusableIn(scroll),
+      scope.querySelector('#set-save'),
+      scope.querySelector('#set-cancel'),
+      dir
+    );
+  }
+
+  _focusAndReveal(target, scope) {
+    target.focus({ preventScroll: true });
+    if (scope?.id !== 'settings-dialog') {
+      try { target.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
+      return;
+    }
+
+    const scroll = scope.querySelector('.settings-scroll');
+    if (!scroll || !scroll.contains(target)) return;
+    const scrollRect = scroll.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const margin = 40;
+    if (targetRect.top < scrollRect.top + margin) {
+      scroll.scrollTop -= (scrollRect.top + margin) - targetRect.top;
+    } else if (targetRect.bottom > scrollRect.bottom - margin) {
+      scroll.scrollTop += targetRect.bottom - (scrollRect.bottom - margin);
+    }
   }
 }
