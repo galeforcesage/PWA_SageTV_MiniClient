@@ -132,6 +132,37 @@ const DEFAULTS = {
   // Key Mappings
   'key_repeat_ms': '100',
   'key_repeat_delay_ms': '1000',
+  'tizen_smart_remote_mappings': 'true',
+  'tizen_default_select': 'Select',
+  'tizen_default_left': 'Skip Bkwd/Page Left',
+  'tizen_default_right': 'Skip Fwd/Page Right',
+  'tizen_default_up': 'Up',
+  'tizen_default_down': 'Down',
+  'tizen_default_select_long': 'Show OSD Navigation',
+  'tizen_default_left_long': 'Skip Bkwd #2',
+  'tizen_default_right_long': 'Skip Fwd #2',
+  'tizen_default_up_long': 'Page Up',
+  'tizen_default_down_long': 'Page Down',
+  'tizen_playing_select': 'Play/Pause',
+  'tizen_playing_left': 'Skip Bkwd/Page Left',
+  'tizen_playing_right': 'Skip Fwd/Page Right',
+  'tizen_playing_up': 'Up',
+  'tizen_playing_down': 'Down',
+  'tizen_playing_select_long': 'Show OSD Navigation',
+  'tizen_playing_left_long': 'Skip Bkwd #2',
+  'tizen_playing_right_long': 'Skip Fwd #2',
+  'tizen_playing_up_long': 'Page Up',
+  'tizen_playing_down_long': 'Page Down',
+  'tizen_paused_select': 'Play/Pause',
+  'tizen_paused_left': 'Skip Bkwd/Page Left',
+  'tizen_paused_right': 'Skip Fwd/Page Right',
+  'tizen_paused_up': 'Up',
+  'tizen_paused_down': 'Down',
+  'tizen_paused_select_long': 'Show OSD Navigation',
+  'tizen_paused_left_long': 'Skip Bkwd #2',
+  'tizen_paused_right_long': 'Skip Fwd #2',
+  'tizen_paused_up_long': 'Page Up',
+  'tizen_paused_down_long': 'Page Down',
 
   // Touch/Mouse Mappings
   'swipe_left': 'Left',
@@ -161,6 +192,23 @@ const DEFAULTS = {
 
 /** Key that indicates defaults have been written */
 const SETTINGS_INIT_KEY = LS_PREFIX + 'settings_initialized';
+const TIZEN_TRANSPORT_DEFAULTS_KEY = LS_PREFIX + 'tizen_transport_defaults_v2';
+
+export function migrateTizenTransportDefaults(storage) {
+  if (storage.getItem(TIZEN_TRANSPORT_DEFAULTS_KEY)) return;
+  const migrations = {
+    tizen_default_left: ['Left', 'Skip Bkwd/Page Left'],
+    tizen_default_right: ['Right', 'Skip Fwd/Page Right'],
+    tizen_default_left_long: ['Page Left', 'Skip Bkwd #2'],
+    tizen_default_right_long: ['Page Right', 'Skip Fwd #2'],
+  };
+  for (const [key, [oldDefault, newDefault]] of Object.entries(migrations)) {
+    const storageKey = LS_PREFIX + key;
+    const current = storage.getItem(storageKey);
+    if (current === null || current === oldDefault) storage.setItem(storageKey, newDefault);
+  }
+  storage.setItem(TIZEN_TRANSPORT_DEFAULTS_KEY, '1');
+}
 
 export class SettingsManager {
   constructor() {
@@ -210,6 +258,7 @@ export class SettingsManager {
   _ensureDefaults() {
     // Migrate legacy server cookies to localStorage
     _migrateLegacyServers();
+    migrateTizenTransportDefaults(localStorage);
 
     if (localStorage.getItem(SETTINGS_INIT_KEY)) {
       // Already initialized — just purge any leftover cookies

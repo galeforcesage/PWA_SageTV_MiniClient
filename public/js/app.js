@@ -4,9 +4,9 @@
  * Wires up the UI, session management, and PWA functionality.
  */
 
-import { SessionManager } from './session/session-manager.js?v=20260925-seekunit';
+import { SessionManager } from './session/session-manager.js?v=tizen-transport-defaults';
 import { SageCommand } from './protocol/constants.js';
-import { SpatialNavigation } from './input/spatial-nav.js';
+import { SpatialNavigation } from './input/spatial-nav.js?v=tizen-collapsed-settings-nav';
 import { runCodecProbe } from './media/codec-probe.js';
 import { SettingsStore } from './audio-processing/settings-store.js';
 import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
@@ -1341,8 +1341,10 @@ function populateCmdSelect(select, selectedName) {
   }
   const cmds = [
     'None', 'Left', 'Right', 'Up', 'Down', 'Select', 'Back', 'Options', 'Menu',
+    'Show OSD Navigation',
     'Home', 'Guide', 'Info', 'Search', 'Play/Pause', 'Play', 'Pause', 'Stop',
-    'Skip Fwd/Page Right', 'Skip Bkwd/Page Left', 'Page Up', 'Page Down',
+    'Skip Fwd/Page Right', 'Skip Bkwd/Page Left', 'Skip Fwd #2', 'Skip Bkwd #2',
+    'Page Left', 'Page Right', 'Page Up', 'Page Down',
     'Channel Up/Page Up', 'Channel Down/Page Down', 'Volume Up', 'Volume Down', 'Mute',
     'Full Screen', 'Record', 'Delete', 'Favorite',
   ];
@@ -1456,6 +1458,37 @@ function openSettings() {
   // Key Mappings
   document.getElementById('set-key-repeat').value = g('key_repeat_ms', '100');
   document.getElementById('set-key-repeat-delay').value = g('key_repeat_delay_ms', '1000');
+  const tizenRemoteGroup = document.getElementById('set-tizen-remote-group');
+  tizenRemoteGroup.hidden = !_isTizen;
+  if (_isTizen) {
+    document.getElementById('set-tizen-smart-remote').checked =
+      g('tizen_smart_remote_mappings', 'true') === 'true';
+    const contexts = ['default', 'playing', 'paused'];
+    const controls = ['select', 'left', 'right', 'up', 'down'];
+    const defaults = {
+      default: ['Select', 'Skip Bkwd/Page Left', 'Skip Fwd/Page Right', 'Up', 'Down'],
+      playing: ['Play/Pause', 'Skip Bkwd/Page Left', 'Skip Fwd/Page Right', 'Up', 'Down'],
+      paused: ['Play/Pause', 'Skip Bkwd/Page Left', 'Skip Fwd/Page Right', 'Up', 'Down'],
+    };
+    const longDefaults = {
+      default: ['Show OSD Navigation', 'Skip Bkwd #2', 'Skip Fwd #2', 'Page Up', 'Page Down'],
+      playing: ['Show OSD Navigation', 'Skip Bkwd #2', 'Skip Fwd #2', 'Page Up', 'Page Down'],
+      paused: ['Show OSD Navigation', 'Skip Bkwd #2', 'Skip Fwd #2', 'Page Up', 'Page Down'],
+    };
+    for (const context of contexts) {
+      for (let i = 0; i < controls.length; i++) {
+        const control = controls[i];
+        populateCmdSelect(
+          document.getElementById(`set-tizen-${context}-${control}`),
+          g(`tizen_${context}_${control}`, defaults[context][i])
+        );
+        populateCmdSelect(
+          document.getElementById(`set-tizen-${context}-${control}-long`),
+          g(`tizen_${context}_${control}_long`, longDefaults[context][i])
+        );
+      }
+    }
+  }
 
   // Touch/Mouse Mappings
   const touchFields = ['swipe-left', 'swipe-right', 'swipe-up', 'swipe-down',
@@ -1528,6 +1561,18 @@ function saveSettings() {
   // Key Mappings
   s('key_repeat_ms', document.getElementById('set-key-repeat').value);
   s('key_repeat_delay_ms', document.getElementById('set-key-repeat-delay').value);
+  if (_isTizen) {
+    s('tizen_smart_remote_mappings',
+      document.getElementById('set-tizen-smart-remote').checked ? 'true' : 'false');
+    for (const context of ['default', 'playing', 'paused']) {
+      for (const control of ['select', 'left', 'right', 'up', 'down']) {
+        s(`tizen_${context}_${control}`,
+          document.getElementById(`set-tizen-${context}-${control}`).value);
+        s(`tizen_${context}_${control}_long`,
+          document.getElementById(`set-tizen-${context}-${control}-long`).value);
+      }
+    }
+  }
 
   // Touch/Mouse Mappings
   const touchFields = ['swipe-left', 'swipe-right', 'swipe-up', 'swipe-down',

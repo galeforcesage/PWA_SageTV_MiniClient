@@ -53,3 +53,14 @@ test('effective routing decision preserves values before clearing session state'
   assert.equal(connection._effectiveDelivery, '');
   assert.equal(connection._effectiveSurface, '');
 });
+
+test('trick-play capabilities omit the reserved seek epoch token', () => {
+  const connection = Object.create(MiniClientConnection.prototype);
+  connection.platformDetector = { getNgDownloadCapabilities: () => [] };
+
+  const capabilities = connection._buildDownloadCapabilities().split(',');
+  assert.ok(capabilities.includes('TRICKPLAY_POSITION_V1'));
+  assert.ok(capabilities.includes('DVR_WINDOW_V1'));
+  assert.ok(!capabilities.includes('SEEK_EPOCH_V1'));
+  assert.equal(connection._resolveProperty('SEEK_EPOCH_V1'), '');
+});

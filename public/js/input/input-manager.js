@@ -122,6 +122,49 @@ const GAMEPAD_BUTTON_MAP = {
   16: SageCommand.HOME,         // Guide/Home
 };
 
+const COMMAND_BY_NAME = new Map(
+  Object.values(SageCommand).map(command => [command.name, command])
+);
+
+const TIZEN_REMOTE_DEFAULTS = {
+  default: {
+    select: SageCommand.SELECT,
+    left: SageCommand.REW,
+    right: SageCommand.FF,
+    up: SageCommand.UP,
+    down: SageCommand.DOWN,
+    select_long: SageCommand.NAV_OSD,
+    left_long: SageCommand.REW_2,
+    right_long: SageCommand.FF_2,
+    up_long: SageCommand.PAGE_UP,
+    down_long: SageCommand.PAGE_DOWN,
+  },
+  playing: {
+    select: SageCommand.PLAY_PAUSE,
+    left: SageCommand.REW,
+    right: SageCommand.FF,
+    up: SageCommand.UP,
+    down: SageCommand.DOWN,
+    select_long: SageCommand.NAV_OSD,
+    left_long: SageCommand.REW_2,
+    right_long: SageCommand.FF_2,
+    up_long: SageCommand.PAGE_UP,
+    down_long: SageCommand.PAGE_DOWN,
+  },
+  paused: {
+    select: SageCommand.PLAY_PAUSE,
+    left: SageCommand.REW,
+    right: SageCommand.FF,
+    up: SageCommand.UP,
+    down: SageCommand.DOWN,
+    select_long: SageCommand.NAV_OSD,
+    left_long: SageCommand.REW_2,
+    right_long: SageCommand.FF_2,
+    up_long: SageCommand.PAGE_UP,
+    down_long: SageCommand.PAGE_DOWN,
+  },
+};
+
 export class InputManager {
   /**
    * @param {HTMLElement} target - Element to listen on (usually the canvas container)
@@ -131,6 +174,7 @@ export class InputManager {
     this.target = target;
     this.connection = connection;
     this.platformDetector = options.platformDetector || null;
+    this.settings = options.settings || null;
     // The canvas element for accurate coordinate mapping
     this._canvas = target.querySelector('canvas') || target;
 
@@ -327,9 +371,7 @@ export class InputManager {
         this._tizenSelectTimer = setTimeout(() => {
           this._tizenSelectTimer = null;
           this._tizenSelectSuppress = true;
-          try {
-            document.dispatchEvent(new CustomEvent('sagetv:open-nav-drawer'));
-          } catch { /* ignore */ }
+          this._sendTizenRemoteCommand(this._tizenRemoteCommand('select', true));
         }, this._TIZEN_LONGPRESS_MS);
         return;
       }
@@ -348,7 +390,7 @@ export class InputManager {
           this._arrowHoldTimer = null;
           if (this._arrowHold) {
             this._arrowHold.fired = true;
-            this.connection.sendCommand(this._arrowHold.hold);
+            this._sendMappedCommandId(this._arrowHold.hold);
           }
         }, this._ARROW_HOLD_MS);
         return;
@@ -380,7 +422,7 @@ export class InputManager {
     if (this._arrowHold &&
         (this._arrowHold.key === effectiveCode || this._arrowHold.key === event.code)) {
       if (this._arrowHoldTimer) { clearTimeout(this._arrowHoldTimer); this._arrowHoldTimer = null; }
-      if (!this._arrowHold.fired) this.connection.sendCommand(this._arrowHold.tap);
+      if (!this._arrowHold.fired) this._sendMappedCommandId(this._arrowHold.tap);
       this._arrowHold = null;
     }
 
@@ -392,10 +434,8 @@ export class InputManager {
         clearTimeout(this._tizenSelectTimer);
         this._tizenSelectTimer = null;
         if (!this._tizenSelectSuppress) {
-          // Context-sensitive OK tap (see _contextCommandId): during playback
-          // toggle pause/play; in menus select/open. Long-press OK still opens
-          // the nav drawer via the _tizenSelectTimer path above.
-          this.connection.sendCommand(this._contextCommandId(SageCommand.SELECT));
+          const command = this._tizenRemoteCommand('select', false);
+          this._sendTizenRemoteCommand(command);
         }
       }
       this._tizenSelectSuppress = false;
@@ -416,8 +456,52 @@ export class InputManager {
    * toggles pause/play while a video is playing (mirrors the arrow REW/FF remap
    * in _arrowTransport). Non-SELECT commands pass through unchanged. */
   _contextCommandId(cmd) {
+    if (this._tizenSmartRemoteEnabled() && cmd === SageCommand.SELECT) {
+      return this._tizenRemoteCommand('select', false).id;
+    }
     if (cmd === SageCommand.SELECT && this._inPlayback()) return SageCommand.PLAY_PAUSE.id;
     return cmd.id;
+  }
+
+  _tizenSmartRemoteEnabled() {
+    return this._tizenAdapter.isEnabled() &&
+      this.settings?.get?.('tizen_smart_remote_mappings', 'true') !== 'false';
+  }
+
+  _tizenRemoteContext() {
+    if (!this._tizenSmartRemoteEnabled()) return 'default';
+    const mp = this.connection?.mediaPlayer;
+    if (!mp) return 'default';
+    const fullscreen = typeof mp.isVideoFullscreen === 'function'
+      ? mp.isVideoFullscreen()
+      : true;
+    if (!fullscreen) return 'default';
+    if (mp.state === PlayerState.PAUSE) return 'paused';
+    if (mp.state === PlayerState.LOADED || mp.state === PlayerState.PLAY) return 'playing';
+    return 'default';
+  }
+
+  _tizenRemoteCommand(control, longPress) {
+    const context = this._tizenRemoteContext();
+    const action = longPress ? `${control}_long` : control;
+    const fallback = TIZEN_REMOTE_DEFAULTS[context][action];
+    if (!this._tizenSmartRemoteEnabled()) return fallback;
+    const name = this.settings?.get?.(`tizen_${context}_${action}`, fallback.name);
+    return COMMAND_BY_NAME.get(name) || fallback;
+  }
+
+  _sendTizenRemoteCommand(command) {
+    this._sendMappedCommandId(command.id);
+  }
+
+  _sendMappedCommandId(commandId) {
+    if (commandId === SageCommand.NAV_OSD.id) {
+      try {
+        document.dispatchEvent(new CustomEvent('sagetv:open-nav-drawer'));
+      } catch { /* ignore */ }
+      return;
+    }
+    if (commandId >= 0) this.connection.sendCommand(commandId);
   }
 
   /** True when a media file is actively loaded/playing/paused in FULLSCREEN
@@ -432,6 +516,9 @@ export class InputManager {
     const s = mp.state;
     const playing = s === PlayerState.LOADED || s === PlayerState.PLAY || s === PlayerState.PAUSE;
     if (!playing) return false;
+    if (this._tizenSmartRemoteEnabled()) {
+      return this._tizenRemoteContext() !== 'default';
+    }
     // Menu/OSD drawn over video → arrows should navigate, not seek
     if (this.connection.isMenuActive?.()) return false;
     // isVideoFullscreen may be absent on an older player build → default to the
@@ -447,6 +534,32 @@ export class InputManager {
    *   Playback: Up/Down             → same as menu (step / page)
    */
   _arrowTransport(cmd) {
+    if (this._tizenSmartRemoteEnabled()) {
+      switch (cmd) {
+        case SageCommand.UP:
+          return {
+            tap: this._tizenRemoteCommand('up', false).id,
+            hold: this._tizenRemoteCommand('up', true).id,
+          };
+        case SageCommand.DOWN:
+          return {
+            tap: this._tizenRemoteCommand('down', false).id,
+            hold: this._tizenRemoteCommand('down', true).id,
+          };
+        case SageCommand.LEFT:
+          return {
+            tap: this._tizenRemoteCommand('left', false).id,
+            hold: this._tizenRemoteCommand('left', true).id,
+          };
+        case SageCommand.RIGHT:
+          return {
+            tap: this._tizenRemoteCommand('right', false).id,
+            hold: this._tizenRemoteCommand('right', true).id,
+          };
+        default:
+          return null;
+      }
+    }
     switch (cmd) {
       case SageCommand.UP:
         return { tap: SageCommand.UP.id, hold: SageCommand.PAGE_UP.id };

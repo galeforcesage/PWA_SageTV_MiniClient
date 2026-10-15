@@ -36,6 +36,7 @@ import { PlayerState } from '../protocol/constants.js';
  * (first frame is typically <3s).
  */
 const PREPARE_WATCHDOG_MS = 25000;
+const PLAYBACK_DIAGNOSTIC_INTERVAL_MS = 5000;
 
 export class AVPlayPlayer extends EventTarget {
   /**
@@ -67,6 +68,8 @@ export class AVPlayPlayer extends EventTarget {
     // NG STREAMINFO (MEDIACMD 40) descriptor for the current item, if any.
     this._streamInfo = null;
     this._prepareWatchdog = null;
+    this._playbackDiagnosticTimer = null;
+    this._lastBufferingProgressBucket = -1;
     this._fallbackUrl = null;
     this._userMuted = false;
     this._volume = 1;
@@ -75,9 +78,13 @@ export class AVPlayPlayer extends EventTarget {
     this._bridgeSessionId = null;  // per-load() session ID for bridge dedup
     this._restartableStream = null;
     this._streamOffsetMs = 0;
+    this._lastRenderedMediaTimeMs = 0;
+    this._buffering = false;
     this._fallbackRestart = null;
-    this._restartSeekTimer = null;
-    this._pendingRestartSeekMs = 0;
+    this._restartSeekGeneration = 0;
+    this._restartSeekTargetMs = 0;
+    this._restartSeekRequested = false;
+    this._restartSeekRunning = false;
     this._restartSeekResumePaused = false;
     this._restartSeekDestRect = null;
 
@@ -180,12 +187,16 @@ export class AVPlayPlayer extends EventTarget {
   async load(majorHint, minorHint, encodingHint, url, hostname, timeshifted, bufferSize, bridgeFilePath, msproxyFallbackUrl = null, streamOptions = null) {
     const retainedRect = streamOptions?.destRect || null;
     const startPaused = !!streamOptions?.startPaused;
-    this.stop();
+    const restartGeneration = Number(streamOptions?.restartGeneration) || 0;
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
+    this.stop({ preserveRestartSeek: !!restartGeneration });
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
     // Generate a unique session ID for this load so the bridge can dedup
     // concurrent AVPlay HTTP connections (range probes) into one XCODE_SETUP.
     this._bridgeSessionId = streamOptions?.sessionId || ('avplay-' + Date.now());
     this._restartableStream = streamOptions?.restartable || null;
     this._streamOffsetMs = Math.max(0, Number(streamOptions?.offsetMs) || 0);
+    this._lastRenderedMediaTimeMs = this._streamOffsetMs;
     this._fallbackRestart = streamOptions?.fallbackRestart || null;
     this._lastDestRect = retainedRect;
     // Token for THIS load. stop()/a newer load() bump _loadSeq, so the async
@@ -226,7 +237,8 @@ export class AVPlayPlayer extends EventTarget {
       this._avplay.open(mediaUrl);
       this._applyDisplayRect();
       try { this._avplay.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX'); } catch { /* ignore */ }
-      this._installListener();
+      this._installListener(seq);
+      this._startPlaybackDiagnostics(seq);
       this.state = PlayerState.LOADED;
       this._avplay.prepareAsync(
         () => {
@@ -234,7 +246,7 @@ export class AVPlayPlayer extends EventTarget {
           // we'd resume a video the user already exited and strand the menu.
           if (seq !== this._loadSeq) return;
           try {
-            this._durationMs = this._streamOffsetMs + (this._avplay.getDuration() || 0);
+            this._durationMs = this._resolveDurationMs(this._avplay.getDuration());
           } catch { /* ignore */ }
           this._captureStreamInfo();
           try {
@@ -258,9 +270,11 @@ export class AVPlayPlayer extends EventTarget {
       // Guard against an infinite prepare/first-frame hang (no callback ever
       // fires) — the exact failure mode that stalls the server for ~30s.
       this._armPrepareWatchdog(seq);
+      return true;
     } catch (e) {
       console.error('[AVPlay] open/prepare threw:', e);
       this._fallbackOrFail('AVPLAY_OPEN_ERROR', { mode: 'avplay', message: e && e.message });
+      return false;
     }
   }
 
@@ -355,6 +369,8 @@ export class AVPlayPlayer extends EventTarget {
 
   // Option B parity: bridge transcodes a MediaFile id to fMP4/TS AVPlay can open.
   async loadBridgeMfid(mfid, hostname, seekSec = 0, playbackOptions = null) {
+    const restartGeneration = Number(playbackOptions?.restartGeneration) || 0;
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const sessionId = 'avplay-' + Date.now();
     const sess = `&session=${encodeURIComponent(sessionId)}`;
@@ -365,10 +381,13 @@ export class AVPlayPlayer extends EventTarget {
       restartable: { kind: 'bridge-mfid', mfid, hostname },
       startPaused: !!playbackOptions?.startPaused,
       destRect: playbackOptions?.destRect || null,
+      restartGeneration,
     });
   }
 
   async loadBridgeFile(absPath, hostname, seekSec = 0, playbackOptions = null) {
+    const restartGeneration = Number(playbackOptions?.restartGeneration) || 0;
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const sessionId = 'avplay-' + Date.now();
     const sess = `&session=${encodeURIComponent(sessionId)}`;
@@ -379,6 +398,7 @@ export class AVPlayPlayer extends EventTarget {
       restartable: { kind: 'bridge-file', absPath, hostname },
       startPaused: !!playbackOptions?.startPaused,
       destRect: playbackOptions?.destRect || null,
+      restartGeneration,
     });
   }
 
@@ -392,6 +412,8 @@ export class AVPlayPlayer extends EventTarget {
    * @param {number} [seekSec=0]
    */
   async loadMsProxy(absPath, mode, hostname, seekSec = 0, playbackOptions = null) {
+    const restartGeneration = Number(playbackOptions?.restartGeneration) || 0;
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const sessionId = 'avplay-' + Date.now();
     const sess = `&session=${encodeURIComponent(sessionId)}`;
@@ -412,6 +434,7 @@ export class AVPlayPlayer extends EventTarget {
       },
       startPaused: !!playbackOptions?.startPaused,
       destRect: playbackOptions?.destRect || null,
+      restartGeneration,
     });
   }
 
@@ -425,35 +448,118 @@ export class AVPlayPlayer extends EventTarget {
     return this.load(0, 0, '', playlistUrl, this._pullHostname || '', false, 0, null);
   }
 
-  _installListener() {
+  _installListener(seq = this._loadSeq) {
     const av = this._avplay;
+    const isActive = () => seq === this._loadSeq && av === this._avplay;
     av.setListener({
-      onbufferingstart: () => this.dispatchEvent(new CustomEvent('buffering')),
-      onbufferingprogress: () => {},
+      onbufferingstart: () => {
+        if (!isActive()) return;
+        this._buffering = true;
+        this._lastBufferingProgressBucket = -1;
+        this._phoneHome('BUFFERING_START', this._snapshotPlaybackDiagnostics(av));
+        this.dispatchEvent(new CustomEvent('buffering'));
+      },
+      onbufferingprogress: (percent) => {
+        if (!isActive()) return;
+        const progress = Math.max(0, Math.min(100, Number(percent) || 0));
+        const bucket = Math.floor(progress / 25) * 25;
+        if (bucket === this._lastBufferingProgressBucket) return;
+        this._lastBufferingProgressBucket = bucket;
+        this._phoneHome('BUFFERING_PROGRESS', {
+          ...this._snapshotPlaybackDiagnostics(av),
+          progress,
+        });
+      },
       onbufferingcomplete: () => {
+        if (!isActive()) return;
+        this._buffering = false;
+        this._lastBufferingProgressBucket = 100;
+        this._phoneHome('BUFFERING_COMPLETE', this._snapshotPlaybackDiagnostics(av));
         this._emitFirstFrameOnce();
         this.dispatchEvent(new CustomEvent('playing'));
       },
       oncurrentplaytime: (ms) => {
-        this._positionMs = this._streamOffsetMs + Math.max(0, Number(ms) || 0);
+        if (!isActive()) return;
+        const localMs = Math.max(0, Number(ms) || 0);
+        this._positionMs = this._streamOffsetMs + localMs;
+        if (!this._buffering && this.state !== PlayerState.PAUSE) {
+          this._lastRenderedMediaTimeMs = this._positionMs;
+        }
         this._emitFirstFrameOnce();
       },
       onstreamcompleted: () => {
+        if (!isActive()) return;
         this.state = PlayerState.EOS;
+        this._phoneHome('STREAM_COMPLETED', this._snapshotPlaybackDiagnostics(av));
+        this._clearPlaybackDiagnostics();
         this.dispatchEvent(new CustomEvent('eos'));
       },
       onevent: (type, data) => {
+        if (!isActive()) return;
         if (type === 'PLAYER_MSG_RESOLUTION_CHANGED' || type === 'PLAYER_MSG_HD_VIDEO') {
           this._captureStreamInfo();
         }
-        void data;
+        this._phoneHome('AVPLAY_EVENT', {
+          ...this._snapshotPlaybackDiagnostics(av),
+          eventType: String(type),
+          eventData: data == null ? null : String(data),
+        });
       },
       onerror: (e) => {
+        if (!isActive()) return;
         console.error('[AVPlay] error:', e);
         this._phoneHome('AVPLAY_RUNTIME_ERROR', { code: String(e) });
+        this._clearPlaybackDiagnostics();
         this._emitPlaybackFailure('AVPLAY_RUNTIME_ERROR', { mode: 'avplay', code: String(e) });
       },
     });
+  }
+
+  _snapshotPlaybackDiagnostics(av = this._avplay) {
+    let localPositionMs = null;
+    let nativeState = null;
+    if (av) {
+      try { localPositionMs = Math.max(0, Number(av.getCurrentTime()) || 0); } catch { /* unavailable */ }
+      try { nativeState = String(av.getState()); } catch { /* unavailable */ }
+    }
+    return {
+      nativeState,
+      localPositionMs,
+      absolutePositionMs: localPositionMs == null ? this._positionMs : this._streamOffsetMs + localPositionMs,
+      callbackPositionMs: this._positionMs,
+      renderedPositionMs: this._lastRenderedMediaTimeMs,
+      streamOffsetMs: this._streamOffsetMs,
+      buffering: this._buffering,
+      loadSequence: this._loadSeq,
+    };
+  }
+
+  _startPlaybackDiagnostics(seq = this._loadSeq) {
+    this._clearPlaybackDiagnostics();
+    const av = this._avplay;
+    this._playbackDiagnosticTimer = setInterval(() => {
+      if (seq !== this._loadSeq || av !== this._avplay) {
+        this._clearPlaybackDiagnostics();
+        return;
+      }
+      this._phoneHome('PLAYBACK_HEARTBEAT', this._snapshotPlaybackDiagnostics(av));
+    }, PLAYBACK_DIAGNOSTIC_INTERVAL_MS);
+  }
+
+  _clearPlaybackDiagnostics() {
+    if (!this._playbackDiagnosticTimer) return;
+    clearInterval(this._playbackDiagnosticTimer);
+    this._playbackDiagnosticTimer = null;
+  }
+
+  _resolveDurationMs(nativeDuration) {
+    const expectedDurationMs = Number(this._streamInfo?.durationMs || this._ngDurationMs) || 0;
+    const nativeDurationMs = Math.max(0, Number(nativeDuration) || 0);
+    // STREAMINFO/context describes the whole recording and is authoritative.
+    // AVPlay may temporarily return zero (or only the remaining transcode
+    // duration) after reopening at a nonzero seek offset.
+    if (expectedDurationMs > 0) return expectedDurationMs;
+    return nativeDurationMs > 0 ? this._streamOffsetMs + nativeDurationMs : 0;
   }
 
   _emitFirstFrameOnce() {
@@ -493,22 +599,26 @@ export class AVPlayPlayer extends EventTarget {
     catch (e) { console.warn('[AVPlay] pause:', e && e.message); }
   }
 
-  stop() {
+  stop(options = null) {
+    const preserveRestartSeek = !!options?.preserveRestartSeek;
     // Invalidate any in-flight prepareAsync callback from a prior load() so a
     // late "prepared" success can't flip state back to PLAY after we've stopped.
     this._loadSeq = (this._loadSeq || 0) + 1;
     this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
     this._fallbackUrl = null;
-    this._restartableStream = null;
+    if (!preserveRestartSeek) this._restartableStream = null;
     this._streamOffsetMs = 0;
+    this._lastRenderedMediaTimeMs = 0;
+    this._buffering = false;
     this._fallbackRestart = null;
-    if (this._restartSeekTimer) {
-      clearTimeout(this._restartSeekTimer);
-      this._restartSeekTimer = null;
+    if (!preserveRestartSeek) {
+      this._restartSeekGeneration = (this._restartSeekGeneration || 0) + 1;
+      this._restartSeekTargetMs = 0;
+      this._restartSeekRequested = false;
+      this._restartSeekResumePaused = false;
+      this._restartSeekDestRect = null;
     }
-    this._pendingRestartSeekMs = 0;
-    this._restartSeekResumePaused = false;
-    this._restartSeekDestRect = null;
     this._lastDestRect = null;
     if (this._avplay) {
       try { this._avplay.stop(); } catch { /* ignore */ }
@@ -560,36 +670,15 @@ export class AVPlayPlayer extends EventTarget {
     // AVPlay.seekTo() cannot reposition them; reopen the server stream with a
     // seek offset, just like the browser MSE path does.
     if (this._restartableStream) {
-      this._pendingRestartSeekMs = ms;
+      this._restartSeekTargetMs = ms;
+      this._restartSeekRequested = true;
+      this._restartSeekGeneration = (this._restartSeekGeneration || 0) + 1;
       this._restartSeekResumePaused = this._restartSeekResumePaused || this.state === PlayerState.PAUSE;
       this._restartSeekDestRect = this._lastDestRect;
-      if (this._restartSeekTimer) clearTimeout(this._restartSeekTimer);
-      this._restartSeekTimer = setTimeout(() => {
-        this._restartSeekTimer = null;
-        const targetMs = this._pendingRestartSeekMs;
-        const stream = this._restartableStream;
-        const playbackOptions = {
-          startPaused: this._restartSeekResumePaused,
-          destRect: this._restartSeekDestRect,
-        };
-        this._pendingRestartSeekMs = 0;
-        this._restartSeekResumePaused = false;
-        this._restartSeekDestRect = null;
-        if (!stream) return;
-        console.log(`[AVPlay] Reopening ${stream.kind} stream at ${targetMs}ms`);
-        let restart;
-        if (stream.kind === 'msproxy') {
-          restart = this.loadMsProxy(stream.absPath, stream.mode, stream.hostname, targetMs / 1000, playbackOptions);
-        } else if (stream.kind === 'bridge-mfid') {
-          restart = this.loadBridgeMfid(stream.mfid, stream.hostname, targetMs / 1000, playbackOptions);
-        } else if (stream.kind === 'bridge-file') {
-          restart = this.loadBridgeFile(stream.absPath, stream.hostname, targetMs / 1000, playbackOptions);
-        }
-        Promise.resolve(restart).catch((e) => this._emitPlaybackFailure('AVPLAY_SEEK_RESTART_ERROR', {
-          mode: 'avplay',
-          message: e && e.message,
-        }));
-      }, 250);
+      this._positionMs = ms;
+      this._lastRenderedMediaTimeMs = ms;
+      this._buffering = true;
+      this._drainRestartSeek();
       return;
     }
 
@@ -605,6 +694,62 @@ export class AVPlayPlayer extends EventTarget {
       try { this._avplay.seekTo(ms); this._positionMs = ms; }
       catch (e2) { console.warn('[AVPlay] seekTo threw:', e2 && e2.message); }
       void e;
+    }
+  }
+
+  async _drainRestartSeek() {
+    if (this._restartSeekRunning) return;
+    this._restartSeekRunning = true;
+    try {
+      while (this._restartSeekRequested && this._restartableStream) {
+        const generation = this._restartSeekGeneration;
+        const targetMs = this._restartSeekTargetMs;
+        const stream = this._restartableStream;
+        const playbackOptions = {
+          startPaused: this._restartSeekResumePaused,
+          destRect: this._restartSeekDestRect,
+          restartGeneration: generation,
+        };
+
+        await this._closeForRestart(generation);
+        if (generation !== this._restartSeekGeneration) continue;
+
+        console.log(`[AVPlay] Reopening ${stream.kind} stream at ${targetMs}ms generation=${generation}`);
+        let opened = false;
+        if (stream.kind === 'msproxy') {
+          opened = await this.loadMsProxy(stream.absPath, stream.mode, stream.hostname, targetMs / 1000, playbackOptions);
+        } else if (stream.kind === 'bridge-mfid') {
+          opened = await this.loadBridgeMfid(stream.mfid, stream.hostname, targetMs / 1000, playbackOptions);
+        } else if (stream.kind === 'bridge-file') {
+          opened = await this.loadBridgeFile(stream.absPath, stream.hostname, targetMs / 1000, playbackOptions);
+        }
+
+        if (generation !== this._restartSeekGeneration) continue;
+        this._restartSeekRequested = false;
+        if (opened !== false) {
+          this._restartSeekResumePaused = false;
+          this._restartSeekDestRect = null;
+        }
+        break;
+      }
+    } catch (e) {
+      this._emitPlaybackFailure('AVPLAY_SEEK_RESTART_ERROR', {
+        mode: 'avplay',
+        message: e && e.message,
+      });
+    } finally {
+      this._restartSeekRunning = false;
+    }
+  }
+
+  async _closeForRestart(generation) {
+    if (generation !== this._restartSeekGeneration) return;
+    this._loadSeq = (this._loadSeq || 0) + 1;
+    this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
+    if (this._avplay) {
+      try { this._avplay.stop(); } catch { /* ignore */ }
+      try { this._avplay.close(); } catch { /* ignore */ }
     }
   }
 
@@ -637,6 +782,21 @@ export class AVPlayPlayer extends EventTarget {
       } catch { /* fall through */ }
     }
     return this._positionMs;
+  }
+
+  getRenderedMediaTimeMillis() {
+    if (this.state === PlayerState.NO_STATE || this.state === PlayerState.STOPPED) return 0;
+    if (this._buffering || this.state === PlayerState.PAUSE) {
+      return this._lastRenderedMediaTimeMs || 0;
+    }
+    if (this._avplay) {
+      try {
+        const renderedMs = this._streamOffsetMs + Math.max(0, Number(this._avplay.getCurrentTime()) || 0);
+        this._lastRenderedMediaTimeMs = renderedMs;
+        return renderedMs;
+      } catch { /* fall through */ }
+    }
+    return this._lastRenderedMediaTimeMs || 0;
   }
 
   getState() { return this.state; }
@@ -732,6 +892,7 @@ export class AVPlayPlayer extends EventTarget {
 
   _emitPlaybackFailure(reason, details = {}) {
     this._clearPrepareWatchdog();
+    this._clearPlaybackDiagnostics();
     const key = `${reason}|${details.mode || ''}|${details.code || ''}`;
     if (this._reportedFailureKeys.has(key)) return;
     this._reportedFailureKeys.add(key);

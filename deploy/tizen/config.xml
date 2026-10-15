@@ -6,7 +6,7 @@
   viewmodes="maximized">
   <name>SageTV MiniClient</name>
   <description>SageTV NG PWA MiniClient for Samsung TV</description>
-  <icon src="icons/icon-512.png"/>
+  <icon src="public/icons/icon-512.png"/>
   <content src="public/index.html"/>
   <feature name="http://tizen.org/feature/screen.size.all"/>
   <access origin="*" subdomains="true"/>

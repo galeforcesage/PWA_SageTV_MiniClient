@@ -34,6 +34,12 @@ dependencies {
 
     // JSON parsing/persistence for capability feedback profiles (Java 8 + Shadow ASM compatible)
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.13.5'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 shadowJar {

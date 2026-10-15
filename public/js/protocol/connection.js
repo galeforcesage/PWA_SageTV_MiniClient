@@ -1655,7 +1655,7 @@ export class MiniClientConnection extends EventTarget {
     // Trick-play contract capabilities ??? advertised in the aggregate
     // SAGETV_NG_CAPABILITIES string so the server sees them (it reads this
     // string, not individual GetProperty round-trips for each cap).
-    caps.push('TRICKPLAY_POSITION_V1', 'SEEK_EPOCH_V1', 'DVR_WINDOW_V1');
+    caps.push('TRICKPLAY_POSITION_V1', 'DVR_WINDOW_V1');
     // GPU enhancement reporting ??? advertise support so the server queries
     // DISPLAY_SINK_RESOLUTION, PWA_VIDEO_CODECS, LOCAL_ENHANCEMENT, DISPLAY_HDR_TYPES
     caps.push('GPU_ENHANCE_REPORT_V1', 'DISPLAY_SINK_V1');
@@ -2251,8 +2251,9 @@ export class MiniClientConnection extends EventTarget {
       case 'TRICKPLAY_POSITION_V1':
         return 'TRUE';
       case 'SEEK_EPOCH_V1':
-        this._seekEpochEnabled = true;
-        return 'TRUE';
+        // Reserved: the current 5-byte GETMEDIATIME and 9-byte PUSHBUFFER
+        // detailed replies contain no epoch carrier.
+        return '';
       case 'DVR_WINDOW_V1':
         return 'TRUE';
       case 'FORCED_MEDIA_RECONNECT':
@@ -3374,6 +3375,7 @@ export class MiniClientConnection extends EventTarget {
 
       case 16: { // MEDIACMD_OPENURL
         this._serverMuxTime = -1;
+        this._lastReportedPosition = -1;
         this._mediaOpened = true;
         // Ack the OPENURL up-front, on the SAME connection it arrived on, BEFORE
         // any device-path dispatch (onMediaOpen/load). The server
@@ -3507,14 +3509,15 @@ export class MiniClientConnection extends EventTarget {
       }
 
       case 17: { // MEDIACMD_GETMEDIATIME
-        const time = this.mediaPlayer.getMediaTimeMillis();
         if (this._detailedBufferStats) {
           // 5 bytes: [4B time][1B playerState]
+          const time = this.mediaPlayer.getRenderedMediaTimeMillis();
           const buf = new Uint8Array(5);
           new DataView(buf.buffer).setInt32(0, time & 0x7FFFFFFF, false);
           buf[4] = this.mediaPlayer.getState() & 0xFF;
           this._sendMedia(buf);
         } else {
+          const time = this.mediaPlayer.getMediaTimeMillis();
           this._sendMediaReturn(time & 0x7FFFFFFF);
         }
         break;
@@ -3605,7 +3608,7 @@ export class MiniClientConnection extends EventTarget {
           const buf = new Uint8Array(9);
           const dv = new DataView(buf.buffer);
           dv.setInt32(0, bufLeft, false);
-          let pos = this.mediaPlayer.getMediaTimeMillis();
+          let pos = this.mediaPlayer.getRenderedMediaTimeMillis();
           // Monotonic guard: within an epoch, never report lower than previous
           if (this._lastReportedPosition >= 0 && pos < this._lastReportedPosition) {
             pos = this._lastReportedPosition;

@@ -183,3 +183,106 @@ test('native xcode seek sends &seek= in seconds, not milliseconds', () => {
   const seek = new URL(src).searchParams.get('seek');
   assert.equal(seek, '68.412');
 });
+
+test('rendered position includes bridge prime offset for Sage pull reports', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = true;
+  player._bridgeTimeOffsetMs = 120_000;
+  player._lastRenderedMediaTimeMs = 0;
+  player.video = { currentTime: 2.345 };
+
+  assert.equal(player.getMediaTimeMillis(), 122_345);
+  assert.equal(player.getRenderedMediaTimeMillis(), 122_345);
+});
+
+test('rendered position includes native-xcode prime offset exactly once', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = false;
+  player._nativeXcodeMode = true;
+  player._nativeXcodeOffsetMs = 504_839;
+  player._lastRenderedMediaTimeMs = 504_839;
+  player.video = { currentTime: 3.996 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 508_835);
+});
+
+test('rendered position does not add an offset for an ordinary media timeline', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player.state = PlayerState.PLAY;
+  player.bridgeMode = false;
+  player._nativeXcodeMode = false;
+  player._lastRenderedMediaTimeMs = 0;
+  player.video = { currentTime: 3.996 };
+
+  assert.equal(player.getRenderedMediaTimeMillis(), 3_996);
+});
+
+test('rendered position freezes while buffering or paused', () => {
+  const player = Object.create(MediaPlayer.prototype);
+  player._lastRenderedMediaTimeMs = 4_000;
+  player.video = { currentTime: 9 };
+
+  player.state = PlayerState.BUFFERING;
+  assert.equal(player.getRenderedMediaTimeMillis(), 4_000);
+  player.state = PlayerState.PAUSE;
+  assert.equal(player.getRenderedMediaTimeMillis(), 4_000);
+});
+
+function fakeSeekable(start, end) {
+  return { length: 1, start: () => start, end: () => end };
+}
+
+function makeCmafPlayer(seekableStart, seekableEnd) {
+  const player = Object.create(MediaPlayer.prototype);
+  let ct = 0;
+  player.video = {
+    get currentTime() { return ct; },
+    set currentTime(v) { ct = v; },
+    seekable: fakeSeekable(seekableStart, seekableEnd),
+  };
+  player._cmafHlsMode = true;
+  return player;
+}
+
+test('CMAF seek clamps the target into the DVR window (video.seekable)', () => {
+  const player = makeCmafPlayer(100, 400);
+  player._cmafIsLive = false;
+  player._hls = null;
+
+  player._cmafSeek(50);              // below window start
+  assert.equal(player.video.currentTime, 100);
+  player._cmafSeek(500);             // past the live edge
+  assert.equal(player.video.currentTime, 400);
+  player._cmafSeek(250);             // inside
+  assert.equal(player.video.currentTime, 250);
+});
+
+test('CMAF live REW suppresses hls.js live-sync, and returning to the edge restores it', () => {
+  const player = makeCmafPlayer(0, 100);
+  player._cmafIsLive = true;
+  player._cmafDvrMode = false;
+  player._hls = { config: { liveMaxLatencyDuration: 10 } };
+
+  // REW to 80 — 20s behind the edge → DVR engaged, catch-up ceiling raised.
+  player._cmafSeek(80);
+  assert.equal(player._cmafDvrMode, true);
+  assert.ok(player._hls.config.liveMaxLatencyDuration > 3600);
+
+  // FF back to 98 — 2s behind the edge → released, tight low-latency restored.
+  player._cmafSeek(98);
+  assert.equal(player._cmafDvrMode, false);
+  assert.equal(player._hls.config.liveMaxLatencyDuration, 10);
+});
+
+test('CMAF DVR suppression is a no-op for native HLS (no hls.js instance)', () => {
+  const player = makeCmafPlayer(0, 100);
+  player._cmafIsLive = true;
+  player._cmafDvrMode = false;
+  player._hls = null;
+
+  assert.doesNotThrow(() => player._cmafSeek(20));
+  assert.equal(player.video.currentTime, 20);
+  assert.equal(player._cmafDvrMode, false);
+});

@@ -15,7 +15,7 @@
 </head>
 <body>
   <!-- Connection Screen (Server Selection) -->
-  <div id="connect-screen" class="screen active">
+  <div id="connect-screen" class="screen active" data-spatnav-start="#server-grid .server-card, #btn-add-server, #btn-discover">
     <!-- Left sidebar -->
     <div class="server-sidebar">
       <h2 class="sidebar-heading">Servers</h2>
@@ -275,6 +275,49 @@
             <div class="settings-item">
               <div class="settings-item-text"><strong>Key Repeat Delay (ms)</strong><br><small>Delay before repeats start</small></div>
               <input type="number" id="set-key-repeat-delay" class="settings-input" min="200" max="3000" step="100">
+            </div>
+          </details>
+
+          <details id="set-tizen-remote-group" class="settings-group" hidden>
+            <summary>Tizen Smart Remote Mappings<br><small>Context-sensitive Samsung remote controls</small></summary>
+            <div class="settings-item">
+              <div class="settings-item-text"><strong>Enable Smart Remote Mappings</strong><br><small>Use separate mappings for menus, playing video, and paused video</small></div>
+              <input type="checkbox" id="set-tizen-smart-remote">
+            </div>
+            <div id="set-tizen-remote-mappings">
+              <h4>Default / Menus</h4>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select</strong></div><select id="set-tizen-default-select" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left</strong></div><select id="set-tizen-default-left" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right</strong></div><select id="set-tizen-default-right" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up</strong></div><select id="set-tizen-default-up" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down</strong></div><select id="set-tizen-default-down" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select (Long Press)</strong></div><select id="set-tizen-default-select-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left (Long Press)</strong></div><select id="set-tizen-default-left-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right (Long Press)</strong></div><select id="set-tizen-default-right-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up (Long Press)</strong></div><select id="set-tizen-default-up-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down (Long Press)</strong></div><select id="set-tizen-default-down-long" class="settings-select settings-cmd-select"></select></div>
+              <h4>Video Playback Active</h4>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select</strong></div><select id="set-tizen-playing-select" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left</strong></div><select id="set-tizen-playing-left" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right</strong></div><select id="set-tizen-playing-right" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up</strong></div><select id="set-tizen-playing-up" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down</strong></div><select id="set-tizen-playing-down" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select (Long Press)</strong></div><select id="set-tizen-playing-select-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left (Long Press)</strong></div><select id="set-tizen-playing-left-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right (Long Press)</strong></div><select id="set-tizen-playing-right-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up (Long Press)</strong></div><select id="set-tizen-playing-up-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down (Long Press)</strong></div><select id="set-tizen-playing-down-long" class="settings-select settings-cmd-select"></select></div>
+              <h4>Video Paused</h4>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select</strong></div><select id="set-tizen-paused-select" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left</strong></div><select id="set-tizen-paused-left" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right</strong></div><select id="set-tizen-paused-right" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up</strong></div><select id="set-tizen-paused-up" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down</strong></div><select id="set-tizen-paused-down" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Select (Long Press)</strong></div><select id="set-tizen-paused-select-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Left (Long Press)</strong></div><select id="set-tizen-paused-left-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Right (Long Press)</strong></div><select id="set-tizen-paused-right-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Up (Long Press)</strong></div><select id="set-tizen-paused-up-long" class="settings-select settings-cmd-select"></select></div>
+              <div class="settings-item"><div class="settings-item-text"><strong>Down (Long Press)</strong></div><select id="set-tizen-paused-down-long" class="settings-select settings-cmd-select"></select></div>
             </div>
           </details>
 
@@ -619,7 +662,7 @@
     </div>
   </div>
 
-    <script type="module" src="js/app.js?v=20260925-seekunit"></script>
+    <script type="module" src="js/app.js?v=tizen-transport-defaults"></script>
 
 </body>
 </html>

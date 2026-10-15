@@ -11,14 +11,14 @@
  * This is the main orchestrator that ties all modules together.
  */
 
-import { MiniClientConnection } from '../protocol/connection.js?v=20260920-surfacecontract';
+import { MiniClientConnection } from '../protocol/connection.js?v=20261012-avplay-playback-diagnostics';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { WebGLRenderer } from '../ui/webgl-renderer.js';
-import { MediaPlayer } from '../media/player.js?v=20260925-seekunit';
+import { MediaPlayer } from '../media/player.js?v=20261012-avplay-playback-diagnostics';
 import { NgPlaybackContextConsumer } from '../media/ng-playback-context-consumer.js';
 import { DownloadManager } from './download-manager.js';
-import { InputManager } from '../input/input-manager.js';
-import { SettingsManager } from '../settings/settings-manager.js';
+import { InputManager } from '../input/input-manager.js?v=tizen-smart-remote-mappings';
+import { SettingsManager } from '../settings/settings-manager.js?v=tizen-transport-defaults';
 import { PlatformDetector } from '../platform/platform-detector.js';
 
 export class SessionManager extends EventTarget {
@@ -129,7 +129,7 @@ export class SessionManager extends EventTarget {
     if (useAvplay) {
       // Dynamic import: the AVPlay module is fetched ONLY on Tizen, so browser /
       // iPad clients never download it — keeps the web PWA footprint minimal.
-      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=20260920-tizenbw');
+      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=20261012-avplay-playback-diagnostics');
       this.mediaPlayer = new AVPlayPlayer(videoElement, container, {
         platformDetector: this.platformDetector,
       });
@@ -267,6 +267,7 @@ export class SessionManager extends EventTarget {
     // Create and start input manager
     this.inputManager = new InputManager(this.container, this.connection, {
       platformDetector: this.platformDetector,
+      settings: this.settings,
     });
     this.inputManager.updateScale(
       this.canvas.clientWidth, this.canvas.clientHeight,

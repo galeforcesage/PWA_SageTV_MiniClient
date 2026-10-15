@@ -88,6 +88,15 @@ html, body {
   cursor: pointer;
 }
 .sidebar-link:hover { color: #fff; }
+/* Visible focus for TV remotes / arrow-key users — without this the Configure
+   link can hold focus invisibly, so the user can't tell what Select will fire. */
+.sidebar-link:focus,
+.sidebar-link:focus-visible {
+  outline: none;
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.55);
+  border-radius: 6px;
+}
 
 /* Main area */
 .server-main {
