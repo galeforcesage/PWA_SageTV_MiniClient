@@ -11,13 +11,13 @@
  * This is the main orchestrator that ties all modules together.
  */
 
-import { MiniClientConnection } from '../protocol/connection.js?v=20261012-avplay-playback-diagnostics';
+import { MiniClientConnection } from '../protocol/connection.js?v=tizen-media-context-owner';
 import { CanvasRenderer } from '../ui/renderer.js';
 import { WebGLRenderer } from '../ui/webgl-renderer.js';
 import { MediaPlayer } from '../media/player.js?v=20261012-avplay-playback-diagnostics';
 import { NgPlaybackContextConsumer } from '../media/ng-playback-context-consumer.js';
 import { DownloadManager } from './download-manager.js';
-import { InputManager } from '../input/input-manager.js?v=tizen-smart-remote-mappings';
+import { InputManager } from '../input/input-manager.js?v=tizen-media-context-owner';
 import { SettingsManager } from '../settings/settings-manager.js?v=tizen-transport-defaults';
 import { PlatformDetector } from '../platform/platform-detector.js';
 

@@ -470,6 +470,9 @@ export class InputManager {
 
   _tizenRemoteContext() {
     if (!this._tizenSmartRemoteEnabled()) return 'default';
+    if (typeof this.connection?.isMediaOpen === 'function' && !this.connection.isMediaOpen()) {
+      return 'default';
+    }
     const mp = this.connection?.mediaPlayer;
     if (!mp) return 'default';
     const fullscreen = typeof mp.isVideoFullscreen === 'function'
