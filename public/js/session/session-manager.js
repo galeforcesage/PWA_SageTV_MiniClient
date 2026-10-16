@@ -129,7 +129,7 @@ export class SessionManager extends EventTarget {
     if (useAvplay) {
       // Dynamic import: the AVPlay module is fetched ONLY on Tizen, so browser /
       // iPad clients never download it — keeps the web PWA footprint minimal.
-      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=20261012-avplay-playback-diagnostics');
+      const { AVPlayPlayer } = await import('../media/avplay-player.js?v=tizen-pause-resume-restart');
       this.mediaPlayer = new AVPlayPlayer(videoElement, container, {
         platformDetector: this.platformDetector,
       });
