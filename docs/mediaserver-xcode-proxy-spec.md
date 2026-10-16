@@ -79,12 +79,17 @@ Flow:
    replay ring. Each attached HTTP consumer has its own cursor. Cursor advancement
    is committed only after its servlet write succeeds; a reconnect begins at the
    highest committed delivered watermark and does not create another producer.
-6. When the ring is full, producer reads backpressure. Consumers that stop
-   advancing beyond the stale-consumer deadline are detached so memory remains
-   bounded.
-7. For encoded `xcode:*` streams, measure the committed delivered watermark over
-   each five-second window and send that goodput as `XCODE_ADJUST <kbps>`. The
-   same interval logs producer, replay-ring, consumer, and write-block counters.
+6. When the ring is full, producer reads backpressure. Consumers that fall behind
+   and stop advancing beyond the stale-consumer deadline are detached proactively,
+   without waiting for the ring to fill, so memory and producer progress remain
+   bounded. A caught-up consumer waiting for new producer bytes is not stale.
+7. For encoded `xcode:*` streams, keep wall-clock delivery rate as telemetry only.
+   Send `XCODE_ADJUST <kbps>` only for a single-consumer burst sample measured by
+   active socket-write time. Suppress adjustment while a write is pending, the
+   replay ring is constrained or at least 75% full, a consumer was evicted, writes
+   occupy at least half the sample window, or a write approaches the stale-consumer
+   deadline. Client-paced playback and stalled AVPlay reads are therefore not
+   reported to SageTV-NG as available network bandwidth.
 8. A failed HTTP request detaches only that consumer. The producer remains alive
    through a bounded zero-consumer reconnect grace. When grace expires (or the
    producer reaches EOF/errors), it sends exactly one `CLOSE`, closes its socket,
