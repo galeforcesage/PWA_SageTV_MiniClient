@@ -329,6 +329,10 @@ export class MiniClientConnection extends EventTarget {
     return this._mediaOpened && (Date.now() - (this._lastGfxFlipAt || 0)) < 2000;
   }
 
+  isMediaOpen() {
+    return this._mediaOpened === true;
+  }
+
   _startBandwidthTracking() {
     this._stopBandwidthTracking();
     this._bytesReceivedWindow = 0;

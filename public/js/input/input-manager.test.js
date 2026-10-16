@@ -4,7 +4,13 @@ import assert from 'node:assert/strict';
 import { InputManager } from './input-manager.js';
 import { PlayerState, SageCommand } from '../protocol/constants.js';
 
-function createManager({ tizen = true, state = PlayerState.PLAY, menuActive = true, values = {} } = {}) {
+function createManager({
+  tizen = true,
+  state = PlayerState.PLAY,
+  menuActive = true,
+  mediaOpen = true,
+  values = {},
+} = {}) {
   globalThis.document = {
     getElementById: () => null,
     dispatchEvent: () => true,
@@ -12,6 +18,7 @@ function createManager({ tizen = true, state = PlayerState.PLAY, menuActive = tr
   const connection = {
     alive: true,
     isMenuActive: () => menuActive,
+    isMediaOpen: () => mediaOpen,
     mediaPlayer: {
       state,
       isVideoFullscreen: () => true,
@@ -52,6 +59,23 @@ test('Tizen default mappings use transport commands that also page menus', () =>
   });
   assert.deepEqual(manager._arrowTransport(SageCommand.RIGHT), {
     tap: SageCommand.FF.id,
+    hold: SageCommand.FF_2.id,
+  });
+});
+
+test('Tizen falls back to customized default mappings when media ownership closes', () => {
+  const manager = createManager({
+    state: PlayerState.PLAY,
+    mediaOpen: false,
+    values: {
+      tizen_default_right: 'Home',
+      tizen_playing_right: 'Skip Fwd/Page Right',
+    },
+  });
+
+  assert.equal(manager._tizenRemoteContext(), 'default');
+  assert.deepEqual(manager._arrowTransport(SageCommand.RIGHT), {
+    tap: SageCommand.HOME.id,
     hold: SageCommand.FF_2.id,
   });
 });
