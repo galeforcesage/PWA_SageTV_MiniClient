@@ -157,6 +157,67 @@ test('rendered media time freezes while buffering or paused', () => {
   assert.equal(player.getRenderedMediaTimeMillis(), 2_250);
 });
 
+test('long paused restartable stream reopens at the paused rendered position', () => {
+  const originalNow = Date.now;
+  Date.now = () => 20_000;
+  try {
+    let nativePlayCalls = 0;
+    let drainCalls = 0;
+    const player = Object.create(AVPlayPlayer.prototype);
+    player._avplay = { play: () => { nativePlayCalls++; } };
+    player.state = PlayerState.PAUSE;
+    player._restartableStream = { kind: 'msproxy' };
+    player._pausedAtMs = 10_000;
+    player._pausedMediaTimeMs = 123_096;
+    player._streamOffsetMs = 118_642;
+    player._lastRenderedMediaTimeMs = 123_096;
+    player._positionMs = 123_096;
+    player._restartSeekGeneration = 7;
+    player._lastDestRect = { x: 0, y: 0, width: 1920, height: 1080 };
+    player._phoneHome = () => {};
+    player.dispatchEvent = () => true;
+    player._drainRestartSeek = () => { drainCalls++; };
+
+    player.play();
+
+    assert.equal(nativePlayCalls, 0);
+    assert.equal(drainCalls, 1);
+    assert.equal(player.state, PlayerState.PLAY);
+    assert.equal(player._restartSeekTargetMs, 123_096);
+    assert.equal(player._restartSeekGeneration, 8);
+    assert.equal(player._restartSeekResumePaused, false);
+    assert.equal(player._buffering, true);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('short pause resumes AVPlay without reopening the stream', () => {
+  const originalNow = Date.now;
+  Date.now = () => 12_000;
+  try {
+    let nativePlayCalls = 0;
+    let drainCalls = 0;
+    const player = Object.create(AVPlayPlayer.prototype);
+    player._avplay = { play: () => { nativePlayCalls++; } };
+    player.state = PlayerState.PAUSE;
+    player._restartableStream = { kind: 'msproxy' };
+    player._pausedAtMs = 10_000;
+    player._pausedMediaTimeMs = 123_096;
+    player._drainRestartSeek = () => { drainCalls++; };
+
+    player.play();
+
+    assert.equal(nativePlayCalls, 1);
+    assert.equal(drainCalls, 0);
+    assert.equal(player.state, PlayerState.PLAY);
+    assert.equal(player._pausedAtMs, 0);
+    assert.equal(player._pausedMediaTimeMs, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test('superseded AVPlay callbacks cannot overwrite the active timeline', async () => {
   const listeners = [];
   const avplay = {

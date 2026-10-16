@@ -37,6 +37,7 @@ import { PlayerState } from '../protocol/constants.js';
  */
 const PREPARE_WATCHDOG_MS = 25000;
 const PLAYBACK_DIAGNOSTIC_INTERVAL_MS = 5000;
+const RESUME_RESTART_AFTER_PAUSE_MS = 5000;
 
 export class AVPlayPlayer extends EventTarget {
   /**
@@ -87,6 +88,8 @@ export class AVPlayPlayer extends EventTarget {
     this._restartSeekRunning = false;
     this._restartSeekResumePaused = false;
     this._restartSeekDestRect = null;
+    this._pausedAtMs = 0;
+    this._pausedMediaTimeMs = 0;
 
     // Server UI coordinate space (advertised UI resolution). setVideoRectangles
     // rects are in this space; we scale to physical display pixels for AVPlay.
@@ -208,6 +211,8 @@ export class AVPlayPlayer extends EventTarget {
     this.serverEOS = false;
     this._firstFrameEmitted = false;
     this._positionMs = this._streamOffsetMs;
+    this._pausedAtMs = 0;
+    this._pausedMediaTimeMs = 0;
 
     if (!this._avplay) {
       this._emitPlaybackFailure('AVPLAY_UNAVAILABLE', { mode: 'avplay' });
@@ -586,16 +591,48 @@ export class AVPlayPlayer extends EventTarget {
 
   play() {
     if (!this._avplay) return;
-    try {
-      if (this.state === PlayerState.PAUSE) this._avplay.play();
-      else this._avplay.play();
+    if (this.state === PlayerState.PAUSE &&
+        this._restartableStream &&
+        this._pausedAtMs > 0 &&
+        Date.now() - this._pausedAtMs >= RESUME_RESTART_AFTER_PAUSE_MS) {
+      const targetMs = Math.max(
+        this._streamOffsetMs,
+        this._pausedMediaTimeMs || this._lastRenderedMediaTimeMs || this._positionMs
+      );
       this.state = PlayerState.PLAY;
+      this._pausedAtMs = 0;
+      this._pausedMediaTimeMs = 0;
+      this._restartSeekTargetMs = targetMs;
+      this._restartSeekRequested = true;
+      this._restartSeekGeneration = (this._restartSeekGeneration || 0) + 1;
+      this._restartSeekResumePaused = false;
+      this._restartSeekDestRect = this._lastDestRect;
+      this._positionMs = targetMs;
+      this._lastRenderedMediaTimeMs = targetMs;
+      this._buffering = true;
+      this._phoneHome('RESUME_RESTART', { targetMs });
+      this.dispatchEvent(new CustomEvent('buffering'));
+      this._drainRestartSeek();
+      return;
+    }
+    try {
+      this._avplay.play();
+      this.state = PlayerState.PLAY;
+      this._pausedAtMs = 0;
+      this._pausedMediaTimeMs = 0;
     } catch (e) { console.warn('[AVPlay] play:', e && e.message); }
   }
 
   pause() {
     if (!this._avplay) return;
-    try { this._avplay.pause(); this.state = PlayerState.PAUSE; }
+    try {
+      const pausedMediaTimeMs = this.getRenderedMediaTimeMillis();
+      this._avplay.pause();
+      this.state = PlayerState.PAUSE;
+      this._pausedAtMs = Date.now();
+      this._pausedMediaTimeMs = pausedMediaTimeMs;
+      this._lastRenderedMediaTimeMs = pausedMediaTimeMs;
+    }
     catch (e) { console.warn('[AVPlay] pause:', e && e.message); }
   }
 
@@ -611,6 +648,8 @@ export class AVPlayPlayer extends EventTarget {
     this._streamOffsetMs = 0;
     this._lastRenderedMediaTimeMs = 0;
     this._buffering = false;
+    this._pausedAtMs = 0;
+    this._pausedMediaTimeMs = 0;
     this._fallbackRestart = null;
     if (!preserveRestartSeek) {
       this._restartSeekGeneration = (this._restartSeekGeneration || 0) + 1;

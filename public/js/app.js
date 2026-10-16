@@ -4,7 +4,7 @@
  * Wires up the UI, session management, and PWA functionality.
  */
 
-import { SessionManager } from './session/session-manager.js?v=tizen-transport-defaults';
+import { SessionManager } from './session/session-manager.js?v=tizen-pause-resume-restart';
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js?v=tizen-collapsed-settings-nav';
 import { runCodecProbe } from './media/codec-probe.js';
