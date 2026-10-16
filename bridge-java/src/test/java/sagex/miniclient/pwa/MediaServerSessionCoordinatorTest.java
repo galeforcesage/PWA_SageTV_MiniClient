@@ -66,6 +66,18 @@ class MediaServerSessionCoordinatorTest {
     }
 
     @Test
+    void burstGoodputRejectsPacedBlockedAndRingConstrainedSamples() {
+        assertEquals(0, MediaServerSessionCoordinator.burstGoodputKbps(
+            1_000_000, 5_000, 0, 0, 5_000, 0, 0, 1, false, false, false));
+        assertEquals(0, MediaServerSessionCoordinator.burstGoodputKbps(
+            1_000_000, 5_000, 3_000, 3_000, 5_000, 0, 0, 1, false, false, false));
+        assertEquals(0, MediaServerSessionCoordinator.burstGoodputKbps(
+            1_000_000, 5_000, 500, 100, 5_000, 900, 1_000, 1, false, true, false));
+        assertEquals(16_000, MediaServerSessionCoordinator.burstGoodputKbps(
+            1_000_000, 5_000, 500, 100, 5_000, 100, 1_000, 1, false, false, false));
+    }
+
+    @Test
     void concurrentStartupProbesShareOneProducerAndKeepIndependentCursors() throws Exception {
         FakeMediaServer mediaServer = fakeServer(16_384);
         MediaServerSessionCoordinator coordinator = coordinator(mediaServer, "session-probes", 0, settings());
@@ -145,6 +157,88 @@ class MediaServerSessionCoordinatorTest {
             Thread.sleep(100);
             assertThrows(IOException.class, () -> stale.next(64));
         }
+    }
+
+    @Test
+    void staleConsumerIsEvictedBeforeReplayRingFills() throws Exception {
+        FakeMediaServer mediaServer = fakeServer(4_096);
+        mediaServer.growing = true;
+        MediaServerSessionCoordinator coordinator = coordinator(
+            mediaServer, "session-proactive-eviction", 0,
+            settings(8_192, 500, 30, 64, 40), false);
+        coordinator.start();
+        coordinator.awaitReady();
+
+        try (MediaServerSessionCoordinator.Consumer stale = coordinator.attach()) {
+            byte[] pending = stale.next(64);
+            Thread.sleep(100);
+            assertThrows(IOException.class, () -> stale.commit(pending.length, 100));
+        }
+    }
+
+    @Test
+    void clientPacedDeliveryDoesNotSendBandwidthAdjustment() throws Exception {
+        FakeMediaServer mediaServer = fakeServer(4_096);
+        mediaServer.growing = true;
+        MediaServerSessionCoordinator coordinator = coordinator(
+            mediaServer, "session-paced", 0,
+            settings(8_192, 500, 500, 256, 40), true);
+        coordinator.start();
+        coordinator.awaitReady();
+
+        try (MediaServerSessionCoordinator.Consumer consumer = coordinator.attach()) {
+            for (int i = 0; i < 12; i++) {
+                byte[] bytes = consumer.next(256);
+                consumer.commit(bytes.length, 0);
+                Thread.sleep(8);
+            }
+            Thread.sleep(80);
+        }
+
+        assertEquals(0, mediaServer.adjustments.get());
+    }
+
+    @Test
+    void ringConstrainedDeliveryDoesNotSendBandwidthAdjustment() throws Exception {
+        FakeMediaServer mediaServer = fakeServer(4_096);
+        mediaServer.growing = true;
+        MediaServerSessionCoordinator coordinator = coordinator(
+            mediaServer, "session-ring-constrained", 0,
+            settings(256, 500, 500, 64, 40), true);
+        coordinator.start();
+        coordinator.awaitReady();
+
+        try (MediaServerSessionCoordinator.Consumer consumer = coordinator.attach()) {
+            for (int i = 0; i < 16; i++) {
+                byte[] bytes = consumer.next(64);
+                consumer.commit(bytes.length, 1);
+                Thread.sleep(4);
+            }
+            Thread.sleep(80);
+        }
+
+        assertEquals(0, mediaServer.adjustments.get());
+    }
+
+    @Test
+    void burstSocketGoodputCanSendBandwidthAdjustment() throws Exception {
+        FakeMediaServer mediaServer = fakeServer(4_096);
+        mediaServer.growing = true;
+        MediaServerSessionCoordinator coordinator = coordinator(
+            mediaServer, "session-burst", 0,
+            settings(8_192, 500, 500, 256, 80), true);
+        coordinator.start();
+        coordinator.awaitReady();
+
+        try (MediaServerSessionCoordinator.Consumer consumer = coordinator.attach()) {
+            for (int i = 0; i < 12; i++) {
+                byte[] bytes = consumer.next(256);
+                consumer.commit(bytes.length, 1);
+            }
+            await(() -> mediaServer.adjustments.get() > 0, 1_000);
+        }
+
+        assertTrue(mediaServer.lastAdjustmentKbps > 0);
     }
 
     @Test
@@ -332,11 +426,26 @@ class MediaServerSessionCoordinatorTest {
                                                       String sessionId, long seekMs,
                                                       MediaServerSessionCoordinator.Settings settings,
                                                       Runnable onTermination) {
+        return coordinator(mediaServer, sessionId, seekMs, settings, false, onTermination);
+    }
+
+    private MediaServerSessionCoordinator coordinator(FakeMediaServer mediaServer,
+                                                      String sessionId, long seekMs,
+                                                      MediaServerSessionCoordinator.Settings settings,
+                                                      boolean adaptive) {
+        return coordinator(mediaServer, sessionId, seekMs, settings, adaptive, () -> {});
+    }
+
+    private MediaServerSessionCoordinator coordinator(FakeMediaServer mediaServer,
+                                                      String sessionId, long seekMs,
+                                                      MediaServerSessionCoordinator.Settings settings,
+                                                      boolean adaptive,
+                                                      Runnable onTermination) {
         String setup = "XCODE_SETUP browserhd" + (seekMs > 0 ? ";ss=" + seekMs : "");
         MediaServerSessionCoordinator.SessionKey key =
             new MediaServerSessionCoordinator.SessionKey(
                 sessionId, "/media/test.mpg", "xcode:browserhd", setup,
-                seekMs, null, null, "127.0.0.1", false);
+                seekMs, null, null, "127.0.0.1", adaptive);
         return new MediaServerSessionCoordinator(
             "127.0.0.1", mediaServer.port(), key, settings, onTermination);
     }
@@ -347,8 +456,13 @@ class MediaServerSessionCoordinatorTest {
 
     private static MediaServerSessionCoordinator.Settings settings(
         long ringBytes, long graceMs, long staleMs, int chunkBytes) {
+        return settings(ringBytes, graceMs, staleMs, chunkBytes, 10_000);
+    }
+
+    private static MediaServerSessionCoordinator.Settings settings(
+        long ringBytes, long graceMs, long staleMs, int chunkBytes, long adjustIntervalMs) {
         return new MediaServerSessionCoordinator.Settings(
-            ringBytes, graceMs, staleMs, 2_000, 2, 10_000, 1_000, 30, chunkBytes);
+            ringBytes, graceMs, staleMs, 2_000, 2, adjustIntervalMs, 1_000, 30, chunkBytes);
     }
 
     private static byte[] readAll(InputStream input) throws IOException {
@@ -408,9 +522,11 @@ class MediaServerSessionCoordinatorTest {
         final AtomicInteger xcodeSetups = new AtomicInteger();
         final AtomicInteger opens = new AtomicInteger();
         final AtomicInteger closes = new AtomicInteger();
+        final AtomicInteger adjustments = new AtomicInteger();
         final List<String> commands = Collections.synchronizedList(new ArrayList<>());
         volatile long failReadAt = -1;
         volatile boolean growing;
+        volatile long lastAdjustmentKbps;
 
         private final ServerSocket serverSocket;
         private final AtomicBoolean running = new AtomicBoolean(true);
@@ -482,6 +598,8 @@ class MediaServerSessionCoordinatorTest {
                         output.write(data, offset, length);
                         output.flush();
                     } else if (command.startsWith("XCODE_ADJUST ")) {
+                        adjustments.incrementAndGet();
+                        lastAdjustmentKbps = Long.parseLong(command.substring("XCODE_ADJUST ".length()));
                         line(output, "28000");
                     } else if ("CLOSE".equals(command)) {
                         closes.incrementAndGet();

@@ -565,15 +565,19 @@ public class MediaServerProxyServlet extends HttpServlet {
             if (now - lastReportAt >= XCODE_ADJUST_INTERVAL_MS) {
                 long elapsedMs = now - lastReportAt;
                 long deliveredBytes = offset - lastReportBytes;
-                long measuredKbps = Math.round((deliveredBytes * 8.0) / elapsedMs);
-                log.debug("[MsProxy] GOODPUT: {} kbps, {} bytes, gap={}",
-                    measuredKbps, offset, avail - offset);
+                long deliveryKbps = Math.round((deliveredBytes * 8.0) / elapsedMs);
+                long measuredKbps = MediaServerSessionCoordinator.burstGoodputKbps(
+                    deliveredBytes, elapsedMs, intervalWriteMs, intervalMaxWriteMs,
+                    XCODE_ADJUST_INTERVAL_MS, 0, 0, 1, false, false, false);
+                log.debug("[MsProxy] DELIVERY: {} kbps, adjust={} kbps, {} bytes, gap={}",
+                    deliveryKbps, measuredKbps, offset, avail - offset);
                 if (liveXcode) {
                     log.info("[MsProxy] STREAM_PROGRESS session={} deliveredBytes={} frontierBytes={} "
-                            + "queuedBytes={} intervalBytes={} intervalMs={} goodputKbps={} "
+                            + "queuedBytes={} intervalBytes={} intervalMs={} deliveryKbps={} "
+                            + "adjustKbps={} "
                             + "writeBlockedMs={} maxWriteMs={} reads={} sizeQueries={} elapsedMs={}",
                         sessionId, offset, avail, avail - offset, deliveredBytes, elapsedMs,
-                        measuredKbps, intervalWriteMs, intervalMaxWriteMs, readCount,
+                        deliveryKbps, measuredKbps, intervalWriteMs, intervalMaxWriteMs, readCount,
                         sizeQueryCount, now - streamStart);
                 }
 

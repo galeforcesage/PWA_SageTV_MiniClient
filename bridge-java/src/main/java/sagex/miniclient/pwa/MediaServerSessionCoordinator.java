@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 final class MediaServerSessionCoordinator {
     private static final Logger log = LoggerFactory.getLogger(MediaServerSessionCoordinator.class);
+    private static final long MIN_GOODPUT_WRITE_MS = 10L;
 
     static final class Settings {
         final long ringCapacityBytes;
@@ -184,6 +185,9 @@ final class MediaServerSessionCoordinator {
     private long zeroConsumerSince;
     private long intervalWriteMs;
     private long intervalMaxWriteMs;
+    private long intervalDeliveredBytes;
+    private boolean intervalRingConstrained;
+    private boolean intervalConsumerEvicted;
     private long readCount;
     private long sizeQueryCount;
 
@@ -274,6 +278,7 @@ final class MediaServerSessionCoordinator {
             consumer.pendingLength = 0;
             consumer.lastProgressAt = System.currentTimeMillis();
             deliveredWatermark = Math.max(deliveredWatermark, consumer.cursor);
+            intervalDeliveredBytes += length;
             intervalWriteMs += Math.max(0, writeMs);
             intervalMaxWriteMs = Math.max(intervalMaxWriteMs, Math.max(0, writeMs));
             evictConsumedLocked();
@@ -370,6 +375,7 @@ final class MediaServerSessionCoordinator {
 
         while (true) {
             synchronized (lock) {
+                evictStaleConsumersLocked();
                 if (shouldEndForNoConsumersLocked()) return;
             }
 
@@ -410,26 +416,44 @@ final class MediaServerSessionCoordinator {
                 long watermark;
                 long writeMs;
                 long maxWriteMs;
+                long committedBytes;
                 int consumerCount;
                 long ringSize;
+                boolean pendingWrite;
+                boolean ringConstrained;
+                boolean consumerEvicted;
                 synchronized (lock) {
+                    evictStaleConsumersLocked();
                     watermark = deliveredWatermark;
                     writeMs = intervalWriteMs;
                     maxWriteMs = intervalMaxWriteMs;
+                    committedBytes = intervalDeliveredBytes;
+                    pendingWrite = hasPendingWriteLocked();
+                    ringConstrained = intervalRingConstrained;
+                    consumerEvicted = intervalConsumerEvicted;
                     intervalWriteMs = 0;
                     intervalMaxWriteMs = 0;
+                    intervalDeliveredBytes = 0;
+                    intervalRingConstrained = false;
+                    intervalConsumerEvicted = false;
                     consumerCount = consumers.size();
                     ringSize = ringBytes;
                 }
                 long elapsedMs = now - lastReportAt;
                 long deliveredBytes = watermark - lastReportWatermark;
-                long measuredKbps = elapsedMs > 0
+                long deliveryKbps = elapsedMs > 0
                     ? Math.round((deliveredBytes * 8.0) / elapsedMs) : 0;
+                long measuredKbps = burstGoodputKbps(
+                    committedBytes, elapsedMs, writeMs, maxWriteMs, settings.staleConsumerMs,
+                    ringSize, settings.ringCapacityBytes, consumerCount, pendingWrite,
+                    ringConstrained, consumerEvicted);
                 log.info("[MsProxy] STREAM_PROGRESS session={} deliveredBytes={} producerBytes={} "
-                        + "ringBytes={} intervalBytes={} intervalMs={} goodputKbps={} writeBlockedMs={} "
-                        + "maxWriteMs={} reads={} sizeQueries={} consumers={} elapsedMs={}",
+                        + "ringBytes={} intervalBytes={} intervalMs={} deliveryKbps={} adjustKbps={} "
+                        + "writeBlockedMs={} maxWriteMs={} ringConstrained={} consumerEvicted={} "
+                        + "pendingWrite={} reads={} sizeQueries={} consumers={} elapsedMs={}",
                     key.sessionId, watermark, producerOffset, ringSize, deliveredBytes, elapsedMs,
-                    measuredKbps, writeMs, maxWriteMs, readCount, sizeQueryCount, consumerCount,
+                    deliveryKbps, measuredKbps, writeMs, maxWriteMs, ringConstrained,
+                    consumerEvicted, pendingWrite, readCount, sizeQueryCount, consumerCount,
                     now - streamStart);
 
                 if (adjustEnabled && measuredKbps > 0) {
@@ -458,6 +482,7 @@ final class MediaServerSessionCoordinator {
     private void append(byte[] bytes) throws IOException {
         synchronized (lock) {
             while (ringBytes + bytes.length > settings.ringCapacityBytes) {
+                intervalRingConstrained = true;
                 evictConsumedLocked();
                 if (ringBytes + bytes.length <= settings.ringCapacityBytes) break;
                 if (evictStaleConsumersLocked()) continue;
@@ -486,10 +511,12 @@ final class MediaServerSessionCoordinator {
         long now = System.currentTimeMillis();
         boolean evicted = false;
         for (Consumer consumer : new ArrayList<>(consumers)) {
+            if (consumer.cursor >= producerOffset) continue;
             if (now - consumer.lastProgressAt < settings.staleConsumerMs) continue;
             consumer.detachedError = new IOException("Consumer evicted after falling behind replay window");
             consumers.remove(consumer);
             evicted = true;
+            intervalConsumerEvicted = true;
             log.warn("[MsProxy] evicted stale consumer session={} cursor={} producer={}",
                 key.sessionId, consumer.cursor, producerOffset);
         }
@@ -499,6 +526,26 @@ final class MediaServerSessionCoordinator {
             lock.notifyAll();
         }
         return evicted;
+    }
+
+    private boolean hasPendingWriteLocked() {
+        for (Consumer consumer : consumers) {
+            if (consumer.pendingOffset >= 0) return true;
+        }
+        return false;
+    }
+
+    static long burstGoodputKbps(long deliveredBytes, long elapsedMs, long writeMs,
+                                 long maxWriteMs, long stallThresholdMs, long ringSize,
+                                 long ringCapacityBytes, int consumerCount,
+                                 boolean pendingWrite, boolean ringConstrained,
+                                 boolean consumerEvicted) {
+        if (deliveredBytes <= 0 || elapsedMs <= 0 || writeMs < MIN_GOODPUT_WRITE_MS) return 0;
+        if (consumerCount != 1 || pendingWrite || ringConstrained || consumerEvicted) return 0;
+        if (ringCapacityBytes > 0 && ringSize * 4L >= ringCapacityBytes * 3L) return 0;
+        if (writeMs * 2L >= elapsedMs) return 0;
+        if (maxWriteMs * 2L >= stallThresholdMs) return 0;
+        return Math.round((deliveredBytes * 8.0) / writeMs);
     }
 
     private boolean shouldEndForNoConsumersLocked() {
