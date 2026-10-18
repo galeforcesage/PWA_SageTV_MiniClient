@@ -35,6 +35,7 @@ const STATIC_ASSETS = [
   '/js/session/session-manager.js',
   '/js/session/download-manager.js',
   '/js/settings/settings-manager.js',
+  '/js/pwa/install-detection.js',
   '/js/audio-processing/models.js',
   '/js/audio-processing/presets.js',
   '/js/audio-processing/settings-store.js',
