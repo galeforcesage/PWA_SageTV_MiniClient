@@ -6,8 +6,26 @@ Thumbs.db
 bridge-java/build/
 bridge-java/.gradle/
 bridge-java/.tmpjar/
-Sage.properties.remote
+Sage.properties*
 .aider*
+
+# TLS/private certificate and keystore artifacts.
+*.p12
+*.pfx
+*.pem
+*.key
+*.crt
+*.cer
+*.jks
+*.keystore
+
+# Browser/network captures, JVM crash dumps, and Sage rolling logs.
+*.har
+*.pcap
+*.pcapng
+hs_err_pid*.log
+*.hprof
+sagetv_*.txt
 
 # Tizen wgt packaging outputs — produced by `tizen package`, not source.
 deploy/tizen/.manifest.tmp
