@@ -12,7 +12,6 @@ import {
   hasInstalledRelatedWebApp,
   supportsManualInstallInstructions,
 } from './pwa/install-detection.js?v=install-banner-conditions';
-import { canOfferAppWindow, openAppWindow } from './pwa/app-window.js?v=browser-app-window';
 import { SettingsStore } from './audio-processing/settings-store.js';
 import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
 import { EqualizerPanel } from './audio-processing/equalizer-panel.js';
@@ -706,18 +705,6 @@ function scheduleResumeCheck() {
 // ── Event Handlers ───────────────────────────────────────
 
 function setupEventHandlers() {
-  const appWindowButton = document.getElementById('btn-app-window');
-  if (appWindowButton && canOfferAppWindow(window)) {
-    appWindowButton.hidden = false;
-    appWindowButton.addEventListener('click', () => {
-      connectError.hidden = true;
-      if (openAppWindow(window)) return;
-      connectError.textContent =
-        'The browser blocked the app window. Allow popups for this site and try again.';
-      connectError.hidden = false;
-    });
-  }
-
   // Add Server button
   document.getElementById('btn-add-server').addEventListener('click', () => {
     _editingServer = null;
