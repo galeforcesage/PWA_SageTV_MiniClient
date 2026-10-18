@@ -6,7 +6,7 @@
  * network-first for API/WebSocket connections.
  */
 
-const CACHE_NAME = 'sagetv-miniclient-tizen-media-context-owner';
+const CACHE_NAME = 'sagetv-miniclient-installed-related-app';
 
 // During development, use network-first strategy
 const DEV_MODE = true;
