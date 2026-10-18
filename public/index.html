@@ -15,7 +15,7 @@
 </head>
 <body>
   <!-- Connection Screen (Server Selection) -->
-  <div id="connect-screen" class="screen active" data-spatnav-start="#server-grid .server-card, #btn-add-server, #btn-discover">
+  <div id="connect-screen" class="screen active" data-spatnav-start="#server-grid .server-card, #btn-add-server, #btn-discover, #btn-app-window">
     <!-- Left sidebar -->
     <div class="server-sidebar">
       <h2 class="sidebar-heading">Servers</h2>
@@ -37,6 +37,7 @@
         <button id="btn-settings" class="action-btn">Settings</button>
         <button id="btn-add-server" class="action-btn">Add Server</button>
         <button id="btn-discover" class="action-btn">Find on LAN</button>
+        <button id="btn-app-window" class="action-btn" hidden>Open App Window</button>
       </div>
 
       <!-- Status / error messages -->
@@ -662,7 +663,7 @@
     </div>
   </div>
 
-    <script type="module" src="js/app.js?v=install-banner-conditions"></script>
+    <script type="module" src="js/app.js?v=browser-app-window"></script>
 
 </body>
 </html>
