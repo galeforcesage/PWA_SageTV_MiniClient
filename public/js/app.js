@@ -8,7 +8,10 @@ import { SessionManager } from './session/session-manager.js?v=tizen-media-conte
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js?v=tizen-collapsed-settings-nav';
 import { runCodecProbe } from './media/codec-probe.js';
-import { hasInstalledRelatedWebApp } from './pwa/install-detection.js?v=installed-related-app';
+import {
+  hasInstalledRelatedWebApp,
+  waitsForNativeInstallPrompt,
+} from './pwa/install-detection.js?v=native-install-eligibility';
 import { SettingsStore } from './audio-processing/settings-store.js';
 import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
 import { EqualizerPanel } from './audio-processing/equalizer-panel.js';
@@ -1917,9 +1920,15 @@ async function checkInstallPrompt() {
 
   if (_deferredInstallPrompt) {
     showNativeInstall();
-  } else {
-    showBrowserInstructions();
+    return;
   }
+
+  // Chromium owns install eligibility. If the PWA is already installed (or the
+  // page is otherwise ineligible), beforeinstallprompt does not fire, so do not
+  // replace that reliable signal with a misleading manual-install banner.
+  if (waitsForNativeInstallPrompt(navigator.userAgent)) return;
+
+  showBrowserInstructions();
 }
 
 // ── Utility ──────────────────────────────────────────────
