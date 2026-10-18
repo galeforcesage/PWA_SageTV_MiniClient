@@ -6,6 +6,11 @@ export async function hasInstalledRelatedWebApp(navigatorObject) {
     applications.some((application) => application?.platform === 'webapp');
 }
 
-export function waitsForNativeInstallPrompt(userAgent) {
-  return /(?:Chrome|Edg)\//.test(userAgent || '');
+export function supportsManualInstallInstructions(navigatorObject) {
+  const userAgent = navigatorObject?.userAgent || '';
+  const isIPad = /iPad/.test(userAgent) ||
+    (navigatorObject?.platform === 'MacIntel' && navigatorObject?.maxTouchPoints > 1);
+  const isIOS = /iPhone/.test(userAgent) || isIPad;
+  const isSafari = /Safari/.test(userAgent) && !/(?:CriOS|FxiOS|EdgiOS)/.test(userAgent);
+  return isIOS && isSafari;
 }

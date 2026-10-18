@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   hasInstalledRelatedWebApp,
-  waitsForNativeInstallPrompt,
+  supportsManualInstallInstructions,
 } from './install-detection.js';
 
 test('returns false when installed-related-app detection is unavailable', async () => {
@@ -42,20 +42,33 @@ test('propagates detection failures so the caller can preserve fallback behavior
   );
 });
 
-test('Chromium browsers wait for native install eligibility', () => {
-  assert.equal(waitsForNativeInstallPrompt(
-    'Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36',
-  ), true);
-  assert.equal(waitsForNativeInstallPrompt(
-    'Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0',
-  ), true);
+test('iOS Safari supports manual install instructions', () => {
+  assert.equal(supportsManualInstallInstructions({
+    userAgent: 'Mozilla/5.0 (iPhone) Version/18.0 Mobile/15E148 Safari/604.1',
+    platform: 'iPhone',
+    maxTouchPoints: 5,
+  }), true);
+  assert.equal(supportsManualInstallInstructions({
+    userAgent: 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15',
+    platform: 'MacIntel',
+    maxTouchPoints: 5,
+  }), true);
 });
 
-test('Safari and Firefox retain manual install instructions', () => {
-  assert.equal(waitsForNativeInstallPrompt(
-    'Mozilla/5.0 Version/18.0 Safari/605.1.15',
-  ), false);
-  assert.equal(waitsForNativeInstallPrompt(
-    'Mozilla/5.0 Firefox/143.0',
-  ), false);
+test('desktop and unsupported browsers do not get manual install instructions', () => {
+  assert.equal(supportsManualInstallInstructions({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0',
+    platform: 'Win32',
+    maxTouchPoints: 0,
+  }), false);
+  assert.equal(supportsManualInstallInstructions({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0) Firefox/143.0',
+    platform: 'Win32',
+    maxTouchPoints: 0,
+  }), false);
+  assert.equal(supportsManualInstallInstructions({
+    userAgent: 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15',
+    platform: 'MacIntel',
+    maxTouchPoints: 0,
+  }), false);
 });
