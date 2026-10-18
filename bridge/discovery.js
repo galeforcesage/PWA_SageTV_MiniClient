@@ -36,7 +36,7 @@ const PROBE_MICRO = 99;
  * interface. Windows in particular tends to drop replies to
  * `255.255.255.255` when the host has multiple NICs because it picks a
  * single (often wrong) interface; sending to each subnet's local broadcast
- * (e.g. 192.168.0.255) works reliably.
+ * (e.g. 192.0.2.255) works reliably.
  */
 function _localBroadcastAddrs() {
   const out = new Set();
