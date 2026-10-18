@@ -5,3 +5,7 @@ export async function hasInstalledRelatedWebApp(navigatorObject) {
   return Array.isArray(applications) &&
     applications.some((application) => application?.platform === 'webapp');
 }
+
+export function waitsForNativeInstallPrompt(userAgent) {
+  return /(?:Chrome|Edg)\//.test(userAgent || '');
+}
