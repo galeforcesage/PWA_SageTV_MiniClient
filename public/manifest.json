@@ -2,7 +2,9 @@
   "name": "SageTV PWA-MiniClient",
   "short_name": "SageTV",
   "description": "SageTV MiniClient for the web - control your SageTV server from any browser",
+  "id": "/",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "landscape",
   "background_color": "#111111",
@@ -22,6 +24,13 @@
     }
   ],
   "categories": ["entertainment", "utilities"],
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "/manifest.json",
+      "id": "/"
+    }
+  ],
   "lang": "en",
   "dir": "ltr"
 }

@@ -8,6 +8,7 @@ import { SessionManager } from './session/session-manager.js?v=tizen-media-conte
 import { SageCommand } from './protocol/constants.js';
 import { SpatialNavigation } from './input/spatial-nav.js?v=tizen-collapsed-settings-nav';
 import { runCodecProbe } from './media/codec-probe.js';
+import { hasInstalledRelatedWebApp } from './pwa/install-detection.js?v=installed-related-app';
 import { SettingsStore } from './audio-processing/settings-store.js';
 import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
 import { EqualizerPanel } from './audio-processing/equalizer-panel.js';
@@ -1824,7 +1825,7 @@ function initNavDrawer() {
 
 let _deferredInstallPrompt = null;
 
-function checkInstallPrompt() {
+async function checkInstallPrompt() {
   const isInstalled = window.matchMedia('(display-mode: standalone)').matches ||
                       window.navigator.standalone === true;
 
@@ -1837,60 +1838,88 @@ function checkInstallPrompt() {
   const banner = document.getElementById('install-banner');
   const installBtn = document.getElementById('btn-install');
   const installText = document.getElementById('install-text');
+  let detectionComplete = false;
+  let suppressInstallBanner = false;
 
   document.getElementById('btn-dismiss-install').addEventListener('click', () => {
     banner.hidden = true;
     session.settings.set('install_prompted', 'true');
   });
 
-  // Detect browser type for appropriate instructions
-  const isIPad = /iPad/.test(navigator.userAgent) ||
-                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
-  const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
-  const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
-  const isEdge = /Edg/.test(navigator.userAgent);
-  const isFirefox = /Firefox/.test(navigator.userAgent);
+  const showBrowserInstructions = () => {
+    const isIPad = /iPad/.test(navigator.userAgent) ||
+                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
+    const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+    const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
+    const isEdge = /Edg/.test(navigator.userAgent);
+    const isFirefox = /Firefox/.test(navigator.userAgent);
 
-  // Show banner immediately for all browsers
-  if (isIOS && isSafari) {
-    installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
-  } else if (isChrome) {
-    installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV PWA-MiniClient</strong> (requires HTTPS)';
-  } else if (isEdge) {
-    installText.innerHTML = 'Install as app: <strong>⋯ Menu</strong> → <strong>Apps</strong> → <strong>Install this site as an app</strong>';
-  } else if (isFirefox) {
-    installText.innerHTML = 'Add to Home Screen from your browser menu for app-like experience';
-  } else {
-    installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> — use your browser menu to install as an app';
-  }
-  banner.hidden = false;
+    if (isIOS && isSafari) {
+      installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
+    } else if (isChrome) {
+      installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV PWA-MiniClient</strong> (requires HTTPS)';
+    } else if (isEdge) {
+      installText.innerHTML = 'Install as app: <strong>⋯ Menu</strong> → <strong>Apps</strong> → <strong>Install this site as an app</strong>';
+    } else if (isFirefox) {
+      installText.innerHTML = 'Add to Home Screen from your browser menu for app-like experience';
+    } else {
+      installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> — use your browser menu to install as an app';
+    }
+    banner.hidden = false;
+  };
+
+  const showNativeInstall = () => {
+    installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> can be installed as an app';
+    installBtn.hidden = false;
+    banner.hidden = false;
+  };
 
   // Chrome/Edge/Samsung: beforeinstallprompt fires when eligible (HTTPS only)
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     _deferredInstallPrompt = e;
     console.log('[App] Native install prompt available');
-    installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> can be installed as an app';
-    installBtn.hidden = false;
-
-    installBtn.addEventListener('click', async () => {
-      if (!_deferredInstallPrompt) return;
-      _deferredInstallPrompt.prompt();
-      const result = await _deferredInstallPrompt.userChoice;
-      console.log('[App] Install result:', result.outcome);
-      _deferredInstallPrompt = null;
-      banner.hidden = true;
-      session.settings.set('install_prompted', 'true');
-    }, { once: true });
+    if (detectionComplete && !suppressInstallBanner) showNativeInstall();
   });
+
+  installBtn.addEventListener('click', async () => {
+    if (!_deferredInstallPrompt) return;
+    _deferredInstallPrompt.prompt();
+    const result = await _deferredInstallPrompt.userChoice;
+    console.log('[App] Install result:', result.outcome);
+    _deferredInstallPrompt = null;
+    banner.hidden = true;
+    session.settings.set('install_prompted', 'true');
+  }, { once: true });
 
   // Auto-hide if user installs via browser UI
   window.addEventListener('appinstalled', () => {
     console.log('[App] App installed');
+    suppressInstallBanner = true;
     banner.hidden = true;
     session.settings.set('install_prompted', 'true');
   });
+
+  try {
+    suppressInstallBanner =
+      suppressInstallBanner || await hasInstalledRelatedWebApp(navigator);
+  } catch (error) {
+    console.warn('[App] Could not check installed related apps:', error);
+  }
+
+  detectionComplete = true;
+  if (suppressInstallBanner) {
+    banner.hidden = true;
+    console.log('[App] Install banner suppressed because the related PWA is installed');
+    return;
+  }
+
+  if (_deferredInstallPrompt) {
+    showNativeInstall();
+  } else {
+    showBrowserInstructions();
+  }
 }
 
 // ── Utility ──────────────────────────────────────────────
