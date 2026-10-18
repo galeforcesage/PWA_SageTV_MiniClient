@@ -10,8 +10,8 @@ import { SpatialNavigation } from './input/spatial-nav.js?v=tizen-collapsed-sett
 import { runCodecProbe } from './media/codec-probe.js';
 import {
   hasInstalledRelatedWebApp,
-  waitsForNativeInstallPrompt,
-} from './pwa/install-detection.js?v=native-install-eligibility';
+  supportsManualInstallInstructions,
+} from './pwa/install-detection.js?v=install-banner-conditions';
 import { SettingsStore } from './audio-processing/settings-store.js';
 import { WebAudioEngine } from './audio-processing/web-audio-engine.js';
 import { EqualizerPanel } from './audio-processing/equalizer-panel.js';
@@ -1850,25 +1850,8 @@ async function checkInstallPrompt() {
   });
 
   const showBrowserInstructions = () => {
-    const isIPad = /iPad/.test(navigator.userAgent) ||
-                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    const isIOS = /iPhone/.test(navigator.userAgent) || isIPad;
-    const isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
-    const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
-    const isEdge = /Edg/.test(navigator.userAgent);
-    const isFirefox = /Firefox/.test(navigator.userAgent);
-
-    if (isIOS && isSafari) {
-      installText.innerHTML = 'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
-    } else if (isChrome) {
-      installText.innerHTML = 'Install as app: <strong>⋮ Menu</strong> → <strong>Install SageTV PWA-MiniClient</strong> (requires HTTPS)';
-    } else if (isEdge) {
-      installText.innerHTML = 'Install as app: <strong>⋯ Menu</strong> → <strong>Apps</strong> → <strong>Install this site as an app</strong>';
-    } else if (isFirefox) {
-      installText.innerHTML = 'Add to Home Screen from your browser menu for app-like experience';
-    } else {
-      installText.innerHTML = '<strong>SageTV PWA-MiniClient</strong> — use your browser menu to install as an app';
-    }
+    installText.innerHTML =
+      'Install this app: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>';
     banner.hidden = false;
   };
 
@@ -1923,12 +1906,7 @@ async function checkInstallPrompt() {
     return;
   }
 
-  // Chromium owns install eligibility. If the PWA is already installed (or the
-  // page is otherwise ineligible), beforeinstallprompt does not fire, so do not
-  // replace that reliable signal with a misleading manual-install banner.
-  if (waitsForNativeInstallPrompt(navigator.userAgent)) return;
-
-  showBrowserInstructions();
+  if (supportsManualInstallInstructions(navigator)) showBrowserInstructions();
 }
 
 // ── Utility ──────────────────────────────────────────────
