@@ -383,6 +383,7 @@ test('full recording duration wins when AVPlay returns zero after seek reopen', 
 test('msproxy URL and player state share one session id', async () => {
   const player = Object.create(AVPlayPlayer.prototype);
   player._bridgeBase = 'http://bridge';
+  player._restartSeekGeneration = 0;
 
   let loadArgs;
   player.load = (...received) => {
@@ -390,7 +391,7 @@ test('msproxy URL and player state share one session id', async () => {
     return Promise.resolve();
   };
 
-  await player.loadMsProxy('/recording.mpg', 'xcode:browserhd', 'server', 12.5);
+  await player._openMsProxy('/recording.mpg', 'xcode:browserhd', 'server', 12.5);
 
   const url = loadArgs[3];
   const fallbackUrl = loadArgs[8];
@@ -401,6 +402,46 @@ test('msproxy URL and player state share one session id', async () => {
   assert.match(url, /seek=12\.5/);
   assert.match(url, /bw=50000/);
   assert.equal(options.offsetMs, 12_500);
+});
+
+test('initial xcode resume seek is folded into the first msproxy open', async () => {
+  const player = Object.create(AVPlayPlayer.prototype);
+  player._avplay = {};
+  player._restartSeekGeneration = 0;
+  player._initialLoadTimer = null;
+  player._pendingInitialLoad = null;
+  player._positionMs = 0;
+  player._lastRenderedMediaTimeMs = 0;
+  player._buffering = false;
+
+  const opens = [];
+  player._openMsProxy = (...args) => {
+    opens.push(args);
+    return Promise.resolve(true);
+  };
+
+  await player.loadMsProxy(
+    '/recording.mpg',
+    'xcode:audioonly:enhance;tier=2160p',
+    'server',
+    0
+  );
+  assert.equal(opens.length, 0);
+
+  player.seek(105_240);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(opens, [[
+    '/recording.mpg',
+    'xcode:audioonly:enhance;tier=2160p',
+    'server',
+    105.24,
+    null,
+  ]]);
+  assert.equal(player._positionMs, 105_240);
+  assert.equal(player._lastRenderedMediaTimeMs, 105_240);
+  assert.equal(player._pendingInitialLoad, null);
+  assert.equal(player._initialLoadTimer, null);
 });
 
 test('Tizen direct msproxy playback does not send a transcode bandwidth seed', async () => {

@@ -38,6 +38,7 @@ import { PlayerState } from '../protocol/constants.js';
 const PREPARE_WATCHDOG_MS = 25000;
 const PLAYBACK_DIAGNOSTIC_INTERVAL_MS = 5000;
 const RESUME_RESTART_AFTER_PAUSE_MS = 5000;
+const INITIAL_SEEK_GRACE_MS = 250;
 
 export class AVPlayPlayer extends EventTarget {
   /**
@@ -90,6 +91,8 @@ export class AVPlayPlayer extends EventTarget {
     this._restartSeekDestRect = null;
     this._pausedAtMs = 0;
     this._pausedMediaTimeMs = 0;
+    this._initialLoadTimer = null;
+    this._pendingInitialLoad = null;
 
     // Server UI coordinate space (advertised UI resolution). setVideoRectangles
     // rects are in this space; we scale to physical display pixels for AVPlay.
@@ -419,6 +422,34 @@ export class AVPlayPlayer extends EventTarget {
   async loadMsProxy(absPath, mode, hostname, seekSec = 0, playbackOptions = null) {
     const restartGeneration = Number(playbackOptions?.restartGeneration) || 0;
     if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
+    if (!restartGeneration && seekSec === 0 && mode?.startsWith('xcode:')) {
+      this._cancelPendingInitialLoad();
+      this._pendingInitialLoad = { absPath, mode, hostname, playbackOptions };
+      this._initialLoadTimer = setTimeout(() => {
+        const pending = this._pendingInitialLoad;
+        this._initialLoadTimer = null;
+        this._pendingInitialLoad = null;
+        if (!pending) return;
+        console.log(`[AVPlay] no initial seek within ${INITIAL_SEEK_GRACE_MS}ms — opening msproxy at 0`);
+        this._openMsProxy(
+          pending.absPath,
+          pending.mode,
+          pending.hostname,
+          0,
+          pending.playbackOptions
+        ).catch((e) => this._emitPlaybackFailure('AVPLAY_INITIAL_OPEN_ERROR', {
+          mode: 'avplay',
+          message: e && e.message,
+        }));
+      }, INITIAL_SEEK_GRACE_MS);
+      return true;
+    }
+    return this._openMsProxy(absPath, mode, hostname, seekSec, playbackOptions);
+  }
+
+  async _openMsProxy(absPath, mode, hostname, seekSec = 0, playbackOptions = null) {
+    const restartGeneration = Number(playbackOptions?.restartGeneration) || 0;
+    if (restartGeneration && restartGeneration !== this._restartSeekGeneration) return false;
     const base = (this._bridgeBase || '').replace(/\/$/, '');
     const sessionId = 'avplay-' + Date.now();
     const sess = `&session=${encodeURIComponent(sessionId)}`;
@@ -441,6 +472,14 @@ export class AVPlayPlayer extends EventTarget {
       destRect: playbackOptions?.destRect || null,
       restartGeneration,
     });
+  }
+
+  _cancelPendingInitialLoad() {
+    if (this._initialLoadTimer) {
+      clearTimeout(this._initialLoadTimer);
+      this._initialLoadTimer = null;
+    }
+    this._pendingInitialLoad = null;
   }
 
   /**
@@ -638,6 +677,7 @@ export class AVPlayPlayer extends EventTarget {
 
   stop(options = null) {
     const preserveRestartSeek = !!options?.preserveRestartSeek;
+    this._cancelPendingInitialLoad();
     // Invalidate any in-flight prepareAsync callback from a prior load() so a
     // late "prepared" success can't flip state back to PLAY after we've stopped.
     this._loadSeq = (this._loadSeq || 0) + 1;
@@ -703,6 +743,26 @@ export class AVPlayPlayer extends EventTarget {
       }
       console.debug(`[AVPlay] Live-edge clamp: target ${ms}ms → safeEnd ${this._ngLiveSafeSeekEndMs}ms`);
       ms = this._ngLiveSafeSeekEndMs;
+    }
+
+    if (this._pendingInitialLoad) {
+      const pending = this._pendingInitialLoad;
+      this._cancelPendingInitialLoad();
+      this._positionMs = ms;
+      this._lastRenderedMediaTimeMs = ms;
+      this._buffering = true;
+      console.log(`[AVPlay] folding initial seek ${ms}ms into first msproxy open`);
+      this._openMsProxy(
+        pending.absPath,
+        pending.mode,
+        pending.hostname,
+        ms / 1000,
+        pending.playbackOptions
+      ).catch((e) => this._emitPlaybackFailure('AVPLAY_INITIAL_SEEK_ERROR', {
+        mode: 'avplay',
+        message: e && e.message,
+      }));
+      return;
     }
 
     // /msproxy and bridge /transcode responses are forward-only HTTP streams.

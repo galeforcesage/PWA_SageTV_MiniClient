@@ -293,7 +293,7 @@ public class TranscodeServlet extends HttpServlet {
      * @param isLive true if the file is actively growing (recording in progress);
      *               ffmpeg reads from pipe:0 instead of the file directly.
      */
-    private List<String> buildArgs(String filePath, double seekSec, HwAccel accel, boolean isLive) {
+    List<String> buildArgs(String filePath, double seekSec, HwAccel accel, boolean isLive) {
         List<String> args = new ArrayList<>();
         args.add(ffmpegPath);
 
@@ -305,16 +305,23 @@ public class TranscodeServlet extends HttpServlet {
         // slightly different points (no accurate seek) -> A/V drift. Coarse
         // input -ss lands a few seconds BEFORE the target keyframe (fast); a
         // fine OUTPUT -ss after -i then trims to the exact point with A/V
-        // aligned. Live uses the feeder thread for positioning, no -ss.
+        // aligned. A growing recording is fed through pipe:0 and cannot use an
+        // input seek, so apply the full requested offset as an output seek. It
+        // must never silently start at the beginning while the client reports
+        // the requested resume offset.
         final double PREROLL_SEC = 10.0;
-        boolean doSeek = !isLive && seekSec > 0;
+        boolean doSeek = seekSec > 0;
         double fineSs = 0;
         if (doSeek) {
-            double coarseSs = Math.max(0, seekSec - PREROLL_SEC);
-            fineSs = seekSec - coarseSs;
-            if (coarseSs > 0) {
-                args.add("-ss");
-                args.add(String.valueOf(coarseSs));
+            if (isLive) {
+                fineSs = seekSec;
+            } else {
+                double coarseSs = Math.max(0, seekSec - PREROLL_SEC);
+                fineSs = seekSec - coarseSs;
+                if (coarseSs > 0) {
+                    args.add("-ss");
+                    args.add(String.valueOf(coarseSs));
+                }
             }
         }
 
