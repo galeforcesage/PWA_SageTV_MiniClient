@@ -104,6 +104,10 @@ when native HLS support is present; Blink, Gecko, and Tizen advertisements are
 unchanged.
 Tizen normally direct-plays on LAN; if it must use an `xcode:*` proxy mode, the
 client supplies a 50 Mbps cold-start seed. Direct and remux modes carry no seed.
+Initial zero-offset AVPlay xcode opens wait up to one second for Sage's initial
+seek, folding it into the first `/msproxy` request instead of starting competing
+zero-offset and seeked producers. Without a seek, playback opens once at zero
+when that grace expires. Direct/remux opens and seek restarts do not wait.
 
 Notes:
 - Static direct files retain RFC 7233 byte ranges backed by `READ` offsets.
