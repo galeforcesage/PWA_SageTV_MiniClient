@@ -508,6 +508,8 @@ final class MediaServerSessionCoordinator {
     }
 
     private boolean evictStaleConsumersLocked() {
+        if (consumers.size() <= 1) return false;
+
         long now = System.currentTimeMillis();
         boolean evicted = false;
         for (Consumer consumer : new ArrayList<>(consumers)) {

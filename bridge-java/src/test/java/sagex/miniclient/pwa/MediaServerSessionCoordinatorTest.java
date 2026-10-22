@@ -160,19 +160,26 @@ class MediaServerSessionCoordinatorTest {
     }
 
     @Test
-    void staleConsumerIsEvictedBeforeReplayRingFills() throws Exception {
+    void solePendingConsumerBackpressuresProducerPastStaleTimeout() throws Exception {
         FakeMediaServer mediaServer = fakeServer(4_096);
-        mediaServer.growing = true;
         MediaServerSessionCoordinator coordinator = coordinator(
-            mediaServer, "session-proactive-eviction", 0,
-            settings(8_192, 500, 30, 64, 40), false);
+            mediaServer, "session-sole-backpressure", 0,
+            settings(128, 500, 25, 64));
         coordinator.start();
         coordinator.awaitReady();
 
-        try (MediaServerSessionCoordinator.Consumer stale = coordinator.attach()) {
-            byte[] pending = stale.next(64);
+        try (MediaServerSessionCoordinator.Consumer consumer = coordinator.attach()) {
+            byte[] first = consumer.next(64);
             Thread.sleep(100);
-            assertThrows(IOException.class, () -> stale.commit(pending.length, 100));
+            consumer.commit(first.length, 100);
+
+            byte[] second = consumer.next(64);
+            consumer.commit(second.length, 0);
+
+            ByteArrayOutputStream received = new ByteArrayOutputStream();
+            received.write(first);
+            received.write(second);
+            assertArrayEquals(mediaServer.slice(0, 128), received.toByteArray());
         }
     }
 
