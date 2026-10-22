@@ -38,7 +38,9 @@ import { PlayerState } from '../protocol/constants.js';
 const PREPARE_WATCHDOG_MS = 25000;
 const PLAYBACK_DIAGNOSTIC_INTERVAL_MS = 5000;
 const RESUME_RESTART_AFTER_PAUSE_MS = 5000;
-const INITIAL_SEEK_GRACE_MS = 250;
+// Sage's initial seek can arrive after 250ms; avoid starting a competing xcode
+// producer at zero while still bounding startup latency for true-zero playback.
+const INITIAL_SEEK_GRACE_MS = 1000;
 
 export class AVPlayPlayer extends EventTarget {
   /**

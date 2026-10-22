@@ -444,17 +444,97 @@ test('initial xcode resume seek is folded into the first msproxy open', async ()
   assert.equal(player._initialLoadTimer, null);
 });
 
-test('Tizen direct msproxy playback does not send a transcode bandwidth seed', async () => {
+test('initial xcode seek after 250ms cancels the zero-offset producer', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const player = Object.create(AVPlayPlayer.prototype);
+  Object.assign(player, {
+    _avplay: {},
+    _bridgeBase: 'http://bridge',
+    _restartSeekGeneration: 0,
+    _initialLoadTimer: null,
+    _pendingInitialLoad: null,
+  });
+  const loads = [];
+  player.load = async (...args) => { loads.push(args); return true; };
+
+  await player.loadMsProxy(
+    '/BestMedicine.mpg',
+    'xcode:audioonly:enhance;tier=2160p',
+    'server'
+  );
+  t.mock.timers.tick(333);
+  assert.equal(loads.length, 0);
+
+  player.seek(7_210);
+  assert.equal(loads.length, 1);
+  const url = new URL(loads[0][3]);
+  assert.equal(url.pathname, '/msproxy');
+  assert.equal(url.searchParams.get('seek'), '7.21');
+  assert.equal(loads[0][9].offsetMs, 7_210);
+  assert.equal(player._pendingInitialLoad, null);
+  assert.equal(player._initialLoadTimer, null);
+
+  t.mock.timers.tick(2_000);
+  assert.equal(loads.length, 1);
+});
+
+test('initial xcode true-zero playback opens exactly once after one second', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const player = Object.create(AVPlayPlayer.prototype);
+  Object.assign(player, {
+    _bridgeBase: 'http://bridge',
+    _restartSeekGeneration: 0,
+    _initialLoadTimer: null,
+    _pendingInitialLoad: null,
+  });
+  const loads = [];
+  player.load = async (...args) => { loads.push(args); return true; };
+
+  await player.loadMsProxy('/recording.mpg', 'xcode:browserhd', 'server');
+  t.mock.timers.tick(999);
+  assert.equal(loads.length, 0);
+  t.mock.timers.tick(1);
+  assert.equal(loads.length, 1);
+  assert.equal(new URL(loads[0][3]).searchParams.has('seek'), false);
+  assert.equal(loads[0][9].offsetMs, 0);
+  assert.equal(player._pendingInitialLoad, null);
+  assert.equal(player._initialLoadTimer, null);
+
+  t.mock.timers.tick(2_000);
+  assert.equal(loads.length, 1);
+});
+
+test('zero-offset xcode restart bypasses initial seek grace', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const player = Object.create(AVPlayPlayer.prototype);
   player._bridgeBase = 'http://bridge';
+  player._restartSeekGeneration = 8;
+  const loads = [];
+  player.load = async (...args) => { loads.push(args); return true; };
 
-  let loadArgs;
-  player.load = (...received) => {
-    loadArgs = received;
-    return Promise.resolve();
-  };
+  await player.loadMsProxy(
+    '/recording.mpg', 'xcode:browserhd', 'server', 0, { restartGeneration: 8 }
+  );
 
-  await player.loadMsProxy('/recording.mpg', 'direct', 'server');
-
-  assert.doesNotMatch(loadArgs[3], /[?&]bw=/);
+  assert.equal(loads.length, 1);
+  assert.equal(loads[0][9].restartGeneration, 8);
+  t.mock.timers.tick(2_000);
+  assert.equal(loads.length, 1);
 });
+
+for (const mode of ['direct', 'remux:ts']) {
+  test(`Tizen ${mode} msproxy opens immediately without a transcode bandwidth seed`, async () => {
+    const player = Object.create(AVPlayPlayer.prototype);
+    player._bridgeBase = 'http://bridge';
+
+    let loadArgs;
+    player.load = (...received) => {
+      loadArgs = received;
+      return Promise.resolve();
+    };
+
+    await player.loadMsProxy('/recording.mpg', mode, 'server');
+
+    assert.doesNotMatch(loadArgs[3], /[?&]bw=/);
+  });
+}
